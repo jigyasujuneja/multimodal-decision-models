@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multimodal-decision-models"
+version = "0.1.0"
+description = "Backend-agnostic calibrated multimodal decision models: pre-gated Bayesian PoE prior fusion, co-denoised and causal evidence slots, catalog-scale shortlist routing, Set-of-Marks UI navigation, transitive triangle-consistency entity resolution, and multi-slot lock arbiters across masked diffusion and autoregressive logprob backends."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+  {name = "Jigyasu Juneja"}
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
