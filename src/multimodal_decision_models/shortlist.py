@@ -14,17 +14,119 @@
 
 """Catalog-Scale Wide-Option Shortlist Routing and CSLS Hubness Correction.
 
-Reduces high-cardinality classification (K > 26 up to 10,000+ classes) from multi-pass bracket
-tournaments (ceil(K / 20) + 1 passes) to a single calibrated forward pass over the top-M
-shortlisted candidates plus an out-of-distribution catch-all option ("none_of_the_above").
+Reduces high-cardinality classification (K > 26) from multi-pass bracket tournaments
+(ceil(K / 20) + 1 passes) to a single calibrated forward pass over the top-M shortlisted
+candidates (default M = 20, tested up to K = 151) plus an out-of-distribution
+catch-all option ("none_of_the_above").
 """
 
 from __future__ import annotations
 
 import math
+import re
+from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .types import MAX_OPTIONS_PER_SLOT, DecisionQuestion
+
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "this",
+        "to",
+        "user",
+        "when",
+        "with",
+    }
+)
+
+_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
+_NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
+@dataclass(frozen=True)
+class ShortlistConfig:
+    """Configuration for single-pass wide-option shortlist reduction."""
+
+    max_candidates: int = 20
+    catch_all_key: str = "none_of_the_above"
+    contrastive_tags: bool = True
+
+
+def split_identifier_tokens(text: str) -> list[str]:
+    """Split snake_case, camelCase, and prose text into lowercase informative tokens."""
+    expanded = _CAMEL_RE.sub(r"\1 \2", text)
+    raw_parts = _NON_ALNUM_RE.split(expanded.lower())
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in raw_parts:
+        if len(part) < 2 or part in _STOPWORDS or part in seen:
+            continue
+        seen.add(part)
+        out.append(part)
+    return out
+
+
+def build_contrastive_criteria(
+    criteria: Mapping[str, str],
+    selected_keys: Sequence[str],
+    catch_all_key: str = "none_of_the_above",
+    max_tags: int = 2,
+) -> dict[str, str]:
+    """Append sibling-unique [distinguishing: ...] cues to shortlisted option descriptions.
+
+    Matches Go's BuildContrastiveCriteria: extracts tokens present in option k's key or
+    description that appear fewest times across the other shortlisted siblings.
+    """
+    non_catch = [k for k in selected_keys if k != catch_all_key]
+    token_sets: dict[str, list[str]] = {}
+    doc_freq: dict[str, int] = {}
+    for k in non_catch:
+        toks = split_identifier_tokens(f"{k} {criteria.get(k, '')}")
+        token_sets[k] = toks
+        for tok in toks:
+            doc_freq[tok] = doc_freq.get(tok, 0) + 1
+
+    out: dict[str, str] = {}
+    for k in selected_keys:
+        base_desc = criteria.get(k, k)
+        if k == catch_all_key or len(non_catch) <= 1 or max_tags <= 0:
+            out[k] = base_desc
+            continue
+        toks = token_sets.get(k, [])
+        unique = [t for t in toks if doc_freq.get(t, 0) == 1]
+        if not unique:
+            # Fall back to rarest tokens among siblings (< half of shortlisted options)
+            half = max(2, len(non_catch) // 2 + 1)
+            unique = sorted(
+                (t for t in toks if doc_freq.get(t, 0) < half),
+                key=lambda t: (doc_freq.get(t, 0), toks.index(t)),
+            )
+        tags = unique[:max_tags]
+        if tags:
+            out[k] = f"{base_desc} [distinguishing: {', '.join(tags)}]"
+        else:
+            out[k] = base_desc
+    return out
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -59,9 +161,10 @@ def csls_hubness_scores(
 def shortlist_wide_question(
     question: DecisionQuestion,
     scores: Mapping[str, float],
-    top_k: int = 6,
+    top_k: int = 20,
     catch_all_key: str = "none_of_the_above",
     pairwise_diff: bool = True,
+    contrastive_mode: str = "sibling_unique",
 ) -> DecisionQuestion:
     """Reduce a wide-option question (K > 26) to a single-pass top-M shortlist with catch-all.
 
@@ -73,38 +176,54 @@ def shortlist_wide_question(
     if len(keys) <= MAX_OPTIONS_PER_SLOT:
         return question
     if top_k <= 0 or top_k >= MAX_OPTIONS_PER_SLOT:
-        top_k = 6
+        top_k = 20
 
+    non_catch = [k for k in keys if k != catch_all_key]
+    pos_map = {k: i for i, k in enumerate(non_catch)}
     ranked = sorted(
-        keys,
-        key=lambda k: (float(scores.get(k, float("-inf"))), -keys.index(k)),
+        non_catch,
+        key=lambda k: (float(scores.get(k, float("-inf"))), -pos_map[k]),
         reverse=True,
     )
-    selected = ranked[:top_k]
 
-    if catch_all_key and catch_all_key in question.criteria and catch_all_key not in selected:
-        selected = selected[: max(1, top_k - 1)] + [catch_all_key]
+    reserve_catch = bool(catch_all_key)
+    budget = min(len(ranked), max(1, min(top_k, MAX_OPTIONS_PER_SLOT - (1 if reserve_catch else 0))))
+    selected = list(ranked[:budget])
+    if reserve_catch and catch_all_key not in selected and len(selected) < MAX_OPTIONS_PER_SLOT:
+        selected.append(catch_all_key)
 
-    new_criteria: dict[str, str] = {}
-    for idx, k in enumerate(selected):
-        base_desc = question.criteria.get(k, k)
-        if pairwise_diff and k != catch_all_key and len(selected) > 1:
-            rival = selected[1] if idx == 0 else selected[0]
-            rival_desc = question.criteria.get(rival, rival)
-            new_criteria[k] = f"{base_desc} (distinguish from {rival}: {rival_desc})"
+    base_criteria: dict[str, str] = {}
+    for k in selected:
+        if k == catch_all_key and k not in question.criteria:
+            base_criteria[k] = "None of the shortlisted candidates match; escalate or abstain"
         else:
-            new_criteria[k] = base_desc
+            base_criteria[k] = question.criteria.get(k, k)
 
-    if catch_all_key and catch_all_key not in new_criteria and len(new_criteria) < MAX_OPTIONS_PER_SLOT:
-        new_criteria[catch_all_key] = question.criteria.get(
-            catch_all_key,
-            "None of the shortlisted candidates match; escalate or abstain",
+    if not pairwise_diff:
+        new_criteria = base_criteria
+    elif contrastive_mode == "rival_pair":
+        new_criteria = {}
+        for idx, k in enumerate(selected):
+            base_desc = base_criteria[k]
+            if k != catch_all_key and len(selected) > 1:
+                rival = selected[1] if idx == 0 else selected[0]
+                rival_desc = base_criteria.get(rival, rival)
+                new_criteria[k] = f"{base_desc} (distinguish from {rival}: {rival_desc})"
+            else:
+                new_criteria[k] = base_desc
+    else:
+        new_criteria = build_contrastive_criteria(
+            base_criteria,
+            selected,
+            catch_all_key=catch_all_key,
         )
-        selected = list(selected) + [catch_all_key]
 
     return DecisionQuestion(
         type=question.type,
         instructions=question.instructions,
         criteria=new_criteria,
         order=list(selected),
+        prior_logits={k: question.prior_logits[k] for k in selected if k in question.prior_logits},
+        evidence_prompt=question.evidence_prompt,
+        evidence_criteria=dict(question.evidence_criteria),
     )

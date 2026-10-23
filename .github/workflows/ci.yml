@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "feat/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Run Python unit tests
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l ./pkg)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted Go files: $unformatted"
+            exit 1
+          fi
+
+      - name: Run Go unit tests with race detector
+        run: go test -race -v ./pkg/...
+
+      - name: Public hygiene check
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(".")
+          parts = ["googlers" + r"\.com", "corp" + r"\.google\.com", "decision" + "-lab", "/usr/local/" + "google"]
+          banned = re.compile("(" + "|".join(parts) + ")", re.I)
+          hits = []
+          for p in root.rglob("*"):
+              if ".git" in p.parts or "__pycache__" in p.parts or p.is_dir():
+                  continue
+              try:
+                  txt = p.read_text(encoding="utf-8")
+              except Exception:
+                  continue
+              for idx, line in enumerate(txt.splitlines(), 1):
+                  if banned.search(line):
+                      hits.append(f"{p}:{idx}: {line.strip()}")
+          if hits:
+              print("Blocked internal references found:\n" + "\n".join(hits))
+              sys.exit(1)
+          print("Hygiene check clean: 0 blocked references.")
+          PY

@@ -13,11 +13,12 @@
 // limitations under the License.
 
 // Package mdm provides standalone Go reference primitives for calibrated multimodal decision models:
-// pre-gated log-linear prior fusion, dense-prior wide-option shortlisting, Set-of-Marks spatial geometry,
-// and transitive triangle-consistency checking.
+// pre-gated log-linear prior fusion, dense-prior wide-option shortlisting with sibling-unique contrastive tags,
+// hierarchical semantic taxonomy trie decoding, Set-of-Marks spatial geometry, and transitive triangle-consistency checking.
 package mdm
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -69,7 +70,7 @@ func NormalizeAndScale(raw map[string]float64, optKeys []string, tempScale float
 }
 
 // FusePriorWithGate computes raw normalized hesitation before applying log-linear prior fusion
-// according to gateMode ("confident", "hesitant", or "proportional").
+// according to gateMode ("always", "confident", "hesitant", "proportional", or "off").
 func FusePriorWithGate(
 	rawProbs map[string]float64,
 	priorLogits map[string]float64,
@@ -81,12 +82,14 @@ func FusePriorWithGate(
 ) (probs map[string]float64, winner string, normH, rawNormH float64, fused bool) {
 	baseProbs, baseWinner, _, baseNormH := NormalizeAndScale(rawProbs, optKeys, tempScale)
 	rawNormH = baseNormH
-	if len(priorLogits) == 0 || priorWeight <= 0 || len(optKeys) <= 1 {
+	if gateMode == "off" || len(priorLogits) == 0 || priorWeight <= 0 || len(optKeys) <= 1 {
 		return baseProbs, baseWinner, baseNormH, rawNormH, false
 	}
 
 	effWeight := priorWeight
 	switch gateMode {
+	case "always":
+		// Always fuse priorLogits while preserving pre-fusion rawNormH for cascade gating.
 	case "", "confident":
 		if hesitationGate > 0 && rawNormH >= hesitationGate {
 			return baseProbs, baseWinner, baseNormH, rawNormH, false
@@ -120,14 +123,14 @@ func FusePriorWithGate(
 	return fusedProbs, fusedWinner, fusedNormH, rawNormH, true
 }
 
-// TopKFromPriorLogits selects up to topK highest-scoring options from priorLogits while preserving
-// any catchAllKey (if present in criteria) within MaxOptionsPerSlot. Returns nil when priorLogits is empty.
+// TopKFromPriorLogits selects up to topK highest-scoring options from priorLogits (default M=20)
+// while preserving any catchAllKey (if present in criteria) within MaxOptionsPerSlot. Returns nil when priorLogits is empty.
 func TopKFromPriorLogits(criteria map[string]string, priorLogits map[string]float64, topK int, catchAllKey string) []string {
 	if len(priorLogits) == 0 {
 		return nil
 	}
 	if topK <= 0 || topK > MaxOptionsPerSlot {
-		topK = 15
+		topK = 20
 	}
 	keys := make([]string, 0, len(criteria))
 	for k := range criteria {
@@ -155,6 +158,170 @@ func TopKFromPriorLogits(criteria map[string]string, priorLogits map[string]floa
 		out = append(out, catchAllKey)
 	}
 	return out
+}
+
+var (
+	reCamelSplit = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+	reNonAlnum   = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+	mdmStopwords = map[string]bool{
+		"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
+		"be": true, "by": true, "for": true, "from": true, "in": true, "into": true,
+		"is": true, "it": true, "of": true, "on": true, "or": true, "that": true,
+		"the": true, "their": true, "this": true, "to": true, "user": true, "when": true, "with": true,
+	}
+)
+
+func splitIdentifierTokens(s string) []string {
+	expanded := reCamelSplit.ReplaceAllString(s, "$1 $2")
+	parts := reNonAlnum.Split(strings.ToLower(expanded), -1)
+	seen := make(map[string]bool, len(parts))
+	var out []string
+	for _, p := range parts {
+		if len(p) < 2 || mdmStopwords[p] || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// BuildContrastiveCriteria appends up to maxTags sibling-unique "[distinguishing: ...]" cues
+// to shortlisted option descriptions so near-neighbor options are easier to separate in 1 pass.
+func BuildContrastiveCriteria(criteria map[string]string, selectedKeys []string, catchAllKey string, maxTags int) map[string]string {
+	if maxTags <= 0 {
+		maxTags = 2
+	}
+	var nonCatch []string
+	for _, k := range selectedKeys {
+		if k != catchAllKey {
+			nonCatch = append(nonCatch, k)
+		}
+	}
+	tokSets := make(map[string][]string, len(nonCatch))
+	docFreq := make(map[string]int)
+	for _, k := range nonCatch {
+		toks := splitIdentifierTokens(k + " " + criteria[k])
+		tokSets[k] = toks
+		for _, tok := range toks {
+			docFreq[tok]++
+		}
+	}
+	out := make(map[string]string, len(selectedKeys))
+	for _, k := range selectedKeys {
+		base := criteria[k]
+		if base == "" {
+			base = k
+		}
+		if k == catchAllKey || len(nonCatch) <= 1 {
+			out[k] = base
+			continue
+		}
+		toks := tokSets[k]
+		var unique []string
+		for _, t := range toks {
+			if docFreq[t] == 1 {
+				unique = append(unique, t)
+			}
+		}
+		if len(unique) == 0 {
+			half := len(nonCatch)/2 + 1
+			if half < 2 {
+				half = 2
+			}
+			for _, t := range toks {
+				if docFreq[t] < half {
+					unique = append(unique, t)
+				}
+			}
+			sort.SliceStable(unique, func(i, j int) bool {
+				return docFreq[unique[i]] < docFreq[unique[j]]
+			})
+		}
+		if len(unique) > maxTags {
+			unique = unique[:maxTags]
+		}
+		if len(unique) > 0 {
+			out[k] = fmt.Sprintf("%s [distinguishing: %s]", base, strings.Join(unique, ", "))
+		} else {
+			out[k] = base
+		}
+	}
+	return out
+}
+
+// TaxonomyLeaf maps a leaf option key to its (CoarseKey, FineKey) coordinates in a 2-level taxonomy trie.
+type TaxonomyLeaf struct {
+	LeafKey   string
+	CoarseKey string
+	FineKey   string
+}
+
+// DecodeTaxonomyTrie computes exact joint leaf probabilities strictly over valid root-to-leaf paths
+// via s(e|x) = log P_coarse(c_1(e)|x) + log P_fine(c_2(e)|x), eliminating invalid cross-slot combinations.
+func DecodeTaxonomyTrie(coarseProbs, fineProbs map[string]float64, leaves []TaxonomyLeaf, catchAllKey string) (map[string]float64, string) {
+	if len(leaves) == 0 {
+		return map[string]float64{}, ""
+	}
+	const eps = 1e-12
+	cTot := 0.0
+	for _, v := range coarseProbs {
+		if v > 0 {
+			cTot += v
+		}
+	}
+	if cTot <= 0 {
+		cTot = 1.0
+	}
+	fTot := 0.0
+	for _, v := range fineProbs {
+		if v > 0 {
+			fTot += v
+		}
+	}
+	if fTot <= 0 {
+		fTot = 1.0
+	}
+
+	logScores := make(map[string]float64, len(leaves))
+	keys := make([]string, 0, len(leaves))
+	maxLP := math.Inf(-1)
+	for _, leaf := range leaves {
+		keys = append(keys, leaf.LeafKey)
+		pc := math.Max(eps, math.Max(0, coarseProbs[leaf.CoarseKey])/cTot)
+		pf := math.Max(eps, math.Max(0, fineProbs[leaf.FineKey])/fTot)
+		var lp float64
+		if catchAllKey != "" && leaf.LeafKey == catchAllKey {
+			lp = 0.5 * (math.Log(pc) + math.Log(pf))
+		} else {
+			lp = math.Log(pc) + math.Log(pf)
+		}
+		logScores[leaf.LeafKey] = lp
+		if lp > maxLP {
+			maxLP = lp
+		}
+	}
+	sort.Strings(keys)
+
+	exps := make(map[string]float64, len(keys))
+	denom := 0.0
+	for _, k := range keys {
+		ev := math.Exp(logScores[k] - maxLP)
+		exps[k] = ev
+		denom += ev
+	}
+	probs := make(map[string]float64, len(keys))
+	winner := keys[0]
+	bestP := -1.0
+	for _, k := range keys {
+		p := exps[k] / denom
+		probs[k] = p
+		if p > bestP {
+			bestP = p
+			winner = k
+		}
+	}
+	return probs, winner
 }
 
 // CandidateMark represents an interactive UI element with [y_min, x_min, y_max, x_max] coordinates in [0, 100].

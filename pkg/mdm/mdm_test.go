@@ -3,6 +3,7 @@ package mdm
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -22,14 +23,26 @@ func TestFusePriorWithGateModes(t *testing.T) {
 	if !fusedHes || winHes != "opt_b" || math.Abs(rawH1-rawH2) > 1e-12 {
 		t.Fatalf("expected hesitant mode to flip tie to opt_b and preserve rawH: fused=%v win=%s", fusedHes, winHes)
 	}
+
+	// Always mode fuses regardless of hesitation while still preserving rawNormH.
+	_, winAlw, _, rawH3, fusedAlw := FusePriorWithGate(uncertain, prior, keys, 1.0, 0.35, 0.16, "always")
+	if !fusedAlw || winAlw != "opt_b" || math.Abs(rawH1-rawH3) > 1e-12 {
+		t.Fatalf("expected always mode to fuse and preserve rawH: fused=%v win=%s", fusedAlw, winAlw)
+	}
+
+	// Off mode never fuses.
+	_, winOff, _, _, fusedOff := FusePriorWithGate(uncertain, prior, keys, 1.0, 0.35, 0.16, "off")
+	if fusedOff || winOff != "opt_a" {
+		t.Fatalf("expected off mode to leave winner unchanged: fused=%v win=%s", fusedOff, winOff)
+	}
 }
 
-func TestShortlistSomAndTriangles(t *testing.T) {
+func TestShortlistContrastiveTrieSomAndTriangles(t *testing.T) {
 	crit := make(map[string]string, 40)
 	priors := make(map[string]float64, 40)
 	for i := 0; i < 39; i++ {
 		k := fmt.Sprintf("sku_%02d", i)
-		crit[k] = fmt.Sprintf("Item %d", i)
+		crit[k] = fmt.Sprintf("Sparkling Water Variant %d", i)
 		priors[k] = float64(i)
 	}
 	crit["none_of_the_above"] = "None match"
@@ -39,6 +52,36 @@ func TestShortlistSomAndTriangles(t *testing.T) {
 	short := TopKFromPriorLogits(crit, priors, 5, "none_of_the_above")
 	if len(short) != 6 || short[0] != "sku_38" || short[5] != "none_of_the_above" {
 		t.Fatalf("unexpected shortlist: %v", short)
+	}
+
+	cues := BuildContrastiveCriteria(
+		map[string]string{
+			"card_arrival":      "Track physical card delivery",
+			"card_linking":      "Link existing card to app",
+			"none_of_the_above": "None match",
+		},
+		[]string{"card_arrival", "card_linking", "none_of_the_above"},
+		"none_of_the_above",
+		2,
+	)
+	if !strings.Contains(cues["card_arrival"], "[distinguishing: arrival, track]") {
+		t.Fatalf("expected sibling-unique distinguishing cue on card_arrival, got %q", cues["card_arrival"])
+	}
+	if strings.Contains(cues["none_of_the_above"], "[distinguishing:") {
+		t.Fatalf("catch-all option should not get contrastive cue: %q", cues["none_of_the_above"])
+	}
+
+	// Trie-constrained joint decode eliminates invalid (c1=dom_a, c2=role_2) pair.
+	leaves := []TaxonomyLeaf{
+		{LeafKey: "dom_a_role_1", CoarseKey: "dom_a", FineKey: "role_1"},
+		{LeafKey: "dom_b_role_2", CoarseKey: "dom_b", FineKey: "role_2"},
+		{LeafKey: "oos", CoarseKey: "oos", FineKey: "oos"},
+	}
+	coarse := map[string]float64{"dom_a": 0.55, "dom_b": 0.40, "oos": 0.05}
+	fine := map[string]float64{"role_1": 0.25, "role_2": 0.70, "oos": 0.05}
+	leafProbs, trieWin := DecodeTaxonomyTrie(coarse, fine, leaves, "oos")
+	if trieWin != "dom_b_role_2" || leafProbs["dom_b_role_2"] <= leafProbs["dom_a_role_1"] {
+		t.Fatalf("expected valid path dom_b_role_2 (0.40*0.70=0.28) > dom_a_role_1 (0.55*0.25=0.1375), got win=%s probs=%v", trieWin, leafProbs)
 	}
 
 	marks := []CandidateMark{

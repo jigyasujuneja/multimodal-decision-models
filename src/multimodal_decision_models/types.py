@@ -33,6 +33,9 @@ class DecisionQuestion:
     criteria: dict[str, str] = field(default_factory=dict)
     levels: list[str] = field(default_factory=list)
     order: list[str] = field(default_factory=list)
+    prior_logits: dict[str, float] = field(default_factory=dict)
+    evidence_prompt: str = ""
+    evidence_criteria: dict[str, str] = field(default_factory=dict)
 
     def option_keys(self) -> list[str]:
         if self.type == "score":
@@ -55,6 +58,8 @@ class SlotReadout:
     escalated: bool = False
     guard_applied: str = ""
     backend_name: str = ""
+    evidence: str = ""
+    passes_used: int = 1
 
 
 @dataclass

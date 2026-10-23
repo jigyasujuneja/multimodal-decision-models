@@ -36,10 +36,20 @@ from .consistency import (
     parse_pack_multiplier,
     validate_pack_quantity_consistency,
 )
+from .hierarchy import (
+    HierarchicalDecisionRouter,
+    TaxonomyLeaf,
+    TaxonomyTrie,
+    build_prefix_taxonomy_trie,
+    trie_constrained_joint_decode,
+)
 from .shortlist import (
+    ShortlistConfig,
+    build_contrastive_criteria,
     cosine_similarity,
     csls_hubness_scores,
     shortlist_wide_question,
+    split_identifier_tokens,
 )
 from .som_navigator import (
     assign_box_to_grid_cell,
@@ -66,6 +76,8 @@ from .types import (
     TriangleContradiction,
 )
 
+__version__ = "0.2.0"
+
 __all__ = [
     "DEFAULT_EVIDENCE_CRITERIA",
     "DEFAULT_HESITATION_THRESHOLD",
@@ -77,14 +89,19 @@ __all__ = [
     "DecisionQuestion",
     "DecisionResult",
     "DgemSystemOneBackend",
+    "HierarchicalDecisionRouter",
     "MockCallableBackend",
     "OpenAILogprobBackend",
     "PairwiseEdge",
+    "ShortlistConfig",
     "SlotReadout",
     "SwarmAgentProposal",
     "SwarmLockDecision",
+    "TaxonomyLeaf",
+    "TaxonomyTrie",
     "TriangleContradiction",
     "VertexGeminiBackend",
+    "__version__",
     "apply_layer5_deterministic_guards",
     "arbitrate_swarm_locks",
     "assign_box_to_grid_cell",
@@ -92,6 +109,8 @@ __all__ = [
     "box_area",
     "box_center",
     "box_iou",
+    "build_contrastive_criteria",
+    "build_prefix_taxonomy_trie",
     "build_set_of_marks_questions",
     "check_transitive_triangles",
     "cosine_similarity",
@@ -104,6 +123,8 @@ __all__ = [
     "pre_gated_bayesian_poe_fusion",
     "select_containing_or_nearest_mark",
     "shortlist_wide_question",
+    "split_identifier_tokens",
     "stage2a_fast_exit_gate",
+    "trie_constrained_joint_decode",
     "validate_pack_quantity_consistency",
 ]

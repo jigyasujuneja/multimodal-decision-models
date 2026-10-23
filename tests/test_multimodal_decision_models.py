@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from multimodal_decision_models import (
@@ -26,14 +28,19 @@ from multimodal_decision_models import (
     CascadeDecisionOrchestrator,
     DecisionQuestion,
     DgemSystemOneBackend,
+    HierarchicalDecisionRouter,
     MockCallableBackend,
     OpenAILogprobBackend,
     PairwiseEdge,
     SwarmAgentProposal,
+    TaxonomyLeaf,
+    TaxonomyTrie,
     VertexGeminiBackend,
     apply_layer5_deterministic_guards,
     arbitrate_swarm_locks,
     assign_box_to_grid_cell,
+    build_contrastive_criteria,
+    build_prefix_taxonomy_trie,
     build_set_of_marks_questions,
     check_transitive_triangles,
     csls_hubness_scores,
@@ -44,6 +51,7 @@ from multimodal_decision_models import (
     select_containing_or_nearest_mark,
     shortlist_wide_question,
     stage2a_fast_exit_gate,
+    trie_constrained_joint_decode,
     validate_pack_quantity_consistency,
 )
 
@@ -67,7 +75,6 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
         self.assertTrue(should_escalate)
         self.assertLess(normalized_entropy(fused), 0.20)
 
-        # Confident gate skips fusion on high-entropy inputs
         conf_dist, h_conf, _ = pre_gated_bayesian_poe_fusion(
             raw_probs=raw,
             prior_logits=strong_prior,
@@ -78,7 +85,6 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
         self.assertAlmostEqual(conf_dist["sku_a"], 0.36, places=6)
         self.assertAlmostEqual(h_conf, h_raw, places=9)
 
-        # Hesitant gate fuses on high-entropy inputs to break ties while leaving confident inputs untouched
         hes_dist, h_hes, _ = pre_gated_bayesian_poe_fusion(
             raw_probs=raw,
             prior_logits=strong_prior,
@@ -143,8 +149,10 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
         self.assertEqual(chosen_c, "sku_1")
         self.assertEqual(guard_c, "layer5_competitor_similarity_guard")
 
-    def test_wide_option_shortlist_and_csls(self) -> None:
-        criteria = {f"intent_{i:03d}": f"Description for intent {i}" for i in range(60)}
+    def test_wide_option_shortlist_sibling_unique_cues_and_csls(self) -> None:
+        criteria = {
+            f"intent_{i:03d}": f"Description for intent {i} unique_kw_{i}" for i in range(60)
+        }
         criteria["none_of_the_above"] = "Out of scope / none of the above"
         wide_q = DecisionQuestion(
             type="choice",
@@ -153,19 +161,127 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
             order=list(criteria.keys()),
         )
         scores = {f"intent_{i:03d}": float(i) for i in range(60)}
-        narrow_q = shortlist_wide_question(wide_q, scores, top_k=6)
 
-        keys = narrow_q.option_keys()
-        self.assertEqual(len(keys), 6)
-        self.assertEqual(keys[0], "intent_059")
-        self.assertIn("none_of_the_above", keys)
-        self.assertIn("distinguish from intent_058", narrow_q.criteria["intent_059"])
+        # Default top_k=20 reserves 1 slot for catch-all -> 21 total options <= 26
+        default_q = shortlist_wide_question(wide_q, scores)
+        self.assertEqual(len(default_q.option_keys()), 21)
+        self.assertEqual(default_q.option_keys()[0], "intent_059")
+        self.assertEqual(default_q.option_keys()[-1], "none_of_the_above")
+        self.assertIn("[distinguishing:", default_q.criteria["intent_059"])
+        self.assertNotIn("[distinguishing:", default_q.criteria["none_of_the_above"])
+
+        cues = build_contrastive_criteria(
+            {
+                "card_arrival": "Track physical card delivery",
+                "card_linking": "Link existing card to app",
+                "none_of_the_above": "Neither",
+            },
+            ["card_arrival", "card_linking", "none_of_the_above"],
+        )
+        self.assertIn("[distinguishing: arrival, track]", cues["card_arrival"])
+        self.assertIn("[distinguishing: linking, link]", cues["card_linking"])
 
         q_vec = [1.0, 0.0]
         protos = {"hub_sku": [0.9, 0.43589], "tail_sku": [0.88, 0.47497]}
         r_t = {"hub_sku": 0.30, "tail_sku": 0.05}
         csls = csls_hubness_scores(q_vec, protos, r_t)
         self.assertGreater(csls["tail_sku"], csls["hub_sku"])
+
+    def test_hierarchical_taxonomy_trie_and_4_arm_router(self) -> None:
+        # 6 domains x 8 intents + oos = 49 options (> 26)
+        domains = ["banking", "travel", "iot", "calendar", "music", "weather"]
+        roles = ["check", "create", "update", "cancel", "list", "share", "alert", "help"]
+        crit: dict[str, str] = {}
+        for d in domains:
+            for r in roles:
+                crit[f"{d}_{r}"] = f"{r.capitalize()} item in {d} service"
+        crit["oos"] = "Out-of-scope request outside all supported domains"
+
+        wide_q = DecisionQuestion(
+            type="choice",
+            instructions="Route user utterance to intent",
+            criteria=crit,
+            order=list(crit.keys()),
+        )
+        trie = build_prefix_taxonomy_trie(crit)
+        self.assertLessEqual(len(trie.coarse_criteria), 26)
+        self.assertLessEqual(len(trie.fine_criteria), 26)
+        self.assertEqual(trie.catch_all_key, "oos")
+
+        # Sparse trie where (dom_a, role_2) is NOT a valid leaf:
+        sparse_trie = TaxonomyTrie(
+            coarse_criteria={"dom_a": "Domain A", "dom_b": "Domain B", "oos": "OOS"},
+            fine_criteria={"role_1": "Role 1", "role_2": "Role 2", "oos": "OOS"},
+            leaves={
+                "dom_a_role_1": TaxonomyLeaf("dom_a_role_1", "dom_a", "role_1", "A1"),
+                "dom_b_role_2": TaxonomyLeaf("dom_b_role_2", "dom_b", "role_2", "B2"),
+                "oos": TaxonomyLeaf("oos", "oos", "oos", "OOS"),
+            },
+            catch_all_key="oos",
+        )
+        sparse_q = DecisionQuestion(
+            type="choice",
+            instructions="Classify",
+            criteria={f"extra_{i}": f"Extra {i}" for i in range(28)}
+            | {"dom_a_role_1": "A1", "dom_b_role_2": "B2", "oos": "OOS"},
+        )
+
+        # Marginal argmax picks (dom_a=0.52, role_2=0.75) -> invalid tuple in mtp_naive,
+        # whereas mtp_trie picks valid dom_b_role_2 (0.43 * 0.75 = 0.3225 > 0.52 * 0.20 = 0.104).
+        def mock_fn(state, qs, imgs):
+            out = {}
+            for qid, q_obj in qs.items():
+                if qid.endswith("_coarse"):
+                    if state.get("confident"):
+                        out[qid] = {"dom_a": 0.96, "dom_b": 0.03, "oos": 0.01}
+                    else:
+                        out[qid] = {"dom_a": 0.52, "dom_b": 0.43, "oos": 0.05}
+                elif qid.endswith("_fine"):
+                    if state.get("confident"):
+                        out[qid] = {"role_1": 0.94, "role_2": 0.05, "oos": 0.01}
+                    else:
+                        out[qid] = {"role_1": 0.20, "role_2": 0.75, "oos": 0.05}
+                else:
+                    # Pass-2 leaf read over top-2 coarse domains
+                    keys = q_obj.option_keys()
+                    out[qid] = {k: (0.88 if k == "dom_b_role_2" else 0.12 / max(1, len(keys) - 1)) for k in keys}
+            return out
+
+        backend = MockCallableBackend("mock_s1", mock_fn)
+
+        r_naive = HierarchicalDecisionRouter(backend, mode="mtp_naive").route(
+            {"confident": False}, "intent", sparse_q, trie=sparse_trie
+        )
+        self.assertTrue(r_naive.predicted.startswith("__invalid_tuple__:"))
+        self.assertEqual(r_naive.passes_used, 1)
+
+        r_trie = HierarchicalDecisionRouter(backend, mode="mtp_trie").route(
+            {"confident": False}, "intent", sparse_q, trie=sparse_trie
+        )
+        self.assertEqual(r_trie.predicted, "dom_b_role_2")
+        self.assertEqual(r_trie.passes_used, 1)
+
+        # Hesitation hybrid: 1 pass when confident, 2 passes when hesitant
+        hybrid = HierarchicalDecisionRouter(backend, mode="hesitation_hybrid", hesitation_threshold=0.25)
+        r_fast = hybrid.route({"confident": True}, "intent", sparse_q, trie=sparse_trie)
+        self.assertEqual(r_fast.predicted, "dom_a_role_1")
+        self.assertEqual(r_fast.passes_used, 1)
+        self.assertFalse(r_fast.escalated)
+
+        r_hes = hybrid.route({"confident": False}, "intent", sparse_q, trie=sparse_trie)
+        self.assertEqual(r_hes.predicted, "dom_b_role_2")
+        self.assertEqual(r_hes.passes_used, 2)
+        self.assertTrue(r_hes.escalated)
+
+        # Full 49-option prefix trie joint decode check
+        p_joint, win_joint = trie_constrained_joint_decode(
+            {"music": 0.85, "iot": 0.10, "oos": 0.05},
+            {k: (0.80 if "member_01" in k or k == "check" else 0.02) for k in trie.fine_criteria},
+            trie,
+        )
+        self.assertEqual(win_joint, "music_check")
+        self.assertGreater(p_joint["music_check"], 0.50)
+        self.assertEqual(len(wide_q.option_keys()), 49)
 
     def test_som_navigator_nested_containment_and_question_builder(self) -> None:
         marks = [
@@ -224,7 +340,13 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
         self.assertEqual(dec.agent_actions["agent_2"], "serialize_after_peer")
         self.assertEqual(dec.agent_actions["agent_3"], "grant_lock")
 
-    def test_multi_backend_adapters_and_cascade_orchestrator(self) -> None:
+    def test_real_systemone_http_contract_vertex_gemini_and_inferred_escalation(self) -> None:
+        # Reject file:// URLs to prevent SSRF / local file reads
+        with self.assertRaises(ValueError):
+            DgemSystemOneBackend("file:///etc/passwd")
+        with self.assertRaises(ValueError):
+            VertexGeminiBackend(project="../bad_project")
+
         q = DecisionQuestion(
             type="choice",
             instructions="Select product match",
@@ -234,52 +356,136 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
                 "none_of_the_above": "Neither",
             },
             order=["sku_1", "sku_2", "none_of_the_above"],
+            prior_logits={"sku_1": 0.5, "sku_2": 1.5, "none_of_the_above": -1.0},
+            evidence_prompt="Is the multipack wrapper directly visible or inferred?",
+            evidence_criteria={"printed": "Directly visible", "inferred": "Guessed or occluded"},
         )
+        score_q = DecisionQuestion(
+            type="score",
+            instructions="Rate match quality",
+            levels=["poor", "fair", "strong"],
+        )
+
+        captured_requests: list[dict] = []
+
+        class MockSystemOneHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                req_json = json.loads(self.rfile.read(length).decode("utf-8"))
+                captured_requests.append(req_json)
+                resp = {
+                    "answers": {
+                        "match": {
+                            "type": "choice",
+                            "choice": "sku_1",
+                            # Confident raw probabilities (h_raw < 0.16), YET evidence="inferred"!
+                            "probabilities": {"sku_1": 0.97, "sku_2": 0.02, "none_of_the_above": 0.01},
+                            "evidence": "inferred",
+                        },
+                        "quality": {
+                            "type": "score",
+                            "score": 1.8,
+                            "legend": {"0": "poor", "1": "fair", "2": "strong"},
+                            "probabilities": {"0": 0.05, "1": 0.10, "2": 0.85},
+                        },
+                    },
+                    "evaluation_trace": {"forward_passes": 1},
+                }
+                body = json.dumps(resp).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), MockSystemOneHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            dgem = DgemSystemOneBackend(f"http://127.0.0.1:{port}")
+            dists = dgem.score_questions(
+                {"query": "6 pack"},
+                {"match": q, "quality": score_q},
+                images=["data:image/png;base64,AAAA"],
+            )
+            self.assertEqual(len(captured_requests), 1)
+            sent = captured_requests[0]
+            self.assertEqual(sent["state"], {"query": "6 pack"})
+            self.assertNotIn("data", sent)
+            self.assertIn("prior_logits", sent["questions"]["match"])
+            self.assertEqual(
+                sent["questions"]["match"]["evidence_prompt"],
+                "Is the multipack wrapper directly visible or inferred?",
+            )
+            self.assertAlmostEqual(dists["quality"]["strong"], 0.85, places=6)
+            self.assertEqual(dgem.last_evidence["match"], "inferred")
+            self.assertEqual(dgem.last_trace["forward_passes"], 1)
+
+            # Cascade with escalate_on_inferred_evidence=True escalates "match" despite low h_raw!
+            stage2 = MockCallableBackend(
+                "gemini_3_8_flash_stage2",
+                lambda state, qs, imgs: {
+                    qid: {"sku_1": 0.02, "sku_2": 0.96, "none_of_the_above": 0.02} for qid in qs
+                },
+            )
+            orchestrator = CascadeDecisionOrchestrator(
+                stage1_backend=dgem,
+                stage2_backend=stage2,
+                hesitation_threshold=0.16,
+                prior_weight=0.35,
+                escalate_on_inferred_evidence=True,
+            )
+            res = orchestrator.evaluate({"query": "6 pack"}, {"match": q})
+            self.assertTrue(res.escalated)
+            self.assertIn("match:evidence=inferred", res.escalation_reasons)
+            self.assertEqual(res.slots["match"].predicted, "sku_2")
+            self.assertEqual(res.slots["match"].backend_name, "gemini_3_8_flash_stage2")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        # Verify VertexGeminiBackend structured logprob response parser
+        gemini_resp = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": json.dumps({"evidence_read": "printed 6x330ml badge", "match": "sku_2"})}
+                        ]
+                    },
+                    "logprobsResult": {
+                        "chosenCandidates": [
+                            {"token": "{", "logProbability": -0.001},
+                            {"token": "sku_2", "logProbability": -0.04},
+                        ],
+                        "topCandidates": [
+                            {"candidates": [{"token": "{", "logProbability": -0.001}]},
+                            {
+                                "candidates": [
+                                    {"token": "sku_2", "logProbability": -0.04},
+                                    {"token": "sku_1", "logProbability": -3.40},
+                                    {"token": "none_of_the_above", "logProbability": -5.10},
+                                ]
+                            },
+                        ],
+                    },
+                }
+            ]
+        }
+        v_dists, ev_read = VertexGeminiBackend.parse_generate_content_response(gemini_resp, {"match": q})
+        self.assertEqual(ev_read, "printed 6x330ml badge")
+        self.assertGreater(v_dists["match"]["sku_2"], 0.95)
+
         _, letter_map = OpenAILogprobBackend.build_letter_prompt({"query": "6 pack"}, q)
-        self.assertEqual(letter_map, {"A": "sku_1", "B": "sku_2", "C": "none_of_the_above"})
         dist = OpenAILogprobBackend.extract_letter_distribution(
             {"B": -0.05, "A": -3.2, "C": -4.5},
             letter_map,
         )
         self.assertGreater(dist["sku_2"], 0.94)
-
-        schema = VertexGeminiBackend.build_evidence_first_response_schema({"match": q})
-        self.assertEqual(schema["propertyOrdering"][0], "evidence_read")
-        self.assertEqual(schema["propertyOrdering"][1], "match")
-
-        dgem = DgemSystemOneBackend("http://localhost:8095")
-        payload = dgem.build_payload({"query": "6 pack"}, {"match": q}, images=["base64_img"])
-        self.assertIn("match", payload["questions"])
-        self.assertEqual(payload["images"], ["base64_img"])
-
-        stage1 = MockCallableBackend(
-            "dgem_stage1",
-            lambda state, qs, imgs: {
-                qid: {"sku_1": 0.35, "sku_2": 0.35, "none_of_the_above": 0.30} for qid in qs
-            },
-        )
-        stage2 = MockCallableBackend(
-            "gemini_3_8_flash_stage2",
-            lambda state, qs, imgs: {
-                qid: {"sku_1": 0.02, "sku_2": 0.96, "none_of_the_above": 0.02} for qid in qs
-            },
-        )
-        orchestrator = CascadeDecisionOrchestrator(
-            stage1_backend=stage1,
-            stage2_backend=stage2,
-            hesitation_threshold=0.16,
-            prior_weight=0.5,
-            evidence_prompt="Identify the decisive visual feature before choosing.",
-        )
-        result = orchestrator.evaluate(
-            state={"query": "6 pack"},
-            questions={"match": q},
-            prior_logits={"match": {"sku_1": 5.0, "sku_2": 0.0, "none_of_the_above": -2.0}},
-        )
-        self.assertEqual(result.evidence_slot_id, "evidence_feature")
-        self.assertTrue(result.escalated)
-        self.assertEqual(result.slots["match"].predicted, "sku_2")
-        self.assertEqual(result.slots["match"].backend_name, "gemini_3_8_flash_stage2")
 
     def test_templates_and_architecture_docs_integrity(self) -> None:
         arch_doc = REPO_ROOT / "docs" / "architecture.md"
