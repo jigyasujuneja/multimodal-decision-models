@@ -26,7 +26,62 @@ import (
 	"strings"
 )
 
-const MaxOptionsPerSlot = 26
+const (
+	MaxOptionsPerSlot             = 26
+	MaxSlotsPerPass               = 8
+	DefaultCosinePriorTemperature = 0.07
+)
+
+// NormalizeCosinePriorLogits converts raw cosine similarities into temperature-scaled log-softmax
+// prior logits: log P(k) = (cos_k / tau) - logsumexp_j(cos_j / tau).
+func NormalizeCosinePriorLogits(cosines map[string]float64, temperature float64) map[string]float64 {
+	if len(cosines) == 0 {
+		return map[string]float64{}
+	}
+	tau := temperature
+	if math.IsNaN(tau) || math.IsInf(tau, 0) || tau <= 0 {
+		tau = DefaultCosinePriorTemperature
+	}
+	scaled := make(map[string]float64, len(cosines))
+	maxS := math.Inf(-1)
+	for k, v := range cosines {
+		fv := v
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			fv = -1.0
+		}
+		s := fv / tau
+		scaled[k] = s
+		if s > maxS {
+			maxS = s
+		}
+	}
+	sumExp := 0.0
+	for _, s := range scaled {
+		sumExp += math.Exp(s - maxS)
+	}
+	lse := maxS + math.Log(sumExp)
+	out := make(map[string]float64, len(scaled))
+	for k, s := range scaled {
+		out[k] = s - lse
+	}
+	return out
+}
+
+// PackedBracketPassCount returns exact forward passes for tournament brackets when up to
+// maxSlotsPerPass Round-1 brackets pack onto one canvas pass: 1 + ceil(ceil(K/B)/S).
+func PackedBracketPassCount(numOptions, bracketSize, maxSlotsPerPass int) int {
+	if numOptions <= MaxOptionsPerSlot {
+		return 1
+	}
+	if bracketSize < 2 {
+		bracketSize = 20
+	}
+	if maxSlotsPerPass < 1 {
+		maxSlotsPerPass = MaxSlotsPerPass
+	}
+	round1 := (numOptions + bracketSize - 1) / bracketSize
+	return 1 + (round1+maxSlotsPerPass-1)/maxSlotsPerPass
+}
 
 // NormalizeAndScale normalizes raw option probabilities with temperature scaling T > 0,
 // returning (scaledProbs, argmaxWinner, shannonEntropy, normalizedEntropy).
@@ -366,6 +421,84 @@ func SelectContainingOrNearestMark(cy, cx float64, marks []CandidateMark) (Candi
 	return marks[bestNearIdx], bestNearDist, true
 }
 
+var (
+	grid4x4Rows = [4]string{"r0", "r1", "r2", "r3"}
+	grid4x4Cols = [4]string{"c0", "c1", "c2", "c3"}
+)
+
+// AssignPointToGrid4x4 maps normalized (cy, cx) in [0, 100] to a 4x4 cell ("r0_c0" .. "r3_c3").
+func AssignPointToGrid4x4(cy, cx float64) string {
+	r := int((cy / 100.0) * 4.0)
+	if r < 0 {
+		r = 0
+	} else if r > 3 {
+		r = 3
+	}
+	c := int((cx / 100.0) * 4.0)
+	if c < 0 {
+		c = 0
+	} else if c > 3 {
+		c = 3
+	}
+	return grid4x4Rows[r] + "_" + grid4x4Cols[c]
+}
+
+// AssignBoxToGrid4x4 maps a [y_min, x_min, y_max, x_max] box center to its 4x4 cell.
+func AssignBoxToGrid4x4(box [4]float64) string {
+	return AssignPointToGrid4x4((box[0]+box[2])/2.0, (box[1]+box[3])/2.0)
+}
+
+// Grid4x4CellBounds returns [y_min, x_min, y_max, x_max] bounds in [0, 100] for a 4x4 cell.
+func Grid4x4CellBounds(cell string) ([4]float64, bool) {
+	parts := strings.Split(strings.TrimSpace(cell), "_")
+	if len(parts) != 2 {
+		return [4]float64{}, false
+	}
+	r, c := -1, -1
+	for idx, name := range grid4x4Rows {
+		if parts[0] == name {
+			r = idx
+			break
+		}
+	}
+	for idx, name := range grid4x4Cols {
+		if parts[1] == name {
+			c = idx
+			break
+		}
+	}
+	if r < 0 || c < 0 {
+		return [4]float64{}, false
+	}
+	return [4]float64{float64(r) * 25.0, float64(c) * 25.0, float64(r+1) * 25.0, float64(c+1) * 25.0}, true
+}
+
+// ExpectedMarkCenterFromProbabilities computes the probability-weighted expected (cy, cx) across
+// candidate Set-of-Marks boxes, excluding catchAllKey mass.
+func ExpectedMarkCenterFromProbabilities(probs map[string]float64, marks []CandidateMark, catchAllKey string) (float64, float64, bool) {
+	mass := 0.0
+	sumY := 0.0
+	sumX := 0.0
+	for _, m := range marks {
+		mid := strings.TrimSpace(m.ID)
+		if mid == "" || mid == catchAllKey {
+			continue
+		}
+		p := probs[mid]
+		if !math.IsNaN(p) && !math.IsInf(p, 0) && p > 0 {
+			mcy := (m.Box[0] + m.Box[2]) / 2.0
+			mcx := (m.Box[1] + m.Box[3]) / 2.0
+			mass += p
+			sumY += p * mcy
+			sumX += p * mcx
+		}
+	}
+	if mass <= 1e-12 {
+		return 0, 0, false
+	}
+	return sumY / mass, sumX / mass, true
+}
+
 // PairwiseEdge represents an entity-resolution equivalence probability between NodeA and NodeB.
 type PairwiseEdge struct {
 	NodeA     string
@@ -453,6 +586,112 @@ func CheckTransitiveTriangles(edges []PairwiseEdge, highThresh, lowThresh float6
 			}
 		}
 	}
+	return out
+}
+
+// ProbabilisticTriangle records a continuous transitive contradiction score in [0, 1].
+type ProbabilisticTriangle struct {
+	Nodes              [3]string
+	EdgeProbs          [3]float64
+	WeakEdge           [2]string
+	WeakProb           float64
+	ContradictionScore float64
+}
+
+// ProbabilisticTriangleContradiction returns max(p_ij * p_jk * (1 - p_ik)) in [0, 1] and the
+// contradicted edge index (0 for (a,b), 1 for (b,c), 2 for (a,c)).
+func ProbabilisticTriangleContradiction(pAB, pBC, pAC float64) (float64, int) {
+	clamp := func(v float64) float64 {
+		if math.IsNaN(v) || v < 0 {
+			return 0
+		}
+		if v > 1 {
+			return 1
+		}
+		return v
+	}
+	p0, p1, p2 := clamp(pAB), clamp(pBC), clamp(pAC)
+	cands := [3]float64{
+		p1 * p2 * (1.0 - p0),
+		p0 * p2 * (1.0 - p1),
+		p0 * p1 * (1.0 - p2),
+	}
+	bestIdx := 0
+	for i := 1; i < 3; i++ {
+		if cands[i] > cands[bestIdx] {
+			bestIdx = i
+		}
+	}
+	return cands[bestIdx], bestIdx
+}
+
+// ScoreProbabilisticTriangles ranks 3-cycles by continuous soft contradiction score >= minScore.
+func ScoreProbabilisticTriangles(edges []PairwiseEdge, minScore float64) []ProbabilisticTriangle {
+	type pair struct{ u, v string }
+	probs := make(map[pair]float64)
+	counts := make(map[pair]int)
+	nodeSet := make(map[string]bool)
+	for _, e := range edges {
+		u, v := strings.TrimSpace(e.NodeA), strings.TrimSpace(e.NodeB)
+		if u == "" || v == "" || u == v {
+			continue
+		}
+		if u > v {
+			u, v = v, u
+		}
+		p := e.EquivProb
+		if p < 0 {
+			p = 0
+		} else if p > 1 {
+			p = 1
+		}
+		nodeSet[u] = true
+		nodeSet[v] = true
+		probs[pair{u, v}] += p
+		counts[pair{u, v}]++
+	}
+	for k, c := range counts {
+		probs[k] /= float64(c)
+	}
+	nodes := make([]string, 0, len(nodeSet))
+	for n := range nodeSet {
+		nodes = append(nodes, n)
+	}
+	sort.Strings(nodes)
+
+	var out []ProbabilisticTriangle
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			for k := j + 1; k < len(nodes); k++ {
+				a, b, c := nodes[i], nodes[j], nodes[k]
+				pAB, ok1 := probs[pair{a, b}]
+				pBC, ok2 := probs[pair{b, c}]
+				pAC, ok3 := probs[pair{a, c}]
+				if !ok1 || !ok2 || !ok3 {
+					continue
+				}
+				score, weakIdx := ProbabilisticTriangleContradiction(pAB, pBC, pAC)
+				if score < minScore {
+					continue
+				}
+				ps := [3]float64{pAB, pBC, pAC}
+				es := [3][2]string{{a, b}, {b, c}, {a, c}}
+				out = append(out, ProbabilisticTriangle{
+					Nodes:              [3]string{a, b, c},
+					EdgeProbs:          ps,
+					WeakEdge:           es[weakIdx],
+					WeakProb:           ps[weakIdx],
+					ContradictionScore: score,
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ContradictionScore != out[j].ContradictionScore {
+			return out[i].ContradictionScore > out[j].ContradictionScore
+		}
+		return strings.Join(out[i].Nodes[:], "/") < strings.Join(out[j].Nodes[:], "/")
+	})
 	return out
 }
 

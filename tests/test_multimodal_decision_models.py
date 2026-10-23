@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from multimodal_decision_models import (
+    DEFAULT_COSINE_PRIOR_TEMPERATURE,
     CandidateMark,
     CascadeDecisionOrchestrator,
     DecisionQuestion,
@@ -32,22 +34,30 @@ from multimodal_decision_models import (
     MockCallableBackend,
     OpenAILogprobBackend,
     PairwiseEdge,
+    ShortlistConfig,
     SwarmAgentProposal,
     TaxonomyLeaf,
     TaxonomyTrie,
     VertexGeminiBackend,
     apply_layer5_deterministic_guards,
     arbitrate_swarm_locks,
+    assign_box_to_grid_4x4,
     assign_box_to_grid_cell,
     build_contrastive_criteria,
     build_prefix_taxonomy_trie,
     build_set_of_marks_questions,
     check_transitive_triangles,
     csls_hubness_scores,
+    expected_mark_center_from_probabilities,
     filter_marks_by_grid_cell,
+    grid_4x4_cell_bounds,
+    normalize_cosine_prior_logits,
     normalized_entropy,
+    packed_bracket_pass_count,
     parse_pack_multiplier,
+    point_in_box,
     pre_gated_bayesian_poe_fusion,
+    score_probabilistic_triangles,
     select_containing_or_nearest_mark,
     shortlist_wide_question,
     stage2a_fast_exit_gate,
@@ -162,13 +172,26 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
         )
         scores = {f"intent_{i:03d}": float(i) for i in range(60)}
 
-        # Default top_k=20 reserves 1 slot for catch-all -> 21 total options <= 26
+        # Default top_k=20 reserves 1 slot for catch-all -> 21 total options <= 26,
+        # and keeps pairwise_diff=False by default so terse descriptions stay unmodified.
+        self.assertFalse(ShortlistConfig().contrastive_tags)
         default_q = shortlist_wide_question(wide_q, scores)
         self.assertEqual(len(default_q.option_keys()), 21)
         self.assertEqual(default_q.option_keys()[0], "intent_059")
         self.assertEqual(default_q.option_keys()[-1], "none_of_the_above")
-        self.assertIn("[distinguishing:", default_q.criteria["intent_059"])
-        self.assertNotIn("[distinguishing:", default_q.criteria["none_of_the_above"])
+        self.assertNotIn("[distinguishing:", default_q.criteria["intent_059"])
+
+        # Explicit opt-in appends sibling-unique cues on non-catch-all options.
+        contrastive_q = shortlist_wide_question(wide_q, scores, pairwise_diff=True)
+        self.assertIn("[distinguishing:", contrastive_q.criteria["intent_059"])
+        self.assertNotIn("[distinguishing:", contrastive_q.criteria["none_of_the_above"])
+
+        lp = normalize_cosine_prior_logits(
+            {"intent_059": 0.52, "intent_058": 0.44, "intent_057": 0.29},
+            temperature=DEFAULT_COSINE_PRIOR_TEMPERATURE,
+        )
+        self.assertAlmostEqual(sum(math.exp(v) for v in lp.values()), 1.0, places=9)
+        self.assertGreater(lp["intent_059"], lp["intent_058"])
 
         cues = build_contrastive_criteria(
             {
@@ -502,6 +525,144 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
             p = REPO_ROOT / tf
             self.assertTrue(p.exists(), f"missing template {p}")
             self.assertIn("questions", p.read_text())
+
+    def test_packed_brackets_opaque_and_ragged_tries_and_monte_carlo_evals(self) -> None:
+        # 1. Exact packed-bracket pass accounting (8 Round-1 brackets per canvas pass)
+        self.assertEqual(packed_bracket_pass_count(26), 1)
+        self.assertEqual(packed_bracket_pass_count(59), 2)
+        self.assertEqual(packed_bracket_pass_count(151), 2)
+        self.assertEqual(packed_bracket_pass_count(202), 3)
+
+        # 2. Opaque option_N schema (121 options) buckets by natural-language description stems
+        topics = ["banking", "airline", "calendar", "weather", "kitchen", "music", "fitness", "billing"]
+        actions = [
+            "balance", "transfer", "cancel", "schedule", "status",
+            "refund", "upgrade", "history", "limit", "alert",
+            "export", "share", "archive", " pause", "verify",
+        ]
+        opaque_crit: dict[str, str] = {}
+        idx = 0
+        for t in topics:
+            for a in actions:
+                opaque_crit[f"option_{idx}"] = f"Handle {t} customer request for {a.strip()} workflow"
+                idx += 1
+        opaque_crit["oos"] = "Request outside supported services"
+        opaque_trie = build_prefix_taxonomy_trie(opaque_crit)
+        self.assertLessEqual(len(opaque_trie.coarse_criteria), 26)
+        self.assertLessEqual(len(opaque_trie.fine_criteria), 26)
+        self.assertEqual(len(opaque_trie.leaves), 121)
+        # Verify opaque keys were NOT dumped into a single "option" prefix group
+        self.assertGreaterEqual(len(opaque_trie.coarse_criteria), 6)
+
+        # 3. Ragged 106-option taxonomy aligns shared cross-domain suffixes (role_query, role_set)
+        ragged_crit: dict[str, str] = {}
+        for dom_i in range(15):
+            dom = f"svc{dom_i:02d}"
+            ragged_crit[f"{dom}_query"] = f"Query records in {dom}"
+            ragged_crit[f"{dom}_set"] = f"Update settings in {dom}"
+            for extra_j in range(5):
+                ragged_crit[f"{dom}_custom_{dom_i}_{extra_j}"] = f"Custom op {extra_j} for {dom}"
+        ragged_crit["oos"] = "Out of scope"
+        ragged_trie = build_prefix_taxonomy_trie(ragged_crit)
+        self.assertEqual(len(ragged_trie.leaves), 106)
+        self.assertIn("role_query", ragged_trie.fine_criteria)
+        self.assertIn("role_set", ragged_trie.fine_criteria)
+        self.assertEqual(ragged_trie.leaves["svc03_query"].fine_key, "role_query")
+
+        # 4. Monte Carlo probabilistic calibration: induced 90% prevalence shift + wrong-prior safety
+        rng = random.Random(20261023)
+        shift_prior = {"pos": math.log(0.90), "neg": math.log(0.10)}
+        wrong_prior = {"pos": -4.0, "neg": 4.0}
+        brier_off = 0.0
+        brier_conf = 0.0
+        brier_hes = 0.0
+        confident_flips = 0
+        for trial in range(400):
+            is_pos = rng.random() < 0.90
+            if trial % 3 == 0:
+                p_pos = (0.985 - 0.01 * rng.random()) if is_pos else (0.005 + 0.01 * rng.random())
+                fused_w, h_w, _ = pre_gated_bayesian_poe_fusion(
+                    {"pos": p_pos, "neg": 1.0 - p_pos},
+                    prior_logits=wrong_prior,
+                    prior_weight=0.35,
+                    hesitation_threshold=0.16,
+                    gate_mode="hesitant",
+                )
+                if h_w < 0.16 and ((fused_w["pos"] > 0.5) != (p_pos > 0.5)):
+                    confident_flips += 1
+            else:
+                p_pos = (0.45 + 0.16 * rng.random()) if is_pos else (0.39 + 0.16 * rng.random())
+            raw = {"pos": p_pos, "neg": 1.0 - p_pos}
+            y = 1.0 if is_pos else 0.0
+            p_conf, _, _ = pre_gated_bayesian_poe_fusion(raw, shift_prior, 0.35, gate_mode="confident")
+            p_hes, _, _ = pre_gated_bayesian_poe_fusion(raw, shift_prior, 0.35, gate_mode="hesitant")
+            brier_off += (p_pos - y) ** 2
+            brier_conf += (p_conf["pos"] - y) ** 2
+            brier_hes += (p_hes["pos"] - y) ** 2
+
+        self.assertEqual(confident_flips, 0)
+        self.assertLess(brier_hes, brier_off * 0.88)
+        self.assertLess(brier_hes, brier_conf * 0.88)
+
+        # 5. Monte Carlo continuous triangle contradiction AUROC >= 0.92 across noisy 3-cycles
+        pos_scores: list[float] = []
+        neg_scores: list[float] = []
+        for trial in range(250):
+            # Consistent cluster vs corrupted transitive edge
+            p_ab = 0.80 + 0.18 * rng.random()
+            p_bc = 0.80 + 0.18 * rng.random()
+            p_ac_clean = 0.78 + 0.20 * rng.random()
+            p_ac_corrupt = 0.05 + 0.25 * rng.random()
+            s_clean = score_probabilistic_triangles(
+                [PairwiseEdge("a", "b", p_ab), PairwiseEdge("b", "c", p_bc), PairwiseEdge("a", "c", p_ac_clean)]
+            )[0].contradiction_score
+            s_corrupt = score_probabilistic_triangles(
+                [PairwiseEdge("a", "b", p_ab), PairwiseEdge("b", "c", p_bc), PairwiseEdge("a", "c", p_ac_corrupt)]
+            )[0].contradiction_score
+            neg_scores.append(s_clean)
+            pos_scores.append(s_corrupt)
+
+        wins = sum(1.0 if ps > ns else (0.5 if ps == ns else 0.0) for ps in pos_scores for ns in neg_scores)
+        auroc = wins / (len(pos_scores) * len(neg_scores))
+        self.assertGreaterEqual(auroc, 0.95)
+
+        # 6. 4x4 grid bounds, expected mark center, and discrete mark snapping vs Gaussian coordinate jitter
+        marks = [
+            CandidateMark("M1", "Compact settings gear", (8.0, 88.0, 14.0, 94.0)),
+            CandidateMark("M2", "Adjacent notification bell", (8.0, 80.0, 14.0, 86.0)),
+            CandidateMark("M3", "Search input", (8.0, 20.0, 14.0, 70.0)),
+        ]
+        self.assertEqual(assign_box_to_grid_4x4(marks[0].box), "r0_c3")
+        self.assertEqual(grid_4x4_cell_bounds("r0_c3"), (0.0, 75.0, 25.0, 100.0))
+        expected_hits = 0
+        snapped_hits = 0
+        coord_jitter_hits = 0
+        grid4_hits = 0
+        b4 = grid_4x4_cell_bounds("r0_c3")
+        c4_y, c4_x = (b4[0] + b4[2]) / 2.0, (b4[1] + b4[3]) / 2.0
+        for _ in range(200):
+            p_m1 = 0.88 + 0.10 * rng.random()
+            rem = 1.0 - p_m1
+            probs = {"M1": p_m1, "M2": rem * 0.6, "M3": rem * 0.1, "none_visible": rem * 0.3}
+            ey, ex, ok = expected_mark_center_from_probabilities(probs, marks)
+            self.assertTrue(ok)
+            if point_in_box(ey, ex, marks[0].box):
+                expected_hits += 1
+            snapped, _ = select_containing_or_nearest_mark(ey, ex, marks)
+            assert snapped is not None
+            sy, sx = (snapped.box[0] + snapped.box[2]) / 2.0, (snapped.box[1] + snapped.box[3]) / 2.0
+            if point_in_box(sy, sx, marks[0].box):
+                snapped_hits += 1
+            jy = 11.0 + rng.gauss(0.0, 4.5)
+            jx = 91.0 + rng.gauss(0.0, 4.5)
+            if point_in_box(jy, jx, marks[0].box):
+                coord_jitter_hits += 1
+            if point_in_box(c4_y, c4_x, marks[0].box):
+                grid4_hits += 1
+        self.assertGreater(expected_hits, 190)
+        self.assertEqual(snapped_hits, 200)
+        self.assertLess(coord_jitter_hits, 100)
+        self.assertEqual(grid4_hits, 0)
 
 
 if __name__ == "__main__":

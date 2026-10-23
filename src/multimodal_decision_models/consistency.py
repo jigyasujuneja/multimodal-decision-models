@@ -23,6 +23,7 @@ from typing import Sequence
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     PairwiseEdge,
+    ProbabilisticTriangleScore,
     SwarmAgentProposal,
     SwarmLockDecision,
     TriangleContradiction,
@@ -99,6 +100,87 @@ def check_transitive_triangles(
 
     contradictions.sort(key=lambda c: (-c.severity, c.nodes))
     return contradictions
+
+
+def probabilistic_triangle_contradiction(
+    p_ab: float,
+    p_bc: float,
+    p_ac: float,
+) -> tuple[float, int]:
+    """Compute continuous soft transitive contradiction max(p_ij * p_jk * (1 - p_ik)) in [0, 1].
+
+    Returns (max_contradiction_score, weak_edge_index) where weak_edge_index is 0 for (a,b),
+    1 for (b,c), or 2 for (a,c).
+    """
+    p0 = min(1.0, max(0.0, float(p_ab)))
+    p1 = min(1.0, max(0.0, float(p_bc)))
+    p2 = min(1.0, max(0.0, float(p_ac)))
+    # Index corresponds to the contradicted (weak) edge:
+    # 0 -> (b,c) and (a,c) high while (a,b) low
+    # 1 -> (a,b) and (a,c) high while (b,c) low
+    # 2 -> (a,b) and (b,c) high while (a,c) low
+    cands = (
+        p1 * p2 * (1.0 - p0),
+        p0 * p2 * (1.0 - p1),
+        p0 * p1 * (1.0 - p2),
+    )
+    best_idx = max(range(3), key=lambda idx: cands[idx])
+    return cands[best_idx], best_idx
+
+
+def score_probabilistic_triangles(
+    edges: Sequence[PairwiseEdge],
+    min_score: float = 0.0,
+) -> list[ProbabilisticTriangleScore]:
+    """Rank 3-cycles by continuous transitive contradiction score p_ij * p_jk * (1 - p_ik)."""
+    pair_sums: dict[tuple[str, str], list[float]] = defaultdict(list)
+    node_set: set[str] = set()
+    for e in edges:
+        u, v = e.node_a.strip(), e.node_b.strip()
+        if not u or not v or u == v:
+            continue
+        if u > v:
+            u, v = v, u
+        node_set.add(u)
+        node_set.add(v)
+        pair_sums[(u, v)].append(min(1.0, max(0.0, float(e.equiv_prob))))
+
+    prob_of = {k: sum(vals) / len(vals) for k, vals in pair_sums.items()}
+    adj: dict[str, list[str]] = defaultdict(list)
+    for u, v in prob_of:
+        adj[u].append(v)
+    for u in adj:
+        adj[u].sort()
+
+    scored: list[ProbabilisticTriangleScore] = []
+    for a in sorted(node_set):
+        nbrs = adj[a]
+        for i in range(len(nbrs)):
+            b = nbrs[i]
+            for j in range(i + 1, len(nbrs)):
+                c = nbrs[j]
+                if (b, c) not in prob_of:
+                    continue
+                p_ab = prob_of[(a, b)]
+                p_bc = prob_of[(b, c)]
+                p_ac = prob_of[(a, c)]
+                score, weak_idx = probabilistic_triangle_contradiction(p_ab, p_bc, p_ac)
+                if score < min_score:
+                    continue
+                pairs = ((a, b), (b, c), (a, c))
+                probs = (p_ab, p_bc, p_ac)
+                scored.append(
+                    ProbabilisticTriangleScore(
+                        nodes=(a, b, c),
+                        edge_probs=probs,
+                        weak_edge=pairs[weak_idx],
+                        weak_prob=probs[weak_idx],
+                        contradiction_score=round(score, 8),
+                    )
+                )
+
+    scored.sort(key=lambda s: (-s.contradiction_score, s.nodes))
+    return scored
 
 
 def parse_pack_multiplier(title: str) -> int:
