@@ -34,6 +34,8 @@ from .consistency import (
     arbitrate_swarm_locks,
     check_transitive_triangles,
     parse_pack_multiplier,
+    probabilistic_triangle_contradiction,
+    score_probabilistic_triangles,
     validate_pack_quantity_consistency,
 )
 from .hierarchy import (
@@ -41,24 +43,31 @@ from .hierarchy import (
     TaxonomyLeaf,
     TaxonomyTrie,
     build_prefix_taxonomy_trie,
+    packed_bracket_pass_count,
     trie_constrained_joint_decode,
 )
 from .shortlist import (
+    DEFAULT_COSINE_PRIOR_TEMPERATURE,
     ShortlistConfig,
     build_contrastive_criteria,
     cosine_similarity,
     csls_hubness_scores,
+    normalize_cosine_prior_logits,
     shortlist_wide_question,
     split_identifier_tokens,
 )
 from .som_navigator import (
+    assign_box_to_grid_4x4,
     assign_box_to_grid_cell,
+    assign_point_to_grid_4x4,
     assign_point_to_grid_cell,
     box_area,
     box_center,
     box_iou,
     build_set_of_marks_questions,
+    expected_mark_center_from_probabilities,
     filter_marks_by_grid_cell,
+    grid_4x4_cell_bounds,
     point_in_box,
     select_containing_or_nearest_mark,
 )
@@ -70,15 +79,17 @@ from .types import (
     DecisionQuestion,
     DecisionResult,
     PairwiseEdge,
+    ProbabilisticTriangleScore,
     SlotReadout,
     SwarmAgentProposal,
     SwarmLockDecision,
     TriangleContradiction,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
+    "DEFAULT_COSINE_PRIOR_TEMPERATURE",
     "DEFAULT_EVIDENCE_CRITERIA",
     "DEFAULT_HESITATION_THRESHOLD",
     "MAX_OPTIONS_PER_SLOT",
@@ -93,6 +104,7 @@ __all__ = [
     "MockCallableBackend",
     "OpenAILogprobBackend",
     "PairwiseEdge",
+    "ProbabilisticTriangleScore",
     "ShortlistConfig",
     "SlotReadout",
     "SwarmAgentProposal",
@@ -104,7 +116,9 @@ __all__ = [
     "__version__",
     "apply_layer5_deterministic_guards",
     "arbitrate_swarm_locks",
+    "assign_box_to_grid_4x4",
     "assign_box_to_grid_cell",
+    "assign_point_to_grid_4x4",
     "assign_point_to_grid_cell",
     "box_area",
     "box_center",
@@ -115,12 +129,18 @@ __all__ = [
     "check_transitive_triangles",
     "cosine_similarity",
     "csls_hubness_scores",
+    "expected_mark_center_from_probabilities",
     "filter_marks_by_grid_cell",
+    "grid_4x4_cell_bounds",
     "inject_evidence_slot",
+    "normalize_cosine_prior_logits",
     "normalized_entropy",
+    "packed_bracket_pass_count",
     "parse_pack_multiplier",
     "point_in_box",
     "pre_gated_bayesian_poe_fusion",
+    "probabilistic_triangle_contradiction",
+    "score_probabilistic_triangles",
     "select_containing_or_nearest_mark",
     "shortlist_wide_question",
     "split_identifier_tokens",

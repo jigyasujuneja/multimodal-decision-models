@@ -3,6 +3,7 @@ package mdm
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -103,5 +104,121 @@ func TestShortlistContrastiveTrieSomAndTriangles(t *testing.T) {
 	}
 	if ParsePackMultiplier("Sparkling Water 6x330ml") != 6 {
 		t.Fatalf("expected pack multiplier 6")
+	}
+}
+
+func TestNormalizeCosinePriorPackedBracketsGrid4x4AndProbabilisticMonteCarlo(t *testing.T) {
+	// 1. Packed bracket pass accounting (K=59 -> 2, K=151 -> 2, K=202 -> 3)
+	if got := PackedBracketPassCount(26, 20, 8); got != 1 {
+		t.Fatalf("expected 1 pass for K=26, got %d", got)
+	}
+	if got := PackedBracketPassCount(59, 20, 8); got != 2 {
+		t.Fatalf("expected 2 passes for K=59, got %d", got)
+	}
+	if got := PackedBracketPassCount(151, 20, 8); got != 2 {
+		t.Fatalf("expected 2 passes for K=151, got %d", got)
+	}
+	if got := PackedBracketPassCount(202, 20, 8); got != 3 {
+		t.Fatalf("expected 3 passes for K=202, got %d", got)
+	}
+
+	// 2. Temperature-scaled log-softmax cosine priors sum to 1 in probability space.
+	cos := map[string]float64{"a": 0.51, "b": 0.42, "c": 0.28}
+	lp := NormalizeCosinePriorLogits(cos, DefaultCosinePriorTemperature)
+	probSum := 0.0
+	for _, v := range lp {
+		probSum += math.Exp(v)
+	}
+	if math.Abs(probSum-1.0) > 1e-9 || lp["a"] <= lp["b"] || lp["b"] <= lp["c"] {
+		t.Fatalf("unexpected log-softmax cosine priors: sum=%.9f lp=%v", probSum, lp)
+	}
+
+	// 3. 4x4 UI spatial grid and probability-weighted expected mark center.
+	box := [4]float64{30.0, 60.0, 42.0, 74.0}
+	if cell := AssignBoxToGrid4x4(box); cell != "r1_c2" {
+		t.Fatalf("expected r1_c2, got %s", cell)
+	}
+	bounds, ok := Grid4x4CellBounds("r1_c2")
+	if !ok || bounds != [4]float64{25, 50, 50, 75} {
+		t.Fatalf("unexpected r1_c2 bounds: ok=%v bounds=%v", ok, bounds)
+	}
+	cy, cx, ok := ExpectedMarkCenterFromProbabilities(
+		map[string]float64{"M1": 0.80, "M2": 0.10, "none_visible": 0.10},
+		[]CandidateMark{
+			{ID: "M1", Label: "Save", Box: [4]float64{10, 20, 20, 40}},
+			{ID: "M2", Label: "Cancel", Box: [4]float64{10, 60, 20, 80}},
+		},
+		"none_visible",
+	)
+	if !ok || math.Abs(cy-15.0) > 1e-6 || math.Abs(cx-(0.8*30.0+0.1*70.0)/0.9) > 1e-6 {
+		t.Fatalf("unexpected expected mark center: ok=%v cy=%.4f cx=%.4f", ok, cy, cx)
+	}
+
+	// 4. Seeded 400-trial Monte Carlo probabilistic calibration under induced prevalence shift
+	// and continuous triangle contradiction separation.
+	rng := rand.New(rand.NewSource(20261023))
+	keys := []string{"pos", "neg"}
+	shiftPrior := map[string]float64{"pos": math.Log(0.90), "neg": math.Log(0.10)}
+	brierBase, brierConf, brierHes := 0.0, 0.0, 0.0
+	confidentFlips := 0
+	wrongPrior := map[string]float64{"pos": -4.0, "neg": 4.0}
+
+	for trial := 0; trial < 400; trial++ {
+		isPos := rng.Float64() < 0.90
+		var pPos float64
+		if trial%3 == 0 {
+			// Confident prediction (rawNormH < 0.16)
+			if isPos {
+				pPos = 0.985 - 0.01*rng.Float64()
+			} else {
+				pPos = 0.005 + 0.01*rng.Float64()
+			}
+			_, winWrong, _, rawHW, _ := FusePriorWithGate(
+				map[string]float64{"pos": pPos, "neg": 1.0 - pPos},
+				wrongPrior, keys, 1.0, 0.35, 0.16, "hesitant",
+			)
+			baseWin := "neg"
+			if pPos > 0.5 {
+				baseWin = "pos"
+			}
+			if rawHW < 0.16 && winWrong != baseWin {
+				confidentFlips++
+			}
+		} else {
+			// Ambiguous prediction under label shift
+			if isPos {
+				pPos = 0.45 + 0.16*rng.Float64()
+			} else {
+				pPos = 0.39 + 0.16*rng.Float64()
+			}
+		}
+		raw := map[string]float64{"pos": pPos, "neg": 1.0 - pPos}
+		y := 0.0
+		if isPos {
+			y = 1.0
+		}
+		baseP, _, _, _, _ := FusePriorWithGate(raw, shiftPrior, keys, 1.0, 0.35, 0.16, "off")
+		confP, _, _, _, _ := FusePriorWithGate(raw, shiftPrior, keys, 1.0, 0.35, 0.16, "confident")
+		hesP, _, _, _, _ := FusePriorWithGate(raw, shiftPrior, keys, 1.0, 0.35, 0.16, "hesitant")
+
+		brierBase += (baseP["pos"] - y) * (baseP["pos"] - y)
+		brierConf += (confP["pos"] - y) * (confP["pos"] - y)
+		brierHes += (hesP["pos"] - y) * (hesP["pos"] - y)
+	}
+	if confidentFlips != 0 {
+		t.Fatalf("expected 0 flips on confident items under wrong prior in hesitant mode, got %d", confidentFlips)
+	}
+	if brierHes >= brierBase*0.88 || brierHes >= brierConf*0.88 {
+		t.Fatalf("expected hesitant gate to materially reduce Brier under 90%% shift: base=%.4f conf=%.4f hes=%.4f", brierBase/400, brierConf/400, brierHes/400)
+	}
+
+	// Soft triangle contradiction caught by ScoreProbabilisticTriangles even below hard 0.80/0.25 cutoffs.
+	softTris := ScoreProbabilisticTriangles([]PairwiseEdge{
+		{NodeA: "x1", NodeB: "x2", EquivProb: 0.76},
+		{NodeA: "x2", NodeB: "x3", EquivProb: 0.78},
+		{NodeA: "x1", NodeB: "x3", EquivProb: 0.28},
+	}, 0.20)
+	if len(softTris) != 1 || softTris[0].WeakEdge != [2]string{"x1", "x3"} || softTris[0].ContradictionScore < 0.40 {
+		t.Fatalf("expected soft triangle contradiction on (x1,x3), got %+v", softTris)
 	}
 }

@@ -570,7 +570,7 @@ class CascadeDecisionOrchestrator:
         prior_gate_mode: str = "hesitant",
         temperature: float = 1.0,
         shortlist_top_k: int = 0,
-        shortlist_pairwise_diff: bool = True,
+        shortlist_pairwise_diff: bool = False,
         evidence_prompt: str = "",
         evidence_criteria: Mapping[str, str] | None = None,
         enable_stage2a_fast_exit: bool = False,

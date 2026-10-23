@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Catalog-Scale Wide-Option Shortlist Routing and CSLS Hubness Correction.
+"""Catalog-Scale Wide-Option Shortlist Routing, Log-Softmax Cosine Priors, and CSLS Hubness Correction.
 
-Reduces high-cardinality classification (K > 26) from multi-pass bracket tournaments
-(ceil(K / 20) + 1 passes) to a single calibrated forward pass over the top-M shortlisted
-candidates (default M = 20, tested up to K = 151) plus an out-of-distribution
+Reduces high-cardinality classification (K > 26) from multi-pass packed bracket tournaments
+(1 + ceil(ceil(K / 20) / 8) passes) to a single calibrated forward pass over the top-M shortlisted
+candidates (default M = 20, tested up to K = 202) plus an out-of-distribution
 catch-all option ("none_of_the_above").
 """
 
@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .types import MAX_OPTIONS_PER_SLOT, DecisionQuestion
+
+DEFAULT_COSINE_PRIOR_TEMPERATURE = 0.07
 
 _STOPWORDS = frozenset(
     {
@@ -65,11 +67,15 @@ _NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]+")
 
 @dataclass(frozen=True)
 class ShortlistConfig:
-    """Configuration for single-pass wide-option shortlist reduction."""
+    """Configuration for single-pass wide-option shortlist reduction.
+
+    contrastive_tags defaults to False because sibling-unique cues help boilerplate-heavy SKU
+    titles while hurting terse intent labels. Enable explicitly on repetitive catalog schemas.
+    """
 
     max_candidates: int = 20
     catch_all_key: str = "none_of_the_above"
-    contrastive_tags: bool = True
+    contrastive_tags: bool = False
 
 
 def split_identifier_tokens(text: str) -> list[str]:
@@ -158,12 +164,36 @@ def csls_hubness_scores(
     return scores
 
 
+def normalize_cosine_prior_logits(
+    cosines: Mapping[str, float],
+    temperature: float = DEFAULT_COSINE_PRIOR_TEMPERATURE,
+) -> dict[str, float]:
+    """Convert raw cosine similarities into temperature-scaled log-softmax prior logits.
+
+    Computes log P(k) = (cos_k / tau) - logsumexp_j(cos_j / tau) with default tau = 0.07
+    so compressed dense embedding cosines (typically [0.25, 0.55]) form a calibrated
+    log-probability prior before pre-gated Bayesian PoE fusion.
+    """
+    if not cosines:
+        return {}
+    tau = temperature if temperature > 0.0 and math.isfinite(temperature) else DEFAULT_COSINE_PRIOR_TEMPERATURE
+    scaled: dict[str, float] = {}
+    for k, v in cosines.items():
+        fv = float(v)
+        if not math.isfinite(fv):
+            fv = -1.0
+        scaled[k] = fv / tau
+    max_s = max(scaled.values())
+    lse = max_s + math.log(sum(math.exp(s - max_s) for s in scaled.values()))
+    return {k: s - lse for k, s in scaled.items()}
+
+
 def shortlist_wide_question(
     question: DecisionQuestion,
     scores: Mapping[str, float],
     top_k: int = 20,
     catch_all_key: str = "none_of_the_above",
-    pairwise_diff: bool = True,
+    pairwise_diff: bool = False,
     contrastive_mode: str = "sibling_unique",
 ) -> DecisionQuestion:
     """Reduce a wide-option question (K > 26) to a single-pass top-M shortlist with catch-all.
