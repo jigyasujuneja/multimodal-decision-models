@@ -100,6 +100,15 @@ def pre_gated_bayesian_poe_fusion(
     if gate_mode not in ("always", "confident", "hesitant", "proportional"):
         raise ValueError(f"unsupported gate_mode: {gate_mode!r}")
 
+    for k, v in raw_probs.items():
+        fv = float(v)
+        if not math.isfinite(fv) or fv < 0.0:
+            raise ValueError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
+    if prior_logits:
+        for k, v in prior_logits.items():
+            if not math.isfinite(float(v)):
+                raise ValueError(f"prior_logits[{k!r}] must be finite, got {v!r}")
+
     # Step 1: Normalize raw probabilities and evaluate H_raw BEFORE touching priors.
     total_raw = sum(max(0.0, float(v)) for v in raw_probs.values())
     if total_raw <= 0.0:

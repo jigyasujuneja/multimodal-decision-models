@@ -499,6 +499,71 @@ func ExpectedMarkCenterFromProbabilities(probs map[string]float64, marks []Candi
 	return sumY / mass, sumX / mass, true
 }
 
+// SafeExpectedMarkCenter computes the probability-weighted expected (cy, cx) across candidate Set-of-Marks boxes,
+// snapping deterministically to the highest-probability candidate mark when spatial dispersion exceeds maxDispersion
+// or when the centroid falls outside all candidate boxes (bimodal/non-convex safety guard).
+func SafeExpectedMarkCenter(
+	probs map[string]float64,
+	marks []CandidateMark,
+	catchAllKey string,
+	maxDispersion float64,
+) (float64, float64, CandidateMark, bool) {
+	if maxDispersion <= 0 {
+		maxDispersion = 18.0
+	}
+	type weightedMark struct {
+		p, cy, cx, area float64
+		mark            CandidateMark
+	}
+	var wms []weightedMark
+	var validMarks []CandidateMark
+	mass := 0.0
+	for _, m := range marks {
+		mid := strings.TrimSpace(m.ID)
+		if mid == "" || mid == catchAllKey {
+			continue
+		}
+		p := probs[mid]
+		if !math.IsNaN(p) && !math.IsInf(p, 0) && p > 0 {
+			mcy := (m.Box[0] + m.Box[2]) / 2.0
+			mcx := (m.Box[1] + m.Box[3]) / 2.0
+			area := math.Max(0, m.Box[2]-m.Box[0]) * math.Max(0, m.Box[3]-m.Box[1])
+			wms = append(wms, weightedMark{p: p, cy: mcy, cx: mcx, area: area, mark: m})
+			validMarks = append(validMarks, m)
+			mass += p
+		}
+	}
+	if mass <= 1e-12 || len(wms) == 0 {
+		return 0, 0, CandidateMark{}, false
+	}
+	ey, ex := 0.0, 0.0
+	for _, wm := range wms {
+		ey += wm.p * wm.cy
+		ex += wm.p * wm.cx
+	}
+	ey /= mass
+	ex /= mass
+
+	variance := 0.0
+	for _, wm := range wms {
+		dy := wm.cy - ey
+		dx := wm.cx - ex
+		variance += (wm.p / mass) * (dy*dy + dx*dx)
+	}
+	dispersion := math.Sqrt(math.Max(0, variance))
+	containing, dist, ok := SelectContainingOrNearestMark(ey, ex, validMarks)
+	if ok && dist == 0 && dispersion <= maxDispersion {
+		return ey, ex, containing, true
+	}
+	best := wms[0]
+	for _, wm := range wms[1:] {
+		if wm.p > best.p || (wm.p == best.p && wm.area < best.area) {
+			best = wm
+		}
+	}
+	return best.cy, best.cx, best.mark, true
+}
+
 // PairwiseEdge represents an entity-resolution equivalence probability between NodeA and NodeB.
 type PairwiseEdge struct {
 	NodeA     string
@@ -542,6 +607,13 @@ func CheckTransitiveTriangles(edges []PairwiseEdge, highThresh, lowThresh float6
 	for k, c := range counts {
 		probs[k] /= float64(c)
 	}
+	adj := make(map[string][]string, len(nodeSet))
+	for k := range probs {
+		adj[k.u] = append(adj[k.u], k.v)
+	}
+	for u := range adj {
+		sort.Strings(adj[u])
+	}
 	nodes := make([]string, 0, len(nodeSet))
 	for n := range nodeSet {
 		nodes = append(nodes, n)
@@ -549,16 +621,18 @@ func CheckTransitiveTriangles(edges []PairwiseEdge, highThresh, lowThresh float6
 	sort.Strings(nodes)
 
 	var out []TriangleContradiction
-	for i := 0; i < len(nodes); i++ {
-		for j := i + 1; j < len(nodes); j++ {
-			for k := j + 1; k < len(nodes); k++ {
-				a, b, c := nodes[i], nodes[j], nodes[k]
-				pAB, ok1 := probs[pair{a, b}]
-				pBC, ok2 := probs[pair{b, c}]
-				pAC, ok3 := probs[pair{a, c}]
-				if !ok1 || !ok2 || !ok3 {
+	for _, a := range nodes {
+		nbrs := adj[a]
+		for i := 0; i < len(nbrs); i++ {
+			b := nbrs[i]
+			for j := i + 1; j < len(nbrs); j++ {
+				c := nbrs[j]
+				pBC, okBC := probs[pair{b, c}]
+				if !okBC {
 					continue
 				}
+				pAB := probs[pair{a, b}]
+				pAC := probs[pair{a, c}]
 				ps := [3]float64{pAB, pBC, pAC}
 				es := [3][2]string{{a, b}, {b, c}, {a, c}}
 				highCount, lowIdx, lowCount := 0, -1, 0
@@ -586,6 +660,12 @@ func CheckTransitiveTriangles(edges []PairwiseEdge, highThresh, lowThresh float6
 			}
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Severity != out[j].Severity {
+			return out[i].Severity > out[j].Severity
+		}
+		return strings.Join(out[i].Nodes[:], "/") < strings.Join(out[j].Nodes[:], "/")
+	})
 	return out
 }
 
@@ -653,6 +733,13 @@ func ScoreProbabilisticTriangles(edges []PairwiseEdge, minScore float64) []Proba
 	for k, c := range counts {
 		probs[k] /= float64(c)
 	}
+	adj := make(map[string][]string, len(nodeSet))
+	for k := range probs {
+		adj[k.u] = append(adj[k.u], k.v)
+	}
+	for u := range adj {
+		sort.Strings(adj[u])
+	}
 	nodes := make([]string, 0, len(nodeSet))
 	for n := range nodeSet {
 		nodes = append(nodes, n)
@@ -660,16 +747,18 @@ func ScoreProbabilisticTriangles(edges []PairwiseEdge, minScore float64) []Proba
 	sort.Strings(nodes)
 
 	var out []ProbabilisticTriangle
-	for i := 0; i < len(nodes); i++ {
-		for j := i + 1; j < len(nodes); j++ {
-			for k := j + 1; k < len(nodes); k++ {
-				a, b, c := nodes[i], nodes[j], nodes[k]
-				pAB, ok1 := probs[pair{a, b}]
-				pBC, ok2 := probs[pair{b, c}]
-				pAC, ok3 := probs[pair{a, c}]
-				if !ok1 || !ok2 || !ok3 {
+	for _, a := range nodes {
+		nbrs := adj[a]
+		for i := 0; i < len(nbrs); i++ {
+			b := nbrs[i]
+			for j := i + 1; j < len(nbrs); j++ {
+				c := nbrs[j]
+				pBC, okBC := probs[pair{b, c}]
+				if !okBC {
 					continue
 				}
+				pAB := probs[pair{a, b}]
+				pAC := probs[pair{a, c}]
 				score, weakIdx := ProbabilisticTriangleContradiction(pAB, pBC, pAC)
 				if score < minScore {
 					continue
@@ -698,11 +787,19 @@ func ScoreProbabilisticTriangles(edges []PairwiseEdge, minScore float64) []Proba
 var (
 	reMultipackPrefix = regexp.MustCompile(`(?i)\b(\d+)\s*[x×]\s*\d+`)
 	rePackOf          = regexp.MustCompile(`(?i)\b(?:pack\s+of|case\s+of|box\s+of)\s+(\d+)\b`)
+	reHyphenPack      = regexp.MustCompile(`(?i)\b(\d+)\s*(?:-|\s)?\s*(?:pack|pk|count|ct|cans|bottles|bars|pods|pouches)\b`)
+	reUnitMeasure     = regexp.MustCompile(`(?i)(?:\b\d+\s*[x×]\s*)?(\d+(?:\.\d+)?)\s*(ml|milliliters?|l|liters?|litres?|cl|g|grams?|kg|kilograms?|fl\s*oz|oz)\b`)
 )
+
+// UnitMeasure represents a normalized per-unit volume or mass from a catalog title.
+type UnitMeasure struct {
+	Value float64
+	Unit  string
+}
 
 // ParsePackMultiplier extracts an integer multipack multiplier from a catalog title (default 1).
 func ParsePackMultiplier(title string) int {
-	for _, re := range []*regexp.Regexp{reMultipackPrefix, rePackOf} {
+	for _, re := range []*regexp.Regexp{reMultipackPrefix, rePackOf, reHyphenPack} {
 		if m := re.FindStringSubmatch(title); len(m) == 2 {
 			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
 				return n
@@ -710,4 +807,58 @@ func ParsePackMultiplier(title string) int {
 		}
 	}
 	return 1
+}
+
+// ParseUnitMeasure extracts and normalizes per-unit volume or mass (e.g., 0.33L -> 330 ml, 1kg -> 1000 g).
+func ParseUnitMeasure(title string) (UnitMeasure, bool) {
+	m := reUnitMeasure.FindStringSubmatch(title)
+	if len(m) != 3 {
+		return UnitMeasure{}, false
+	}
+	val, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || val <= 0 || math.IsNaN(val) || math.IsInf(val, 0) {
+		return UnitMeasure{}, false
+	}
+	rawUnit := strings.Join(strings.Fields(strings.ToLower(m[2])), " ")
+	switch rawUnit {
+	case "ml", "milliliter", "milliliters":
+		return UnitMeasure{Value: val, Unit: "ml"}, true
+	case "cl":
+		return UnitMeasure{Value: val * 10.0, Unit: "ml"}, true
+	case "l", "liter", "liters", "litre", "litres":
+		return UnitMeasure{Value: val * 1000.0, Unit: "ml"}, true
+	case "g", "gram", "grams":
+		return UnitMeasure{Value: val, Unit: "g"}, true
+	case "kg", "kilogram", "kilograms":
+		return UnitMeasure{Value: val * 1000.0, Unit: "g"}, true
+	case "fl oz", "floz":
+		return UnitMeasure{Value: val, Unit: "fl_oz"}, true
+	case "oz":
+		return UnitMeasure{Value: val, Unit: "oz"}, true
+	default:
+		return UnitMeasure{}, false
+	}
+}
+
+// ValidatePackQuantityConsistency returns false when multipack count or normalized unit volume/mass differs
+// while the model claims an exact duplicate or identical_pack_and_volume.
+func ValidatePackQuantityConsistency(titleA, titleB, predictedRelation, predictedPackMatch string) bool {
+	if predictedRelation != "exact_duplicate" && predictedPackMatch != "identical_pack_and_volume" {
+		return true
+	}
+	if ParsePackMultiplier(titleA) != ParsePackMultiplier(titleB) {
+		return false
+	}
+	uA, okA := ParseUnitMeasure(titleA)
+	uB, okB := ParseUnitMeasure(titleB)
+	if okA && okB {
+		if uA.Unit != uB.Unit {
+			return false
+		}
+		denom := math.Max(math.Max(uA.Value, uB.Value), 1e-9)
+		if math.Abs(uA.Value-uB.Value)/denom > 0.02 {
+			return false
+		}
+	}
+	return true
 }

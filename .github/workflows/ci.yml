@@ -36,8 +36,11 @@ jobs:
             exit 1
           fi
 
-      - name: Run Go unit tests with race detector
-        run: go test -race -v ./pkg/...
+      - name: Run Go vet, unit tests with race detector, and fuzz smoke
+        run: |
+          go vet ./pkg/...
+          go test -race -v ./pkg/...
+          go test -fuzz=FuzzNormalizeCosinePriorAndFusion -fuzztime=2s ./pkg/mdm
 
       - name: Public hygiene check
         run: |

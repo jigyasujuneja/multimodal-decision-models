@@ -29,6 +29,7 @@ from multimodal_decision_models import (
     CandidateMark,
     CascadeDecisionOrchestrator,
     DecisionQuestion,
+    DecisionTerminalState,
     DgemSystemOneBackend,
     HierarchicalDecisionRouter,
     MockCallableBackend,
@@ -275,7 +276,9 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
         r_naive = HierarchicalDecisionRouter(backend, mode="mtp_naive").route(
             {"confident": False}, "intent", sparse_q, trie=sparse_trie
         )
-        self.assertTrue(r_naive.predicted.startswith("__invalid_tuple__:"))
+        self.assertEqual(r_naive.predicted, "")
+        self.assertEqual(r_naive.terminal_state, DecisionTerminalState.INVALID_TRIE_PATH)
+        self.assertEqual(r_naive.invalid_coordinates, ("dom_a", "role_2"))
         self.assertEqual(r_naive.passes_used, 1)
 
         r_trie = HierarchicalDecisionRouter(backend, mode="mtp_trie").route(
