@@ -18,7 +18,7 @@ Implements:
   1. Cardinality-normalized Shannon hesitation H_raw = H(p_raw) / ln(K) and confidence C_2 = 1 - H_raw.
   2. Pre-gated Bayesian Product-of-Experts (PoE) prior fusion: evaluates H_raw strictly BEFORE
      fusing retrieval or base-rate prior logits so strong priors never mask out-of-distribution hesitation.
-     Supports gate_mode in {"always", "confident", "hesitant", "proportional"}.
+     Supports gate_mode in {"always", "confident", "hesitant", "proportional", "never", "off"}.
   3. Stage 2A Adaptive Fast-Exit Gate (0-VLM resolution when P_1 - P_2 >= 0.14, Z >= 1.65, and no sister
      pack-size collision).
   4. Co-denoised / Causal Evidence-First slot injection.
@@ -32,13 +32,24 @@ from __future__ import annotations
 
 import math
 import statistics
-from typing import Mapping
+from dataclasses import dataclass
+from typing import Mapping, Sequence
 
+from .contracts import SchemaContractViolationError
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     MAX_OPTIONS_PER_SLOT,
     MAX_SLOTS_PER_PASS,
     DecisionQuestion,
+)
+
+VALID_PRIOR_GATE_MODES: tuple[str, ...] = (
+    "always",
+    "confident",
+    "hesitant",
+    "proportional",
+    "never",
+    "off",
 )
 
 DEFAULT_EVIDENCE_CRITERIA: dict[str, str] = {
@@ -87,27 +98,48 @@ def pre_gated_bayesian_poe_fusion(
         - "confident": fuse only when h_raw < hesitation_threshold.
         - "hesitant": fuse only when h_raw >= hesitation_threshold (tie-breaking on uncertain items).
         - "proportional": scale effective weight by prior_weight * h_raw.
+        - "never" / "off": set effective prior weight to 0.0 while preserving h_raw and temperature.
 
     Returns:
       (fused_probabilities, h_raw, should_escalate)
     """
     if not raw_probs:
         return {}, 1.0, True
-    if temperature <= 0.0:
-        raise ValueError(f"temperature must be > 0, got {temperature}")
-    if prior_weight < 0.0:
-        raise ValueError(f"prior_weight must be >= 0, got {prior_weight}")
-    if gate_mode not in ("always", "confident", "hesitant", "proportional"):
-        raise ValueError(f"unsupported gate_mode: {gate_mode!r}")
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(float(temperature))
+        or float(temperature) <= 0.0
+    ):
+        raise SchemaContractViolationError(f"temperature must be > 0, got {temperature!r}")
+    if (
+        isinstance(prior_weight, bool)
+        or not isinstance(prior_weight, (int, float))
+        or not math.isfinite(float(prior_weight))
+        or float(prior_weight) < 0.0
+    ):
+        raise SchemaContractViolationError(f"prior_weight must be >= 0, got {prior_weight!r}")
+    if (
+        isinstance(hesitation_threshold, bool)
+        or not isinstance(hesitation_threshold, (int, float))
+        or not math.isfinite(float(hesitation_threshold))
+    ):
+        raise SchemaContractViolationError(
+            f"hesitation_threshold must be finite, got {hesitation_threshold!r}"
+        )
+    if not isinstance(gate_mode, str) or gate_mode not in VALID_PRIOR_GATE_MODES:
+        raise SchemaContractViolationError(f"unsupported gate_mode: {gate_mode!r}")
 
     for k, v in raw_probs.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise SchemaContractViolationError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
         fv = float(v)
         if not math.isfinite(fv) or fv < 0.0:
-            raise ValueError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
+            raise SchemaContractViolationError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
     if prior_logits:
         for k, v in prior_logits.items():
-            if not math.isfinite(float(v)):
-                raise ValueError(f"prior_logits[{k!r}] must be finite, got {v!r}")
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+                raise SchemaContractViolationError(f"prior_logits[{k!r}] must be finite, got {v!r}")
 
     # Step 1: Normalize raw probabilities and evaluate H_raw BEFORE touching priors.
     total_raw = sum(max(0.0, float(v)) for v in raw_probs.values())
@@ -116,18 +148,23 @@ def pre_gated_bayesian_poe_fusion(
     else:
         norm_raw = {k: max(0.0, float(v)) / total_raw for k, v in raw_probs.items()}
 
+    temp_f = float(temperature)
+    pw_f = float(prior_weight)
+    hes_f = float(hesitation_threshold)
     h_raw = normalized_entropy(norm_raw)
-    should_escalate = h_raw >= hesitation_threshold
+    should_escalate = h_raw >= hes_f
 
-    eff_weight = prior_weight
-    if gate_mode == "confident" and h_raw >= hesitation_threshold:
+    eff_weight = pw_f
+    if gate_mode in ("never", "off"):
         eff_weight = 0.0
-    elif gate_mode == "hesitant" and h_raw < hesitation_threshold:
+    elif gate_mode == "confident" and h_raw >= hes_f:
+        eff_weight = 0.0
+    elif gate_mode == "hesitant" and h_raw < hes_f:
         eff_weight = 0.0
     elif gate_mode == "proportional":
-        eff_weight = prior_weight * h_raw
+        eff_weight = pw_f * h_raw
 
-    if (not prior_logits or eff_weight == 0.0) and math.isclose(temperature, 1.0):
+    if (not prior_logits or eff_weight == 0.0) and math.isclose(temp_f, 1.0):
         return dict(norm_raw), h_raw, should_escalate
 
     # Step 2: Log-space Bayesian Product-of-Experts fusion:
@@ -136,7 +173,7 @@ def pre_gated_bayesian_poe_fusion(
     log_scores: dict[str, float] = {}
     for k, p in norm_raw.items():
         prior_val = float(prior_logits.get(k, 0.0)) if prior_logits else 0.0
-        log_scores[k] = (math.log(max(eps, p)) / temperature) + (eff_weight * prior_val)
+        log_scores[k] = (math.log(max(eps, p)) / temp_f) + (eff_weight * prior_val)
 
     max_log = max(log_scores.values())
     exp_scores = {k: math.exp(v - max_log) for k, v in log_scores.items()}
@@ -282,3 +319,418 @@ def apply_layer5_deterministic_guards(
             return rank1_id, "layer5_competitor_similarity_guard"
 
     return chosen_id, "none"
+
+
+def _row_to_shifted_logits(
+    row: Mapping[str, float],
+    *,
+    is_logits: bool,
+    eps: float = 1e-12,
+) -> dict[str, float]:
+    if not row:
+        raise ValueError("calibration input row must be non-empty")
+    clean: dict[str, float] = {}
+    for raw_k, raw_v in row.items():
+        key = str(raw_k)
+        val = float(raw_v)
+        if not math.isfinite(val):
+            raise ValueError(f"non-finite value for {key!r}: {raw_v!r}")
+        if not is_logits and val < 0.0:
+            raise ValueError(f"probability for {key!r} must be >= 0, got {raw_v!r}")
+        clean[key] = val
+
+    if is_logits:
+        max_z = max(clean.values())
+        return {k: v - max_z for k, v in clean.items()}
+
+    tot = sum(clean.values())
+    if tot <= 0.0:
+        raise ValueError("probability row sum must be > 0")
+    raw_logs = {k: math.log(max(eps, v / tot)) for k, v in clean.items()}
+    max_l = max(raw_logs.values())
+    return {k: v - max_l for k, v in raw_logs.items()}
+
+
+def _row_to_vector_logits(
+    row: Mapping[str, float],
+    *,
+    is_logits: bool,
+    eps: float = 1e-12,
+) -> dict[str, float]:
+    if not row:
+        raise ValueError("calibration input row must be non-empty")
+    clean: dict[str, float] = {}
+    for raw_k, raw_v in row.items():
+        key = str(raw_k)
+        val = float(raw_v)
+        if not math.isfinite(val):
+            raise ValueError(f"non-finite value for {key!r}: {raw_v!r}")
+        if not is_logits and val < 0.0:
+            raise ValueError(f"probability for {key!r} must be >= 0, got {raw_v!r}")
+        clean[key] = val
+
+    if is_logits:
+        mean_z = sum(clean.values()) / float(len(clean))
+        return {k: v - mean_z for k, v in clean.items()}
+
+    tot = sum(clean.values())
+    if tot <= 0.0:
+        raise ValueError("probability row sum must be > 0")
+    raw_logs = {k: math.log(max(eps, v / tot)) for k, v in clean.items()}
+    mean_l = sum(raw_logs.values()) / float(len(raw_logs))
+    return {k: v - mean_l for k, v in raw_logs.items()}
+
+
+def _softmax_dict(scores: Mapping[str, float]) -> dict[str, float]:
+    max_s = max(scores.values())
+    exps = {k: math.exp(v - max_s) for k, v in scores.items()}
+    denom = sum(exps.values())
+    return {k: v / denom for k, v in exps.items()}
+
+
+@dataclass(frozen=True)
+class TemperatureScalingModel:
+    """Post-hoc scalar temperature scaling model P_cal(k | x) = softmax(logits / T)_k."""
+
+    temperature: float
+    l2_reg: float = 1e-3
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.temperature) or self.temperature <= 0.0:
+            raise ValueError(f"temperature must be finite and > 0, got {self.temperature!r}")
+        if not math.isfinite(self.l2_reg) or self.l2_reg < 0.0:
+            raise ValueError(f"l2_reg must be finite and >= 0, got {self.l2_reg!r}")
+
+    def predict_proba(
+        self,
+        probs_or_logits: Sequence[Mapping[str, float]],
+        *,
+        is_logits: bool = False,
+    ) -> list[dict[str, float]]:
+        inv_t = 1.0 / self.temperature
+        out: list[dict[str, float]] = []
+        for row in probs_or_logits:
+            logits = _row_to_shifted_logits(row, is_logits=is_logits)
+            scaled = {k: v * inv_t for k, v in logits.items()}
+            out.append(_softmax_dict(scaled))
+        return out
+
+
+@dataclass(frozen=True)
+class VectorScalingModel:
+    """Post-hoc L2-regularized diagonal vector scaling model P_cal(k | x) = softmax(a_k * l_k + b_k)."""
+
+    scales: dict[str, float]
+    biases: dict[str, float]
+    temperature_init: float
+    l2_reg: float = 1e-3
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.temperature_init) or self.temperature_init <= 0.0:
+            raise ValueError(f"temperature_init must be finite and > 0, got {self.temperature_init!r}")
+        if not math.isfinite(self.l2_reg) or self.l2_reg < 0.0:
+            raise ValueError(f"l2_reg must be finite and >= 0, got {self.l2_reg!r}")
+
+    def predict_proba(
+        self,
+        probs_or_logits: Sequence[Mapping[str, float]],
+        *,
+        is_logits: bool = False,
+    ) -> list[dict[str, float]]:
+        default_scale = 1.0 / self.temperature_init
+        out: list[dict[str, float]] = []
+        for row in probs_or_logits:
+            logits = _row_to_vector_logits(row, is_logits=is_logits)
+            scaled = {
+                k: float(self.scales.get(k, default_scale)) * val + float(self.biases.get(k, 0.0))
+                for k, val in logits.items()
+            }
+            out.append(_softmax_dict(scaled))
+        return out
+
+
+def _temp_objective_and_derivs(
+    tau: float,
+    logit_rows: Sequence[dict[str, float]],
+    gold_labels: Sequence[str],
+    l2_reg: float,
+) -> tuple[float, float, float]:
+    """Compute (loss, grad_tau, hess_tau) for tau = ln(T)."""
+    inv_t = math.exp(-tau)
+    n = float(len(logit_rows))
+    nll_sum = 0.0
+    grad_sum = 0.0
+    hess_sum = 0.0
+
+    for logits, gold in zip(logit_rows, gold_labels):
+        scaled = {k: v * inv_t for k, v in logits.items()}
+        probs = _softmax_dict(scaled)
+        p_gold = max(1e-15, probs[gold])
+        nll_sum -= math.log(p_gold)
+
+        mean_l = sum(probs[k] * logits[k] for k in logits)
+        var_l = sum(probs[k] * ((logits[k] - mean_l) ** 2) for k in logits)
+        l_gold = logits[gold]
+
+        # d(-ln p_y)/d(inv_t) = mean_l - l_gold; d(inv_t)/d(tau) = -inv_t
+        grad_sum += (l_gold - mean_l) * inv_t
+        # Exact second derivative wrt tau: inv_t^2 * var_l - inv_t * (l_gold - mean_l)
+        # Gauss-Newton positive curvature inv_t^2 * var_l guarantees convexity in inv_t;
+        # use exact Hessian when positive and fall back to Gauss-Newton curvature otherwise.
+        exact_h = (inv_t * inv_t * var_l) - ((l_gold - mean_l) * inv_t)
+        hess_sum += max(inv_t * inv_t * var_l, exact_h)
+
+    loss = (nll_sum / n) + 0.5 * l2_reg * (tau * tau)
+    grad = (grad_sum / n) + l2_reg * tau
+    hess = (hess_sum / n) + l2_reg
+    return loss, grad, hess
+
+
+def fit_temperature_scaling(
+    probs_or_logits: Sequence[Mapping[str, float]],
+    labels: Sequence[str],
+    *,
+    is_logits: bool = False,
+    l2_reg: float = 1e-3,
+) -> TemperatureScalingModel:
+    """Fit post-hoc scalar temperature scaling via grid-bracketed damped Newton-Raphson on tau = ln(T)."""
+    if not probs_or_logits or len(probs_or_logits) != len(labels):
+        raise ValueError("probs_or_logits and labels must be non-empty sequences of equal length")
+    if not math.isfinite(l2_reg) or l2_reg < 0.0:
+        raise ValueError(f"l2_reg must be finite and >= 0, got {l2_reg!r}")
+
+    logit_rows: list[dict[str, float]] = []
+    gold_labels: list[str] = []
+    for idx, (row, raw_lbl) in enumerate(zip(probs_or_logits, labels)):
+        logits = _row_to_shifted_logits(row, is_logits=is_logits)
+        lbl = str(raw_lbl)
+        if lbl not in logits:
+            raise ValueError(f"label {lbl!r} at index {idx} not present in row keys")
+        logit_rows.append(logits)
+        gold_labels.append(lbl)
+
+    tau_min = -4.0
+    tau_max = 4.0
+    best_tau = 0.0
+    best_loss, _, _ = _temp_objective_and_derivs(0.0, logit_rows, gold_labels, l2_reg)
+
+    for step_i in range(81):
+        cand_tau = tau_min + (tau_max - tau_min) * (float(step_i) / 80.0)
+        cand_loss, _, _ = _temp_objective_and_derivs(cand_tau, logit_rows, gold_labels, l2_reg)
+        if cand_loss < best_loss:
+            best_loss = cand_loss
+            best_tau = cand_tau
+
+    tau = best_tau
+    for _ in range(50):
+        loss, grad, hess = _temp_objective_and_derivs(tau, logit_rows, gold_labels, l2_reg)
+        if abs(grad) < 1e-10:
+            break
+        delta = -grad / max(abs(hess), 1e-6)
+        step = 1.0
+        accepted = False
+        while step >= 1e-6:
+            trial_tau = min(tau_max, max(tau_min, tau + step * delta))
+            trial_loss, _, _ = _temp_objective_and_derivs(trial_tau, logit_rows, gold_labels, l2_reg)
+            if trial_loss <= loss - 1e-12:
+                tau = trial_tau
+                accepted = True
+                break
+            step *= 0.5
+        if not accepted:
+            break
+
+    return TemperatureScalingModel(temperature=math.exp(tau), l2_reg=l2_reg)
+
+
+def _vector_loss_grad_diag(
+    scales: Sequence[float],
+    biases: Sequence[float],
+    indexed_rows: Sequence[list[tuple[int, float]]],
+    gold_indices: Sequence[int],
+    inv_t0: float,
+    l2_reg: float,
+) -> tuple[float, list[float], list[float], list[float], list[float]]:
+    c_len = len(scales)
+    n = float(len(indexed_rows))
+    grad_a = [l2_reg * (scales[c] - inv_t0) for c in range(c_len)]
+    grad_b = [l2_reg * biases[c] for c in range(c_len)]
+    diag_a = [max(l2_reg, 1e-4) for _ in range(c_len)]
+    diag_b = [max(l2_reg, 1e-4) for _ in range(c_len)]
+    nll_sum = 0.0
+
+    for items, g_idx in zip(indexed_rows, gold_indices):
+        z_vals = [scales[c_idx] * l_val + biases[c_idx] for c_idx, l_val in items]
+        max_z = max(z_vals)
+        exps = [math.exp(z - max_z) for z in z_vals]
+        denom = sum(exps)
+        inv_n = 1.0 / n
+        for (c_idx, l_val), exp_v in zip(items, exps):
+            q_val = exp_v / denom
+            if c_idx == g_idx:
+                nll_sum -= math.log(max(1e-15, q_val))
+                diff = q_val - 1.0
+            else:
+                diff = q_val
+            grad_a[c_idx] += diff * l_val * inv_n
+            grad_b[c_idx] += diff * inv_n
+            curv = q_val * (1.0 - q_val) * inv_n
+            diag_a[c_idx] += curv * (l_val * l_val)
+            diag_b[c_idx] += curv
+
+    reg_pen = 0.5 * l2_reg * sum(
+        ((scales[c] - inv_t0) ** 2) + (biases[c] ** 2) for c in range(c_len)
+    )
+    return (nll_sum / n) + reg_pen, grad_a, grad_b, diag_a, diag_b
+
+
+def fit_vector_scaling(
+    probs_or_logits: Sequence[Mapping[str, float]],
+    labels: Sequence[str],
+    *,
+    is_logits: bool = False,
+    l2_reg: float = 1e-3,
+) -> VectorScalingModel:
+    """Fit post-hoc diagonal vector scaling shrunk toward scalar temperature scaling (1 / T_0, 0)."""
+    if not probs_or_logits or len(probs_or_logits) != len(labels):
+        raise ValueError("probs_or_logits and labels must be non-empty sequences of equal length")
+    if not math.isfinite(l2_reg) or l2_reg < 0.0:
+        raise ValueError(f"l2_reg must be finite and >= 0, got {l2_reg!r}")
+
+    t_model = fit_temperature_scaling(
+        probs_or_logits,
+        labels,
+        is_logits=is_logits,
+        l2_reg=min(l2_reg, 1e-2) if l2_reg > 0.0 else 0.0,
+    )
+    t0 = t_model.temperature
+    inv_t0 = min(50.0, max(0.02, 1.0 / t0))
+
+    logit_rows: list[dict[str, float]] = []
+    gold_labels: list[str] = []
+    key_set: set[str] = set()
+    for idx, (row, raw_lbl) in enumerate(zip(probs_or_logits, labels)):
+        logits = _row_to_vector_logits(row, is_logits=is_logits)
+        lbl = str(raw_lbl)
+        if lbl not in logits:
+            raise ValueError(f"label {lbl!r} at index {idx} not present in row keys")
+        logit_rows.append(logits)
+        gold_labels.append(lbl)
+        key_set.update(logits.keys())
+
+    classes = sorted(key_set)
+    cls_to_idx = {c: idx for idx, c in enumerate(classes)}
+    c_len = len(classes)
+    gold_set = set(gold_labels)
+    observed_mask = [c in gold_set for c in classes]
+
+    indexed_rows: list[list[tuple[int, float]]] = [
+        [(cls_to_idx[k], v) for k, v in row.items()] for row in logit_rows
+    ]
+    gold_indices = [cls_to_idx[lbl] for lbl in gold_labels]
+
+    # Parameter vector x of length 2 * c_len: [scales..., biases...]
+    x_vec = [inv_t0] * c_len + [0.0] * c_len
+    s_hist: list[list[float]] = []
+    y_hist: list[list[float]] = []
+    m_hist = 7
+
+    loss, ga, gb, da, db = _vector_loss_grad_diag(
+        x_vec[:c_len], x_vec[c_len:], indexed_rows, gold_indices, inv_t0, l2_reg
+    )
+    for idx_c in range(c_len):
+        if not observed_mask[idx_c]:
+            ga[idx_c] = 0.0
+            gb[idx_c] = 0.0
+    grad = ga + gb
+    diag = da + db
+
+    for _ in range(200):
+        max_g = max(abs(v) for v in grad)
+        if max_g < 1e-8:
+            break
+
+        # L-BFGS two-loop recursion with diagonal Gauss-Newton preconditioner
+        q_vec = list(grad)
+        alphas: list[float] = []
+        rhos: list[float] = []
+        for s_item, y_item in reversed(list(zip(s_hist, y_hist))):
+            sy = sum(si * yi for si, yi in zip(s_item, y_item))
+            rho = (1.0 / sy) if sy > 1e-14 else 0.0
+            rhos.append(rho)
+            a_val = rho * sum(si * qi for si, qi in zip(s_item, q_vec))
+            alphas.append(a_val)
+            q_vec = [qi - a_val * yi for qi, yi in zip(q_vec, y_item)]
+        alphas.reverse()
+        rhos.reverse()
+
+        r_vec = [qi / max(di, 1e-4) for qi, di in zip(q_vec, diag)]
+        for s_item, y_item, a_val, rho in zip(s_hist, y_hist, alphas, rhos):
+            if rho == 0.0:
+                continue
+            b_val = rho * sum(yi * ri for yi, ri in zip(y_item, r_vec))
+            r_vec = [ri + (a_val - b_val) * si for ri, si in zip(r_vec, s_item)]
+
+        direction = [-ri for ri in r_vec]
+        dir_deriv = sum(di * gi for di, gi in zip(direction, grad))
+        if dir_deriv >= -1e-14:
+            direction = [-gi / max(di, 1e-4) for gi, di in zip(grad, diag)]
+            dir_deriv = sum(di * gi for di, gi in zip(direction, grad))
+
+        step = 1.0
+        accepted = False
+        new_x = x_vec
+        new_loss = loss
+        new_grad = grad
+        new_diag = diag
+
+        while step >= 1e-6:
+            cand_x = [xi + step * di for xi, di in zip(x_vec, direction)]
+            for idx_a in range(c_len):
+                if observed_mask[idx_a]:
+                    cand_x[idx_a] = min(50.0, max(0.02, cand_x[idx_a]))
+                    cand_x[c_len + idx_a] = min(20.0, max(-20.0, cand_x[c_len + idx_a]))
+                else:
+                    cand_x[idx_a] = inv_t0
+                    cand_x[c_len + idx_a] = 0.0
+            c_loss, c_ga, c_gb, c_da, c_db = _vector_loss_grad_diag(
+                cand_x[:c_len], cand_x[c_len:], indexed_rows, gold_indices, inv_t0, l2_reg
+            )
+            for idx_c in range(c_len):
+                if not observed_mask[idx_c]:
+                    c_ga[idx_c] = 0.0
+                    c_gb[idx_c] = 0.0
+            if c_loss <= loss + 1e-4 * step * dir_deriv or c_loss < loss - 1e-12:
+                new_x = cand_x
+                new_loss = c_loss
+                new_grad = c_ga + c_gb
+                new_diag = c_da + c_db
+                accepted = True
+                break
+            step *= 0.5
+
+        if not accepted:
+            break
+
+        s_step = [nx - ox for nx, ox in zip(new_x, x_vec)]
+        y_step = [ng - og for ng, og in zip(new_grad, grad)]
+        if sum(si * yi for si, yi in zip(s_step, y_step)) > 1e-14:
+            s_hist.append(s_step)
+            y_hist.append(y_step)
+            if len(s_hist) > m_hist:
+                s_hist.pop(0)
+                y_hist.pop(0)
+
+        x_vec = new_x
+        loss = new_loss
+        grad = new_grad
+        diag = new_diag
+
+    scales_out = {c: x_vec[idx] for idx, c in enumerate(classes)}
+    biases_out = {c: x_vec[c_len + idx] for idx, c in enumerate(classes)}
+    return VectorScalingModel(
+        scales=scales_out,
+        biases=biases_out,
+        temperature_init=t0,
+        l2_reg=l2_reg,
+    )

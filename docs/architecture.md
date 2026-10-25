@@ -1,54 +1,63 @@
 # Architecture and Mathematical Design
 
-## 1. Pre-Gated Bayesian Product-of-Experts (`calibration.py`)
+Single-pass logprob engines, masked diffusion deciders, and black-box sampled models expose incompatible output surfaces and miscalibrated confidence scales. This document specifies the calibration, set-valued abstention, dual-buffer photometry, retrieval, context-pruning, and contract primitives in `multimodal-decision-models` (`v0.4.0`).
 
-Given an uncalibrated $K$-way model readout $p_{\text{raw}}$, we measure cardinality-normalized Shannon hesitation strictly before fusing external priors:
+## 1. Four-Paradigm Backends and Dirichlet Smoothing (`backends.py`)
+
+`DecisionBackend` standardizes multi-slot probability readouts across four execution surfaces:
+
+- **`DgemSystemOneBackend`**: Scores up to 8 slots $\times$ 26 options in one forward pass against `/v1/systemone`.
+- **`OpenAILogprobBackend`**: Maps option identifiers onto single-token uppercase letters (`A..Z`) and verifies `top_logprobs` alignment on `/v1/chat/completions`.
+- **`VertexGeminiBackend`**: Enforces `propertyOrdering` with `evidence_read` decoded ahead of `[A-Z]` slot enums so lower-triangular causal attention conditions choices on explicit visual or numeric observations.
+- **`BlackBoxSampledBackend`**: Aggregates $M$ sampled completions or verbalized vote counts $c_k$ without requiring token logprobs. Under a symmetric Dirichlet prior $\alpha_0 > 0$ (default $\alpha_0 = 0.5$ Jeffreys prior) with $A_0 = \sum_{j=1}^K (c_j + \alpha_0)$, posterior predictive probabilities and per-option epistemic variances are:
+
+$$p_k = \frac{c_k + \alpha_0}{A_0}, \qquad \operatorname{Var}(\theta_k \mid c) = \frac{p_k(1 - p_k)}{A_0 + 1}$$
+
+For finite $M$, $p_k \in (0, 1)$ keeps negative log-likelihood finite and normalized entropy strictly positive while $\sum_k \operatorname{Var}(\theta_k \mid c)$ shrinks monotonically as $M$ grows.
+
+## 2. Split Conformal Prediction and Pre-Fusion Gating (`conformal.py`)
+
+Given $n$ exchangeable calibration examples $(X_i, Y_i)$ and target miscoverage $\alpha \in (0, 1)$, `calibrate_conformal_quantile` ranks each slot's normalized probabilities $p_{(1)} \ge \dots \ge p_{(K)}$ and computes nonconformity scores:
+
+- **LAC**: $s_{\text{lac}}(x, y) = 1 - p_y(x)$
+- **APS**: $s_{\text{aps}}(x, y) = \sum_{j < r(y)} p_{(j)}(x) + u \cdot p_y(x)$ ($u = 0$ in deterministic mode, $u \sim \operatorname{Uniform}(0, 1)$ when `randomized=True`)
+- **RAPS**: $s_{\text{raps}}(x, y) = s_{\text{aps}}(x, y) + \lambda_{\text{reg}} \max(0, r(y) - k_{\text{reg}})$
+
+Selecting the order statistic $m = \lceil (n + 1)(1 - \alpha) \rceil$ (with $\hat{q} = +\infty$ when $m > n$) yields $\mathbb{P}(Y_{n+1} \in \mathcal{C}_\alpha(X_{n+1})) \ge 1 - \alpha$ without distributional assumptions. `CascadeDecisionOrchestrator` evaluates $\mathcal{C}_\alpha(x) = \{y : s(x, y) \le \hat{q}\}$ on raw Stage-1 probabilities before fusing external priors, escalating whenever $|\mathcal{C}_\alpha(x)| \ne 1$ or an abstain option enters $\mathcal{C}_\alpha(x)$.
+
+## 3. Pre-Gated Bayesian PoE and Post-Hoc Scaling (`calibration.py`)
+
+Cardinality-normalized Shannon hesitation is computed on raw Stage-1 probabilities before prior fusion:
 
 $$\tilde{H}_{\text{raw}} = -\frac{1}{\ln K}\sum_{k=1}^K p_{\text{raw},k}\ln p_{\text{raw},k} \in [0, 1]$$
 
-Downstream cascade routing ($\tilde{H}_{\text{raw}} \ge \tau$, default $\tau = 0.16$) and confidence reporting ($C_2 = 1 - \tilde{H}_{\text{raw}}$) read $\tilde{H}_{\text{raw}}$ directly so an adversarial or miscalibrated stage-1 prior cannot suppress epistemic uncertainty on out-of-distribution inputs.
-
-Log-linear prior fusion combines temperature-scaled log-probabilities with caller-supplied prior logits $\pi_k$:
+Log-linear prior fusion combines temperature-scaled log-probabilities with prior logits $\pi_k$:
 
 $$\ln p_{\text{fused}}(k) = \frac{1}{T}\ln p_{\text{raw},k} + w_{\text{eff}}(\tilde{H}_{\text{raw}}) \cdot \pi_k$$
 
-Four gating schedules are available via `gate_mode`:
+Available `gate_mode` schedules are `"hesitant"` ($w \cdot \mathbb{I}[\tilde{H}_{\text{raw}} \ge \tau]$), `"proportional"` ($w \cdot \tilde{H}_{\text{raw}}$), `"confident"` ($w \cdot \mathbb{I}[\tilde{H}_{\text{raw}} < \tau]$), and `"always"` ($w$).
 
-- **`"hesitant"`**: $w_{\text{eff}} = w \cdot \mathbb{I}[\tilde{H}_{\text{raw}} \ge \tau]$. Leaves confident predictions ($\tilde{H}_{\text{raw}} < \tau$) untouched (zero prior-induced flips on low-entropy items) while letting retrieval or base-rate priors break ties on ambiguous cases ($\tilde{H}_{\text{raw}} \ge \tau$).
-- **`"proportional"`**: $w_{\text{eff}} = w \cdot \tilde{H}_{\text{raw}}$. Scales prior influence smoothly from $0$ at model certainty ($\tilde{H}_{\text{raw}} = 0$) to $w$ at uniform uncertainty ($\tilde{H}_{\text{raw}} = 1$).
-- **`"confident"`**: $w_{\text{eff}} = w \cdot \mathbb{I}[\tilde{H}_{\text{raw}} < \tau]$. Sharpens low-entropy predictions without altering high-entropy distributions.
-- **`"always"`**: $w_{\text{eff}} = w$ across items while preserving pre-fusion $\tilde{H}_{\text{raw}}$ for cascade escalation.
+For post-hoc calibration on held-out logits or probabilities:
 
-## 2. Stage-2A Fast-Exit, Shortlist Routing, and Taxonomy Tries (`shortlist.py`, `hierarchy.py`)
+- **`fit_temperature_scaling`**: Minimizes $L_2$-regularized cross-entropy over $\tau = \ln T$ via an 81-point grid search followed by damped Newton-Raphson refinement.
+- **`fit_vector_scaling`**: Fits class-wise scales $a_k$ and biases $b_k$ via L-BFGS with diagonal Gauss-Newton preconditioning under penalty $\frac{\lambda}{2}\sum_k \bigl((a_k - 1/T_0)^2 + b_k^2\bigr)$, shrinking rare classes toward scalar temperature $T_0$.
 
-For wide taxonomies ($K > 26$ up to $10,000+$ SKUs or intents):
+## 4. Dual-Buffer Photometry and Auto-Saliency Sheets (`visual_compiler.py`)
 
-1. **Stage-2A Fast-Exit (`stage2a_fast_exit_gate`)**: When dense embedding retrieval produces an unambiguous top-1 match ($P_1 - P_2 \ge 0.14$, shortlist $Z \ge 1.65$, and no sister pack-size collision), the funnel resolves in `0` VLM calls.
-2. **Dense Top-$M$ Shortlist (`shortlist_wide_question`)**: Prunes $K$ options to top-$M$ ($M \in [6, 25]$) plus an explicit `none_of_the_above` catch-all in 1 forward pass, compared to $1 + \lceil\lceil K/20 \rceil / 8\rceil$ passes for packed tournament brackets (`packed_bracket_pass_count`).
-3. **Log-Softmax Cosine Priors (`normalize_cosine_prior_logits`)**: Converts compressed raw cosines ($[0.25, 0.55]$) into calibrated log-probabilities $\pi_k = (\cos_k / \tau) - \operatorname{logsumexp}_j(\cos_j / \tau)$ at default $\tau = 0.07$ before `pre_gated_bayesian_poe_fusion`.
-4. **Opt-In Contrastive Cues (`pairwise_diff`)**: Defaults to `False` so terse intent descriptions remain clean; enable `pairwise_diff=True` when catalog entries share repetitive boilerplate and differ only in compact attributes such as `6x330ml` vs `1x330ml`.
-5. **Two-Level Semantic Taxonomy Tries (`build_prefix_taxonomy_trie`, `HierarchicalDecisionRouter`)**: Keeps coarse and fine slots within $\le 26$ `[A-Z]` options, buckets opaque `option_N` schemas by description stems, aligns shared cross-domain suffixes (`role_<suffix>`), and supports 1-pass `mtp_trie`, 2-pass `beam_2pass`, and `hesitation_hybrid`.
+Applying local contrast stretching before dense retrieval distorts brand packaging colors. `visual_compiler.py` maintains two distinct buffers encoded with pure-stdlib PNG (`IHDR`, `IDAT` filters `0..4`, `IEND`, IEEE CRC32) and PPM (`P6`/`P3`) codecs:
 
-## 3. Set-of-Marks Discrete UI Navigation (`som_navigator.py`)
+1. **Stage-2A Unsharpened Buffer (`shades_of_gray_white_balance`)**: Normalizes channel illuminants via Minkowski $p=6$ Shades-of-Gray without local sharpening, feeding inner-80% CIE $L^*a^*b^*$ $\Delta E$ similarity (`inner_crop_cie_lab_similarity`) and the residual InfoNCE adapter $e' = \operatorname{norm}(q + \alpha W_2 \operatorname{GELU}(W_1 q))$ (`apply_residual_mlp_adapter`).
+2. **Stage-2B Contact Sheet (`compile_dual_buffer_contact_sheet`)**: Applies $3 \times 3$ local contrast stretching on cloned comparison panels, extracts the maximum inter-candidate pixel variance band $V(y) = \operatorname{Mean}_{x,c}(\operatorname{Var}_k R_k(x, y, c))$ (`extract_inter_candidate_saliency_band`), appends $2\times$ saliency and bottom-30% net-weight zoom strips, and optionally unwarps curved containers by $1.15\times$.
 
-Continuous coordinate regression degrades on compact UI icons. `som_navigator.py` converts spatial UI grounding into a discrete 4-slot single-pass policy over numbered accessibility or detector candidate boxes (`M1..Mn` + `none_visible`):
+## 5. Shortlists, Embedding Index, and Context Pruning (`shortlist.py`, `embedding_index.py`, `context_pruner.py`)
 
-- `assign_box_to_grid_cell`, `assign_box_to_grid_4x4`, and `grid_4x4_cell_bounds` map `[y_min, x_min, y_max, x_max]` boxes onto $3 \times 3$ and $4 \times 4$ spatial grids.
-- `safe_expected_mark_center` computes the probability-weighted centroid when dispersion stays unimodal and inside a candidate box, snapping deterministically to the highest-probability mark when bimodal splits or non-convex layouts place the centroid in dead space.
-- `select_containing_or_nearest_mark` resolves nested containers by selecting the smallest-area mark containing a target point before falling back to Euclidean center distance.
+- **Multimodal Embedding Index (`MultimodalEmbeddingIndex`, `VertexMultimodalEmbeddingAdapter`)**: Builds Vertex AI `:predict` payloads for `gemini-embedding-2` and combines cosine or `CSLS` scores, CIE $L^*a^*b^*$ color similarity, and Lidstone-smoothed container aspect priors, triggering `stage2a_fast_exit_gate` when $P_1 - P_2 \ge 0.14$, $Z \ge 1.65$, and top candidates have no sister pack-size collision.
+- **Wide-Option Shortlists and Taxonomy Tries (`shortlist_wide_question`, `HierarchicalDecisionRouter`)**: Compresses $K > 26$ options into top-$M$ single-pass shortlists with $\tau = 0.07$ log-softmax cosine priors or two-level `[A-Z]` semantic tries (`mtp_trie`, `beam_2pass`, `hesitation_hybrid`).
+- **8-Slot Context Pruning (`prune_agent_context_blocks`)**: Scores up to 8 trajectory blocks per pass over `{"full", "stub", "drop"}` with utilities $u(\text{full}) = p_{\text{full}} + 0.5 p_{\text{stub}}$, $u(\text{stub}) = 0.6 p_{\text{full}} + p_{\text{stub}}$, and $u(\text{drop}) = 0$, solving exact Pareto-frontier dynamic programming under `token_budget` while forbidding `"drop"` on `pinned` blocks.
 
-## 4. Continuous Triangle Consistency and Multi-Slot Arbiters (`consistency.py`)
+## 6. UI Grounding, Relational Guards, Contracts, and MCP (`som_navigator.py`, `consistency.py`, `contracts.py`, `eval_suite.py`, `mcp_server.py`)
 
-- **Continuous Triangle Contradiction (`score_probabilistic_triangles`)**: Scores 3-cycles $(A, B, C)$ by $\max\bigl(p_{ab}p_{bc}(1-p_{ac}),\; p_{ab}p_{ac}(1-p_{bc}),\; p_{bc}p_{ac}(1-p_{ab})\bigr) \in [0, 1]$, catching soft relational contradictions below hard threshold cutoffs (`check_transitive_triangles`).
-- **Pack-Quantity and Unit-Measure Guard (`parse_unit_measure`, `validate_pack_quantity_consistency`)**: Normalizes multipack counts (`6x330ml`, `Pack of 12`) and canonical metric volumes or weights (`0.5L` vs `500ml`, `1kg` vs `1000g`, `16 fl oz` vs `473ml`) to block false `exact_duplicate` merges across distinct sizes.
-- **Swarm Lock Arbiter (`arbitrate_swarm_locks`)**: Grants, serializes, or escalates concurrent multi-agent file-lock requests in a single pass.
-
-## 5. Total Contracts and Six-Tier Evaluation (`contracts.py`, `eval_suite.py`)
-
-Production inference pipelines fail closed rather than substituting fabricated `0.98` or uniform `1/K` probabilities when logprobs are missing or misaligned:
-
-- **Terminal State Machine (`DecisionTerminalState`)**: Every `SlotReadout` and `DecisionResult` ends in `RESOLVED`, `ABSTAINED`, `RETRY_PENDING` (transient HTTP `429`/`503` or socket timeout), or `REJECTED_CONTRACT_VIOLATION` (unaligned `top_logprobs`, non-finite logits, or malformed schema payloads).
-- **Single-Token Enum Bijection**: `VertexGeminiBackend` and `OpenAILogprobBackend` bind multi-token option keys to single-token uppercase letters (`A..Z`) at the wire boundary so token logprobs map 1:1 back to domain choices.
-- **Untrusted Input Isolation**: `sanitize_untrusted_text` and `wrap_untrusted_state` strip control characters, neutralize fake closing tags, and fence OCR or user text inside `<untrusted_data>` blocks.
-- **Content-Addressed Caching (`ContentAddressedDecisionCache`)**: Hashes canonical policy specifications, sanitized state, image payload digests, and calibration options with SHA-256 while excluding `RETRY_PENDING` and `REJECTED_CONTRACT_VIOLATION` outcomes from persistence.
-- **Proper-Scoring and Statistical Metrics (`eval_suite.py`)**: Computes multiclass Brier score, NLL, `ECE`, `AUROC`, selective `AURC`, exact paired McNemar $p$-values, Rogan-Gladen prevalence adjustment, Cohen's $\kappa$, and cluster-level paired bootstrap intervals.
+- **Set-of-Marks Grounding**: Maps detector boxes onto $3 \times 3$ and $4 \times 4$ grids, computes unimodal-safe centroids (`safe_expected_mark_center`), and resolves nested boxes by smallest containing area.
+- **Relational and Pack Guards**: Scores probabilistic 3-cycles (`score_probabilistic_triangles`), verifies canonical metric/imperial unit volumes (`validate_pack_quantity_consistency`), and arbitrates concurrent multi-agent locks.
+- **Total Contracts and Proper Scoring**: Enforces closed terminal states (`STAGE1_RESOLVED`, `STAGE2_VERIFIED`, `STAGE2A_FAST_EXIT`, `GUARD_OVERRIDDEN`, `ABSTAIN_OOS`, `RETRY_PENDING`, `REJECTED_CONTRACT_VIOLATION`), `<untrusted_data>` isolation, SHA-256 JSONL caching, and evaluation metrics (`brier_murphy_decomposition` into `REL` / `RES` / `UNC`, `ECE`, quantile-binned `ACE`, Macro-F1, `nDCG@k`, `AURC`, exact paired McNemar, Rogan-Gladen prevalence, and cluster bootstrap CIs).
+- **MCP `stdio` Server (`dgem-catalog`)**: Exposes `shortlist_candidates`, `evaluate_conformal_decision`, `prune_context_blocks`, and `compile_contact_sheet` over JSON-RPC 2.0 `stdio` without external SDK dependencies.

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multimodal-decision-models"
-version = "0.3.0"
-description = "Backend-agnostic calibrated multimodal decision models: pre-gated Bayesian PoE prior fusion, co-denoised and causal evidence slots, catalog-scale shortlist routing, Set-of-Marks UI navigation, transitive triangle-consistency entity resolution, and multi-slot lock arbiters across masked diffusion and autoregressive logprob backends."
+version = "0.4.0"
+description = "Model-agnostic calibrated multimodal decision models: four-paradigm backends, split conformal and RAPS prediction sets, L2 calibration, dual-buffer visual contact sheets, pluggable embedding shortlists, context pruning, and MCP stdio routing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
@@ -13,6 +13,9 @@ authors = [
   {name = "Jigyasu Juneja"}
 ]
 dependencies = []
+
+[project.scripts]
+dgem-catalog-mcp = "multimodal_decision_models.mcp_server:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

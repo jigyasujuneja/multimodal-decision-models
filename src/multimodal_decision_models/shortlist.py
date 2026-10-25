@@ -25,8 +25,9 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
+from .contracts import SchemaContractViolationError
 from .types import MAX_OPTIONS_PER_SLOT, DecisionQuestion
 
 DEFAULT_COSINE_PRIOR_TEMPERATURE = 0.07
@@ -135,15 +136,43 @@ def build_contrastive_criteria(
     return out
 
 
+def _is_non_str_sequence(val: Any) -> bool:
+    return isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray))
+
+
+def _coerce_finite_vec_entry(val: Any, label: str) -> float:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise SchemaContractViolationError(
+            f"{label} entries must be finite int or float, got {type(val).__name__}"
+        )
+    out = float(val)
+    if not math.isfinite(out):
+        raise SchemaContractViolationError(f"{label} contains non-finite value {val!r}")
+    return out
+
+
+def _safe_unit_scale(vals: Sequence[float]) -> list[float] | None:
+    max_abs = max(abs(v) for v in vals)
+    if max_abs <= 0.0:
+        return None
+    scaled = [v / max_abs for v in vals]
+    unit_hypot = math.hypot(*scaled)
+    return [s / unit_hypot for s in scaled]
+
+
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    if not _is_non_str_sequence(a) or not _is_non_str_sequence(b):
+        raise SchemaContractViolationError("vectors must be non-string numeric sequences")
     if len(a) != len(b) or not a:
-        raise ValueError("vectors must be non-empty and have matching dimensions")
-    dot = sum(float(x) * float(y) for x, y in zip(a, b))
-    na = math.sqrt(sum(float(x) * float(x) for x in a))
-    nb = math.sqrt(sum(float(y) * float(y) for y in b))
-    if na <= 1e-12 or nb <= 1e-12:
+        raise SchemaContractViolationError("vectors must be non-empty and have matching dimensions")
+    fa = [_coerce_finite_vec_entry(x, "cosine_similarity.a") for x in a]
+    fb = [_coerce_finite_vec_entry(y, "cosine_similarity.b") for y in b]
+    ua = _safe_unit_scale(fa)
+    ub = _safe_unit_scale(fb)
+    if ua is None or ub is None:
         return 0.0
-    return dot / (na * nb)
+    dot_unit = sum(x * y for x, y in zip(ua, ub))
+    return max(-1.0, min(1.0, dot_unit))
 
 
 def csls_hubness_scores(
