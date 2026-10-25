@@ -110,3 +110,12 @@ Run the Python and Go test suites:
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 go test -race ./pkg/mdm/...
 ```
+
+## Multi-Model Benchmark
+
+Reproduce the 10-model calibration, post-hoc scaling, and Split Conformal RAPS cascade benchmark (`N = 50` multi-task calibration items and `N = 360` XSTest refusal-boundary items; see [`benchmarks/results/multimodel_benchmark_report.md`](benchmarks/results/multimodel_benchmark_report.md)):
+
+```bash
+PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
+```
+
