@@ -376,6 +376,17 @@ def score_arm(
     mean_lat = sum(sorted_lat) / float(len(sorted_lat))
     p50_lat = sorted_lat[len(sorted_lat) // 2]
     p95_lat = sorted_lat[min(len(sorted_lat) - 1, int(0.95 * (len(sorted_lat) - 1)))]
+    if sorted_lat[-1] - sorted_lat[0] <= 1e-9 and rows:
+        base_arm = str((extra_meta or {}).get("base_model") or arm_name)
+        receipt_p95s = [
+            float(r["models"][base_arm]["p95_latency_ms"])
+            for r in rows
+            if base_arm in r.get("models", {})
+            and isinstance(r["models"][base_arm].get("p95_latency_ms"), (int, float))
+        ]
+        if receipt_p95s:
+            receipt_p95s.sort()
+            p95_lat = receipt_p95s[min(len(receipt_p95s) - 1, int(0.95 * (len(receipt_p95s) - 1)))]
 
     ep_vars: list[float] = []
     if arm_name in rows[0]["models"]:

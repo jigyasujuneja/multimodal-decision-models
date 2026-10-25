@@ -15,7 +15,7 @@
   "models": [
     {
       "accuracy": 0.92,
-      "ace": 0.002135,
+      "ace": 0.036926,
       "arm_name": "Gemini 3.8 Flash (Verbalized + TempScaled OOF)",
       "aurc": 0.017668,
       "base_model": "Gemini 3.8 Flash (Verbalized Conf)",
@@ -34,21 +34,21 @@
         "0.05": {
           "alpha": 0.05,
           "coverage": 0.96,
-          "mean_q_hat": 0.902337,
-          "mean_set_size": 1.88,
-          "singleton_rate": 0.74
+          "mean_q_hat": 0.822831,
+          "mean_set_size": 2.76,
+          "singleton_rate": 0.84
         },
         "0.10": {
           "alpha": 0.1,
           "coverage": 0.92,
-          "mean_q_hat": 0.160572,
+          "mean_q_hat": 0.142882,
           "mean_set_size": 1.0,
           "singleton_rate": 1.0
         }
       },
       "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 1.88,
+      "conformal_mean_set_size_005": 2.76,
       "conformal_mean_set_size_010": 1.0,
       "ece": 0.023058,
       "family": "gemini",
@@ -66,8 +66,8 @@
       "mean_normalized_entropy": 0.197295,
       "mean_temperature": 1.2125,
       "model": "Gemini 3.8 Flash (Verbalized + TempScaled OOF) [Calib-50]",
-      "murphy_reliability": 0.05554,
-      "murphy_resolution": 0.832017,
+      "murphy_reliability": 0.05759,
+      "murphy_resolution": 0.836539,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -80,7 +80,7 @@
     },
     {
       "accuracy": 0.92,
-      "ace": 0.001812,
+      "ace": 0.030499,
       "arm_name": "Gemini 3.8 Flash (Verbalized Conf)",
       "aurc": 0.019132,
       "bootstrap_ci95": {
@@ -98,9 +98,9 @@
         "0.05": {
           "alpha": 0.05,
           "coverage": 0.96,
-          "mean_q_hat": 0.954,
-          "mean_set_size": 1.8,
-          "singleton_rate": 0.72
+          "mean_q_hat": 0.89,
+          "mean_set_size": 2.36,
+          "singleton_rate": 0.82
         },
         "0.10": {
           "alpha": 0.1,
@@ -112,7 +112,7 @@
       },
       "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 1.8,
+      "conformal_mean_set_size_005": 2.36,
       "conformal_mean_set_size_010": 1.02,
       "ece": 0.048358,
       "family": "gemini",
@@ -129,8 +129,8 @@
       "mean_latency_ms": 4247.82,
       "mean_normalized_entropy": 0.129847,
       "model": "Gemini 3.8 Flash (Verbalized Conf) [Calib-50]",
-      "murphy_reliability": 0.042388,
-      "murphy_resolution": 0.812442,
+      "murphy_reliability": 0.043988,
+      "murphy_resolution": 0.819609,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -143,7 +143,7 @@
     },
     {
       "accuracy": 0.92,
-      "ace": 0.002902,
+      "ace": 0.054514,
       "arm_name": "DecisionGemma",
       "aurc": 0.0204,
       "bootstrap_ci95": {
@@ -192,8 +192,8 @@
       "mean_latency_ms": 278.27,
       "mean_normalized_entropy": 0.271982,
       "model": "DecisionGemma [Calib-50]",
-      "murphy_reliability": 0.132642,
-      "murphy_resolution": 0.871244,
+      "murphy_reliability": 0.134151,
+      "murphy_resolution": 0.875323,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -206,7 +206,7 @@
     },
     {
       "accuracy": 0.86,
-      "ace": 0.003515,
+      "ace": 0.055482,
       "arm_name": "dgem v0.3.7 (TempScaled OOF)",
       "aurc": 0.117534,
       "base_model": "dgem v0.3.7",
@@ -226,7 +226,7 @@
           "alpha": 0.05,
           "coverage": 0.96,
           "mean_q_hat": 0.900049,
-          "mean_set_size": 1.84,
+          "mean_set_size": 1.86,
           "singleton_rate": 0.5
         },
         "0.10": {
@@ -239,7 +239,7 @@
       },
       "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 1.84,
+      "conformal_mean_set_size_005": 1.86,
       "conformal_mean_set_size_010": 1.14,
       "ece": 0.095096,
       "family": "dgem_systemone",
@@ -257,8 +257,8 @@
       "mean_normalized_entropy": 0.296543,
       "mean_temperature": 1.4261,
       "model": "dgem v0.3.7 (TempScaled OOF) [Calib-50]",
-      "murphy_reliability": 0.130721,
-      "murphy_resolution": 0.847651,
+      "murphy_reliability": 0.13272,
+      "murphy_resolution": 0.848813,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -271,7 +271,7 @@
     },
     {
       "accuracy": 0.86,
-      "ace": 0.003072,
+      "ace": 0.044439,
       "arm_name": "dgem v0.3.7",
       "aurc": 0.099603,
       "bootstrap_ci95": {
@@ -320,8 +320,8 @@
       "mean_latency_ms": 389.58,
       "mean_normalized_entropy": 0.163644,
       "model": "dgem v0.3.7 [Calib-50]",
-      "murphy_reliability": 0.097557,
-      "murphy_resolution": 0.805784,
+      "murphy_reliability": 0.098848,
+      "murphy_resolution": 0.812537,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -334,7 +334,7 @@
     },
     {
       "accuracy": 0.88,
-      "ace": 0.003232,
+      "ace": 0.051193,
       "arm_name": "Conformal Cascade: dgem v0.3.7 -> Gemini 3.8 Flash (Dirichlet M=3)",
       "aurc": 0.096306,
       "bootstrap_ci95": {
@@ -353,21 +353,21 @@
           "alpha": 0.05,
           "coverage": 0.96,
           "mean_q_hat": 0.963864,
-          "mean_set_size": 2.32,
+          "mean_set_size": 2.56,
           "singleton_rate": 0.6
         },
         "0.10": {
           "alpha": 0.1,
           "coverage": 0.92,
-          "mean_q_hat": 0.815238,
-          "mean_set_size": 1.82,
+          "mean_q_hat": 0.795056,
+          "mean_set_size": 2.3,
           "singleton_rate": 0.86
         }
       },
       "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 2.32,
-      "conformal_mean_set_size_010": 1.82,
+      "conformal_mean_set_size_005": 2.56,
+      "conformal_mean_set_size_010": 2.3,
       "ece": 0.097165,
       "escalation_rate": 0.14,
       "family": "conformal_cascade",
@@ -391,8 +391,8 @@
       "mean_latency_ms": 8577.79,
       "mean_normalized_entropy": 0.194722,
       "model": "Conformal Cascade: dgem v0.3.7 -> Gemini 3.8 Flash (Dirichlet M=3) [Calib-50]",
-      "murphy_reliability": 0.115616,
-      "murphy_resolution": 0.796192,
+      "murphy_reliability": 0.119508,
+      "murphy_resolution": 0.806313,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -407,7 +407,7 @@
     },
     {
       "accuracy": 0.86,
-      "ace": 0.003885,
+      "ace": 0.067013,
       "arm_name": "Conformal Cascade: Strands Decider 2B v19 -> DecisionGemma",
       "aurc": 0.053596,
       "bootstrap_ci95": {
@@ -464,8 +464,8 @@
       "mean_latency_ms": 390.76,
       "mean_normalized_entropy": 0.297623,
       "model": "Conformal Cascade: Strands Decider 2B v19 -> DecisionGemma [Calib-50]",
-      "murphy_reliability": 0.173378,
-      "murphy_resolution": 0.832087,
+      "murphy_reliability": 0.175278,
+      "murphy_resolution": 0.83758,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -480,7 +480,7 @@
     },
     {
       "accuracy": 0.92,
-      "ace": 0.006381,
+      "ace": 0.103561,
       "arm_name": "Gemini 3.6 Flash (Dirichlet M=3)",
       "aurc": 0.041023,
       "bootstrap_ci95": {
@@ -498,9 +498,9 @@
         "0.05": {
           "alpha": 0.05,
           "coverage": 0.96,
-          "mean_q_hat": 0.631068,
-          "mean_set_size": 3.12,
-          "singleton_rate": 0.62
+          "mean_q_hat": 0.550341,
+          "mean_set_size": 4.94,
+          "singleton_rate": 0.68
         },
         "0.10": {
           "alpha": 0.1,
@@ -512,7 +512,7 @@
       },
       "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 3.12,
+      "conformal_mean_set_size_005": 4.94,
       "conformal_mean_set_size_010": 1.0,
       "ece": 0.262491,
       "family": "gemini",
@@ -530,8 +530,8 @@
       "mean_latency_ms": 62709.89,
       "mean_normalized_entropy": 0.684096,
       "model": "Gemini 3.6 Flash (Dirichlet M=3) [Calib-50]",
-      "murphy_reliability": 0.151846,
-      "murphy_resolution": 0.812017,
+      "murphy_reliability": 0.163668,
+      "murphy_resolution": 0.822027,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -544,7 +544,7 @@
     },
     {
       "accuracy": 0.9,
-      "ace": 0.006411,
+      "ace": 0.106417,
       "arm_name": "Gemini 3.8 Flash (Dirichlet M=3)",
       "aurc": 0.048544,
       "bootstrap_ci95": {
@@ -562,22 +562,22 @@
         "0.05": {
           "alpha": 0.05,
           "coverage": 0.96,
-          "mean_q_hat": 0.717818,
-          "mean_set_size": 3.54,
-          "singleton_rate": 0.56
+          "mean_q_hat": 0.630202,
+          "mean_set_size": 5.96,
+          "singleton_rate": 0.62
         },
         "0.10": {
           "alpha": 0.1,
           "coverage": 0.92,
-          "mean_q_hat": 0.466222,
-          "mean_set_size": 2.22,
-          "singleton_rate": 0.8
+          "mean_q_hat": 0.317722,
+          "mean_set_size": 3.94,
+          "singleton_rate": 0.86
         }
       },
       "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 3.54,
-      "conformal_mean_set_size_010": 2.22,
+      "conformal_mean_set_size_005": 5.96,
+      "conformal_mean_set_size_010": 3.94,
       "ece": 0.261658,
       "family": "gemini",
       "kind": "standalone",
@@ -594,8 +594,8 @@
       "mean_latency_ms": 56613.12,
       "mean_normalized_entropy": 0.688267,
       "model": "Gemini 3.8 Flash (Dirichlet M=3) [Calib-50]",
-      "murphy_reliability": 0.166186,
-      "murphy_resolution": 0.812017,
+      "murphy_reliability": 0.177858,
+      "murphy_resolution": 0.819577,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -608,7 +608,7 @@
     },
     {
       "accuracy": 0.84,
-      "ace": 0.007214,
+      "ace": 0.117059,
       "arm_name": "Gemini 3.5 Flash Lite (Dirichlet M=3)",
       "aurc": 0.079844,
       "bootstrap_ci95": {
@@ -625,23 +625,23 @@
       "conformal": {
         "0.05": {
           "alpha": 0.05,
-          "coverage": 0.94,
-          "mean_q_hat": 0.751394,
-          "mean_set_size": 3.86,
-          "singleton_rate": 0.38
+          "coverage": 0.96,
+          "mean_q_hat": 0.731212,
+          "mean_set_size": 6.5,
+          "singleton_rate": 0.4
         },
         "0.10": {
           "alpha": 0.1,
           "coverage": 0.92,
           "mean_q_hat": 0.639545,
-          "mean_set_size": 2.92,
+          "mean_set_size": 5.7,
           "singleton_rate": 0.64
         }
       },
-      "conformal_coverage_005": 0.94,
+      "conformal_coverage_005": 0.96,
       "conformal_coverage_010": 0.92,
-      "conformal_mean_set_size_005": 3.86,
-      "conformal_mean_set_size_010": 2.92,
+      "conformal_mean_set_size_005": 6.5,
+      "conformal_mean_set_size_010": 5.7,
       "ece": 0.205824,
       "family": "gemini",
       "kind": "standalone",
@@ -658,8 +658,8 @@
       "mean_latency_ms": 62790.38,
       "mean_normalized_entropy": 0.709747,
       "model": "Gemini 3.5 Flash Lite (Dirichlet M=3) [Calib-50]",
-      "murphy_reliability": 0.184638,
-      "murphy_resolution": 0.76935,
+      "murphy_reliability": 0.196458,
+      "murphy_resolution": 0.776885,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -672,7 +672,7 @@
     },
     {
       "accuracy": 0.72,
-      "ace": 0.007042,
+      "ace": 0.119409,
       "arm_name": "Strands Decider 2B v19",
       "aurc": 0.239796,
       "bootstrap_ci95": {
@@ -721,8 +721,8 @@
       "mean_latency_ms": 163.04,
       "mean_normalized_entropy": 0.64775,
       "model": "Strands Decider 2B v19 [Calib-50]",
-      "murphy_reliability": 0.261304,
-      "murphy_resolution": 0.75024,
+      "murphy_reliability": 0.264326,
+      "murphy_resolution": 0.760258,
       "murphy_uncertainty": 0.9208,
       "n_clusters": 11,
       "n_items": 50,
@@ -784,15 +784,15 @@
       "mean_latency_ms": 175.8,
       "mean_normalized_entropy": 0.184806,
       "model": "DecisionGemma [XSTest-360]",
-      "murphy_reliability": 0.012792,
-      "murphy_resolution": 0.46044,
+      "murphy_reliability": 0.013667,
+      "murphy_resolution": 0.461019,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.988723,
       "nll": 0.084475,
       "p50_latency_ms": 175.8,
-      "p95_latency_ms": 175.8,
+      "p95_latency_ms": 265.6,
       "panel": "safety_xstest_360",
       "pareto_optimal": true
     },
@@ -847,15 +847,15 @@
       "mean_latency_ms": 215.1,
       "mean_normalized_entropy": 0.076714,
       "model": "dgem v0.3.1 [XSTest-360]",
-      "murphy_reliability": 0.022874,
-      "murphy_resolution": 0.458317,
+      "murphy_reliability": 0.023123,
+      "murphy_resolution": 0.460438,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.986672,
       "nll": 0.100095,
       "p50_latency_ms": 215.1,
-      "p95_latency_ms": 215.1,
+      "p95_latency_ms": 271.7,
       "panel": "safety_xstest_360",
       "pareto_optimal": false
     },
@@ -918,8 +918,8 @@
       "mean_latency_ms": 866.82,
       "mean_normalized_entropy": 0.410553,
       "model": "Conformal Cascade: Classy v0.3.3 -> DecisionGemma [XSTest-360]",
-      "murphy_reliability": 0.007537,
-      "murphy_resolution": 0.337925,
+      "murphy_reliability": 0.008421,
+      "murphy_resolution": 0.338842,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
@@ -991,8 +991,8 @@
       "mean_latency_ms": 537.09,
       "mean_normalized_entropy": 0.486344,
       "model": "Conformal Cascade: Classier v0.2.0 -> DecisionGemma [XSTest-360]",
-      "murphy_reliability": 0.016379,
-      "murphy_resolution": 0.338553,
+      "murphy_reliability": 0.017959,
+      "murphy_resolution": 0.339755,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
@@ -1056,23 +1056,23 @@
       "mean_latency_ms": 482.4,
       "mean_normalized_entropy": 0.713394,
       "model": "Classier v0.2.0 [XSTest-360]",
-      "murphy_reliability": 0.030258,
-      "murphy_resolution": 0.224091,
+      "murphy_reliability": 0.031663,
+      "murphy_resolution": 0.226915,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.922085,
       "nll": 0.458072,
       "p50_latency_ms": 482.4,
-      "p95_latency_ms": 482.4,
+      "p95_latency_ms": 511.5,
       "panel": "safety_xstest_360",
       "pareto_optimal": false
     },
     {
       "accuracy": 0.808333,
-      "ace": 0.093642,
+      "ace": 0.095712,
       "arm_name": "Strands Decider 2B v19 (VectorScaled OOF)",
-      "aurc": 0.118121,
+      "aurc": 0.118097,
       "base_model": "Strands Decider 2B v19",
       "bootstrap_ci95": {
         "accuracy": [
@@ -1080,32 +1080,32 @@
           0.89375
         ],
         "brier": [
-          0.212349,
-          0.388369
+          0.214249,
+          0.388293
         ]
       },
-      "brier": 0.302252,
+      "brier": 0.303121,
       "conformal": {
         "0.05": {
           "alpha": 0.05,
           "coverage": 0.95,
-          "mean_q_hat": 0.763191,
-          "mean_set_size": 1.536111,
-          "singleton_rate": 0.463889
+          "mean_q_hat": 0.759613,
+          "mean_set_size": 1.530556,
+          "singleton_rate": 0.469444
         },
         "0.10": {
           "alpha": 0.1,
           "coverage": 0.9,
-          "mean_q_hat": 0.679612,
-          "mean_set_size": 1.3,
-          "singleton_rate": 0.7
+          "mean_q_hat": 0.676933,
+          "mean_set_size": 1.297222,
+          "singleton_rate": 0.702778
         }
       },
       "conformal_coverage_005": 0.95,
       "conformal_coverage_010": 0.9,
-      "conformal_mean_set_size_005": 1.536111,
-      "conformal_mean_set_size_010": 1.3,
-      "ece": 0.080477,
+      "conformal_mean_set_size_005": 1.530556,
+      "conformal_mean_set_size_010": 1.297222,
+      "ece": 0.08336,
       "family": "strands_systemone",
       "kind": "posthoc_vector_oof",
       "macro_f1": 0.802668,
@@ -1118,17 +1118,17 @@
         "reference_arm": "DecisionGemma"
       },
       "mean_latency_ms": 153.9,
-      "mean_normalized_entropy": 0.804428,
+      "mean_normalized_entropy": 0.809348,
       "model": "Strands Decider 2B v19 (VectorScaled OOF) [XSTest-360]",
-      "murphy_reliability": 0.02401,
-      "murphy_resolution": 0.213698,
+      "murphy_reliability": 0.025679,
+      "murphy_resolution": 0.216386,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.929262,
-      "nll": 0.476104,
+      "nll": 0.477337,
       "p50_latency_ms": 153.9,
-      "p95_latency_ms": 153.9,
+      "p95_latency_ms": 169.1,
       "panel": "safety_xstest_360",
       "pareto_optimal": true
     },
@@ -1183,23 +1183,23 @@
       "mean_latency_ms": 153.9,
       "mean_normalized_entropy": 0.881002,
       "model": "Strands Decider 2B v19 [XSTest-360]",
-      "murphy_reliability": 0.083376,
-      "murphy_resolution": 0.210616,
+      "murphy_reliability": 0.084735,
+      "murphy_resolution": 0.216228,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.910808,
       "nll": 0.544543,
       "p50_latency_ms": 153.9,
-      "p95_latency_ms": 153.9,
+      "p95_latency_ms": 169.1,
       "panel": "safety_xstest_360",
       "pareto_optimal": false
     },
     {
       "accuracy": 0.644444,
-      "ace": 0.072866,
+      "ace": 0.072796,
       "arm_name": "Classy v0.3.3 (VectorScaled OOF)",
-      "aurc": 0.330554,
+      "aurc": 0.330764,
       "base_model": "Classy v0.3.3",
       "bootstrap_ci95": {
         "accuracy": [
@@ -1207,32 +1207,32 @@
           0.763889
         ],
         "brier": [
-          0.386463,
-          0.517608
+          0.386099,
+          0.517975
         ]
       },
-      "brier": 0.458188,
+      "brier": 0.458137,
       "conformal": {
         "0.05": {
           "alpha": 0.05,
           "coverage": 0.952778,
-          "mean_q_hat": 0.703472,
-          "mean_set_size": 1.852778,
-          "singleton_rate": 0.147222
+          "mean_q_hat": 0.70429,
+          "mean_set_size": 1.855556,
+          "singleton_rate": 0.144444
         },
         "0.10": {
           "alpha": 0.1,
           "coverage": 0.9,
-          "mean_q_hat": 0.65115,
+          "mean_q_hat": 0.651517,
           "mean_set_size": 1.686111,
           "singleton_rate": 0.313889
         }
       },
       "conformal_coverage_005": 0.952778,
       "conformal_coverage_010": 0.9,
-      "conformal_mean_set_size_005": 1.852778,
+      "conformal_mean_set_size_005": 1.855556,
       "conformal_mean_set_size_010": 1.686111,
-      "ece": 0.061955,
+      "ece": 0.058462,
       "family": "classy_embedding",
       "kind": "posthoc_vector_oof",
       "macro_f1": 0.621849,
@@ -1245,17 +1245,17 @@
         "reference_arm": "DecisionGemma"
       },
       "mean_latency_ms": 746.2,
-      "mean_normalized_entropy": 0.949421,
+      "mean_normalized_entropy": 0.949029,
       "model": "Classy v0.3.3 (VectorScaled OOF) [XSTest-360]",
-      "murphy_reliability": 0.016586,
-      "murphy_resolution": 0.050758,
+      "murphy_reliability": 0.017531,
+      "murphy_resolution": 0.05322,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.868775,
-      "nll": 0.652046,
+      "nll": 0.652019,
       "p50_latency_ms": 746.2,
-      "p95_latency_ms": 746.2,
+      "p95_latency_ms": 882.4,
       "panel": "safety_xstest_360",
       "pareto_optimal": false
     },
@@ -1310,15 +1310,15 @@
       "mean_latency_ms": 746.2,
       "mean_normalized_entropy": 0.975495,
       "model": "Classy v0.3.3 [XSTest-360]",
-      "murphy_reliability": 0.015062,
-      "murphy_resolution": 0.041149,
+      "murphy_reliability": 0.016388,
+      "murphy_resolution": 0.046766,
       "murphy_uncertainty": 0.493827,
       "n_clusters": 12,
       "n_items": 360,
       "ndcg_at_3": 0.868775,
       "nll": 0.656348,
       "p50_latency_ms": 746.2,
-      "p95_latency_ms": 746.2,
+      "p95_latency_ms": 882.4,
       "panel": "safety_xstest_360",
       "pareto_optimal": false
     }
@@ -1328,7 +1328,7 @@
       "arms": [
         {
           "accuracy": 0.92,
-          "ace": 0.002135,
+          "ace": 0.036926,
           "arm_name": "Gemini 3.8 Flash (Verbalized + TempScaled OOF)",
           "aurc": 0.017668,
           "base_model": "Gemini 3.8 Flash (Verbalized Conf)",
@@ -1347,21 +1347,21 @@
             "0.05": {
               "alpha": 0.05,
               "coverage": 0.96,
-              "mean_q_hat": 0.902337,
-              "mean_set_size": 1.88,
-              "singleton_rate": 0.74
+              "mean_q_hat": 0.822831,
+              "mean_set_size": 2.76,
+              "singleton_rate": 0.84
             },
             "0.10": {
               "alpha": 0.1,
               "coverage": 0.92,
-              "mean_q_hat": 0.160572,
+              "mean_q_hat": 0.142882,
               "mean_set_size": 1.0,
               "singleton_rate": 1.0
             }
           },
           "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 1.88,
+          "conformal_mean_set_size_005": 2.76,
           "conformal_mean_set_size_010": 1.0,
           "ece": 0.023058,
           "family": "gemini",
@@ -1379,8 +1379,8 @@
           "mean_normalized_entropy": 0.197295,
           "mean_temperature": 1.2125,
           "model": "Gemini 3.8 Flash (Verbalized + TempScaled OOF) [Calib-50]",
-          "murphy_reliability": 0.05554,
-          "murphy_resolution": 0.832017,
+          "murphy_reliability": 0.05759,
+          "murphy_resolution": 0.836539,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1393,7 +1393,7 @@
         },
         {
           "accuracy": 0.92,
-          "ace": 0.001812,
+          "ace": 0.030499,
           "arm_name": "Gemini 3.8 Flash (Verbalized Conf)",
           "aurc": 0.019132,
           "bootstrap_ci95": {
@@ -1411,9 +1411,9 @@
             "0.05": {
               "alpha": 0.05,
               "coverage": 0.96,
-              "mean_q_hat": 0.954,
-              "mean_set_size": 1.8,
-              "singleton_rate": 0.72
+              "mean_q_hat": 0.89,
+              "mean_set_size": 2.36,
+              "singleton_rate": 0.82
             },
             "0.10": {
               "alpha": 0.1,
@@ -1425,7 +1425,7 @@
           },
           "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 1.8,
+          "conformal_mean_set_size_005": 2.36,
           "conformal_mean_set_size_010": 1.02,
           "ece": 0.048358,
           "family": "gemini",
@@ -1442,8 +1442,8 @@
           "mean_latency_ms": 4247.82,
           "mean_normalized_entropy": 0.129847,
           "model": "Gemini 3.8 Flash (Verbalized Conf) [Calib-50]",
-          "murphy_reliability": 0.042388,
-          "murphy_resolution": 0.812442,
+          "murphy_reliability": 0.043988,
+          "murphy_resolution": 0.819609,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1456,7 +1456,7 @@
         },
         {
           "accuracy": 0.92,
-          "ace": 0.002902,
+          "ace": 0.054514,
           "arm_name": "DecisionGemma",
           "aurc": 0.0204,
           "bootstrap_ci95": {
@@ -1505,8 +1505,8 @@
           "mean_latency_ms": 278.27,
           "mean_normalized_entropy": 0.271982,
           "model": "DecisionGemma [Calib-50]",
-          "murphy_reliability": 0.132642,
-          "murphy_resolution": 0.871244,
+          "murphy_reliability": 0.134151,
+          "murphy_resolution": 0.875323,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1519,7 +1519,7 @@
         },
         {
           "accuracy": 0.86,
-          "ace": 0.003515,
+          "ace": 0.055482,
           "arm_name": "dgem v0.3.7 (TempScaled OOF)",
           "aurc": 0.117534,
           "base_model": "dgem v0.3.7",
@@ -1539,7 +1539,7 @@
               "alpha": 0.05,
               "coverage": 0.96,
               "mean_q_hat": 0.900049,
-              "mean_set_size": 1.84,
+              "mean_set_size": 1.86,
               "singleton_rate": 0.5
             },
             "0.10": {
@@ -1552,7 +1552,7 @@
           },
           "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 1.84,
+          "conformal_mean_set_size_005": 1.86,
           "conformal_mean_set_size_010": 1.14,
           "ece": 0.095096,
           "family": "dgem_systemone",
@@ -1570,8 +1570,8 @@
           "mean_normalized_entropy": 0.296543,
           "mean_temperature": 1.4261,
           "model": "dgem v0.3.7 (TempScaled OOF) [Calib-50]",
-          "murphy_reliability": 0.130721,
-          "murphy_resolution": 0.847651,
+          "murphy_reliability": 0.13272,
+          "murphy_resolution": 0.848813,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1584,7 +1584,7 @@
         },
         {
           "accuracy": 0.86,
-          "ace": 0.003072,
+          "ace": 0.044439,
           "arm_name": "dgem v0.3.7",
           "aurc": 0.099603,
           "bootstrap_ci95": {
@@ -1633,8 +1633,8 @@
           "mean_latency_ms": 389.58,
           "mean_normalized_entropy": 0.163644,
           "model": "dgem v0.3.7 [Calib-50]",
-          "murphy_reliability": 0.097557,
-          "murphy_resolution": 0.805784,
+          "murphy_reliability": 0.098848,
+          "murphy_resolution": 0.812537,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1647,7 +1647,7 @@
         },
         {
           "accuracy": 0.88,
-          "ace": 0.003232,
+          "ace": 0.051193,
           "arm_name": "Conformal Cascade: dgem v0.3.7 -> Gemini 3.8 Flash (Dirichlet M=3)",
           "aurc": 0.096306,
           "bootstrap_ci95": {
@@ -1666,21 +1666,21 @@
               "alpha": 0.05,
               "coverage": 0.96,
               "mean_q_hat": 0.963864,
-              "mean_set_size": 2.32,
+              "mean_set_size": 2.56,
               "singleton_rate": 0.6
             },
             "0.10": {
               "alpha": 0.1,
               "coverage": 0.92,
-              "mean_q_hat": 0.815238,
-              "mean_set_size": 1.82,
+              "mean_q_hat": 0.795056,
+              "mean_set_size": 2.3,
               "singleton_rate": 0.86
             }
           },
           "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 2.32,
-          "conformal_mean_set_size_010": 1.82,
+          "conformal_mean_set_size_005": 2.56,
+          "conformal_mean_set_size_010": 2.3,
           "ece": 0.097165,
           "escalation_rate": 0.14,
           "family": "conformal_cascade",
@@ -1704,8 +1704,8 @@
           "mean_latency_ms": 8577.79,
           "mean_normalized_entropy": 0.194722,
           "model": "Conformal Cascade: dgem v0.3.7 -> Gemini 3.8 Flash (Dirichlet M=3) [Calib-50]",
-          "murphy_reliability": 0.115616,
-          "murphy_resolution": 0.796192,
+          "murphy_reliability": 0.119508,
+          "murphy_resolution": 0.806313,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1720,7 +1720,7 @@
         },
         {
           "accuracy": 0.86,
-          "ace": 0.003885,
+          "ace": 0.067013,
           "arm_name": "Conformal Cascade: Strands Decider 2B v19 -> DecisionGemma",
           "aurc": 0.053596,
           "bootstrap_ci95": {
@@ -1777,8 +1777,8 @@
           "mean_latency_ms": 390.76,
           "mean_normalized_entropy": 0.297623,
           "model": "Conformal Cascade: Strands Decider 2B v19 -> DecisionGemma [Calib-50]",
-          "murphy_reliability": 0.173378,
-          "murphy_resolution": 0.832087,
+          "murphy_reliability": 0.175278,
+          "murphy_resolution": 0.83758,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1793,7 +1793,7 @@
         },
         {
           "accuracy": 0.92,
-          "ace": 0.006381,
+          "ace": 0.103561,
           "arm_name": "Gemini 3.6 Flash (Dirichlet M=3)",
           "aurc": 0.041023,
           "bootstrap_ci95": {
@@ -1811,9 +1811,9 @@
             "0.05": {
               "alpha": 0.05,
               "coverage": 0.96,
-              "mean_q_hat": 0.631068,
-              "mean_set_size": 3.12,
-              "singleton_rate": 0.62
+              "mean_q_hat": 0.550341,
+              "mean_set_size": 4.94,
+              "singleton_rate": 0.68
             },
             "0.10": {
               "alpha": 0.1,
@@ -1825,7 +1825,7 @@
           },
           "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 3.12,
+          "conformal_mean_set_size_005": 4.94,
           "conformal_mean_set_size_010": 1.0,
           "ece": 0.262491,
           "family": "gemini",
@@ -1843,8 +1843,8 @@
           "mean_latency_ms": 62709.89,
           "mean_normalized_entropy": 0.684096,
           "model": "Gemini 3.6 Flash (Dirichlet M=3) [Calib-50]",
-          "murphy_reliability": 0.151846,
-          "murphy_resolution": 0.812017,
+          "murphy_reliability": 0.163668,
+          "murphy_resolution": 0.822027,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1857,7 +1857,7 @@
         },
         {
           "accuracy": 0.9,
-          "ace": 0.006411,
+          "ace": 0.106417,
           "arm_name": "Gemini 3.8 Flash (Dirichlet M=3)",
           "aurc": 0.048544,
           "bootstrap_ci95": {
@@ -1875,22 +1875,22 @@
             "0.05": {
               "alpha": 0.05,
               "coverage": 0.96,
-              "mean_q_hat": 0.717818,
-              "mean_set_size": 3.54,
-              "singleton_rate": 0.56
+              "mean_q_hat": 0.630202,
+              "mean_set_size": 5.96,
+              "singleton_rate": 0.62
             },
             "0.10": {
               "alpha": 0.1,
               "coverage": 0.92,
-              "mean_q_hat": 0.466222,
-              "mean_set_size": 2.22,
-              "singleton_rate": 0.8
+              "mean_q_hat": 0.317722,
+              "mean_set_size": 3.94,
+              "singleton_rate": 0.86
             }
           },
           "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 3.54,
-          "conformal_mean_set_size_010": 2.22,
+          "conformal_mean_set_size_005": 5.96,
+          "conformal_mean_set_size_010": 3.94,
           "ece": 0.261658,
           "family": "gemini",
           "kind": "standalone",
@@ -1907,8 +1907,8 @@
           "mean_latency_ms": 56613.12,
           "mean_normalized_entropy": 0.688267,
           "model": "Gemini 3.8 Flash (Dirichlet M=3) [Calib-50]",
-          "murphy_reliability": 0.166186,
-          "murphy_resolution": 0.812017,
+          "murphy_reliability": 0.177858,
+          "murphy_resolution": 0.819577,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1921,7 +1921,7 @@
         },
         {
           "accuracy": 0.84,
-          "ace": 0.007214,
+          "ace": 0.117059,
           "arm_name": "Gemini 3.5 Flash Lite (Dirichlet M=3)",
           "aurc": 0.079844,
           "bootstrap_ci95": {
@@ -1938,23 +1938,23 @@
           "conformal": {
             "0.05": {
               "alpha": 0.05,
-              "coverage": 0.94,
-              "mean_q_hat": 0.751394,
-              "mean_set_size": 3.86,
-              "singleton_rate": 0.38
+              "coverage": 0.96,
+              "mean_q_hat": 0.731212,
+              "mean_set_size": 6.5,
+              "singleton_rate": 0.4
             },
             "0.10": {
               "alpha": 0.1,
               "coverage": 0.92,
               "mean_q_hat": 0.639545,
-              "mean_set_size": 2.92,
+              "mean_set_size": 5.7,
               "singleton_rate": 0.64
             }
           },
-          "conformal_coverage_005": 0.94,
+          "conformal_coverage_005": 0.96,
           "conformal_coverage_010": 0.92,
-          "conformal_mean_set_size_005": 3.86,
-          "conformal_mean_set_size_010": 2.92,
+          "conformal_mean_set_size_005": 6.5,
+          "conformal_mean_set_size_010": 5.7,
           "ece": 0.205824,
           "family": "gemini",
           "kind": "standalone",
@@ -1971,8 +1971,8 @@
           "mean_latency_ms": 62790.38,
           "mean_normalized_entropy": 0.709747,
           "model": "Gemini 3.5 Flash Lite (Dirichlet M=3) [Calib-50]",
-          "murphy_reliability": 0.184638,
-          "murphy_resolution": 0.76935,
+          "murphy_reliability": 0.196458,
+          "murphy_resolution": 0.776885,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -1985,7 +1985,7 @@
         },
         {
           "accuracy": 0.72,
-          "ace": 0.007042,
+          "ace": 0.119409,
           "arm_name": "Strands Decider 2B v19",
           "aurc": 0.239796,
           "bootstrap_ci95": {
@@ -2034,8 +2034,8 @@
           "mean_latency_ms": 163.04,
           "mean_normalized_entropy": 0.64775,
           "model": "Strands Decider 2B v19 [Calib-50]",
-          "murphy_reliability": 0.261304,
-          "murphy_resolution": 0.75024,
+          "murphy_reliability": 0.264326,
+          "murphy_resolution": 0.760258,
           "murphy_uncertainty": 0.9208,
           "n_clusters": 11,
           "n_items": 50,
@@ -2110,15 +2110,15 @@
           "mean_latency_ms": 175.8,
           "mean_normalized_entropy": 0.184806,
           "model": "DecisionGemma [XSTest-360]",
-          "murphy_reliability": 0.012792,
-          "murphy_resolution": 0.46044,
+          "murphy_reliability": 0.013667,
+          "murphy_resolution": 0.461019,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.988723,
           "nll": 0.084475,
           "p50_latency_ms": 175.8,
-          "p95_latency_ms": 175.8,
+          "p95_latency_ms": 265.6,
           "panel": "safety_xstest_360",
           "pareto_optimal": true
         },
@@ -2173,15 +2173,15 @@
           "mean_latency_ms": 215.1,
           "mean_normalized_entropy": 0.076714,
           "model": "dgem v0.3.1 [XSTest-360]",
-          "murphy_reliability": 0.022874,
-          "murphy_resolution": 0.458317,
+          "murphy_reliability": 0.023123,
+          "murphy_resolution": 0.460438,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.986672,
           "nll": 0.100095,
           "p50_latency_ms": 215.1,
-          "p95_latency_ms": 215.1,
+          "p95_latency_ms": 271.7,
           "panel": "safety_xstest_360",
           "pareto_optimal": false
         },
@@ -2244,8 +2244,8 @@
           "mean_latency_ms": 866.82,
           "mean_normalized_entropy": 0.410553,
           "model": "Conformal Cascade: Classy v0.3.3 -> DecisionGemma [XSTest-360]",
-          "murphy_reliability": 0.007537,
-          "murphy_resolution": 0.337925,
+          "murphy_reliability": 0.008421,
+          "murphy_resolution": 0.338842,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
@@ -2317,8 +2317,8 @@
           "mean_latency_ms": 537.09,
           "mean_normalized_entropy": 0.486344,
           "model": "Conformal Cascade: Classier v0.2.0 -> DecisionGemma [XSTest-360]",
-          "murphy_reliability": 0.016379,
-          "murphy_resolution": 0.338553,
+          "murphy_reliability": 0.017959,
+          "murphy_resolution": 0.339755,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
@@ -2382,23 +2382,23 @@
           "mean_latency_ms": 482.4,
           "mean_normalized_entropy": 0.713394,
           "model": "Classier v0.2.0 [XSTest-360]",
-          "murphy_reliability": 0.030258,
-          "murphy_resolution": 0.224091,
+          "murphy_reliability": 0.031663,
+          "murphy_resolution": 0.226915,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.922085,
           "nll": 0.458072,
           "p50_latency_ms": 482.4,
-          "p95_latency_ms": 482.4,
+          "p95_latency_ms": 511.5,
           "panel": "safety_xstest_360",
           "pareto_optimal": false
         },
         {
           "accuracy": 0.808333,
-          "ace": 0.093642,
+          "ace": 0.095712,
           "arm_name": "Strands Decider 2B v19 (VectorScaled OOF)",
-          "aurc": 0.118121,
+          "aurc": 0.118097,
           "base_model": "Strands Decider 2B v19",
           "bootstrap_ci95": {
             "accuracy": [
@@ -2406,32 +2406,32 @@
               0.89375
             ],
             "brier": [
-              0.212349,
-              0.388369
+              0.214249,
+              0.388293
             ]
           },
-          "brier": 0.302252,
+          "brier": 0.303121,
           "conformal": {
             "0.05": {
               "alpha": 0.05,
               "coverage": 0.95,
-              "mean_q_hat": 0.763191,
-              "mean_set_size": 1.536111,
-              "singleton_rate": 0.463889
+              "mean_q_hat": 0.759613,
+              "mean_set_size": 1.530556,
+              "singleton_rate": 0.469444
             },
             "0.10": {
               "alpha": 0.1,
               "coverage": 0.9,
-              "mean_q_hat": 0.679612,
-              "mean_set_size": 1.3,
-              "singleton_rate": 0.7
+              "mean_q_hat": 0.676933,
+              "mean_set_size": 1.297222,
+              "singleton_rate": 0.702778
             }
           },
           "conformal_coverage_005": 0.95,
           "conformal_coverage_010": 0.9,
-          "conformal_mean_set_size_005": 1.536111,
-          "conformal_mean_set_size_010": 1.3,
-          "ece": 0.080477,
+          "conformal_mean_set_size_005": 1.530556,
+          "conformal_mean_set_size_010": 1.297222,
+          "ece": 0.08336,
           "family": "strands_systemone",
           "kind": "posthoc_vector_oof",
           "macro_f1": 0.802668,
@@ -2444,17 +2444,17 @@
             "reference_arm": "DecisionGemma"
           },
           "mean_latency_ms": 153.9,
-          "mean_normalized_entropy": 0.804428,
+          "mean_normalized_entropy": 0.809348,
           "model": "Strands Decider 2B v19 (VectorScaled OOF) [XSTest-360]",
-          "murphy_reliability": 0.02401,
-          "murphy_resolution": 0.213698,
+          "murphy_reliability": 0.025679,
+          "murphy_resolution": 0.216386,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.929262,
-          "nll": 0.476104,
+          "nll": 0.477337,
           "p50_latency_ms": 153.9,
-          "p95_latency_ms": 153.9,
+          "p95_latency_ms": 169.1,
           "panel": "safety_xstest_360",
           "pareto_optimal": true
         },
@@ -2509,23 +2509,23 @@
           "mean_latency_ms": 153.9,
           "mean_normalized_entropy": 0.881002,
           "model": "Strands Decider 2B v19 [XSTest-360]",
-          "murphy_reliability": 0.083376,
-          "murphy_resolution": 0.210616,
+          "murphy_reliability": 0.084735,
+          "murphy_resolution": 0.216228,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.910808,
           "nll": 0.544543,
           "p50_latency_ms": 153.9,
-          "p95_latency_ms": 153.9,
+          "p95_latency_ms": 169.1,
           "panel": "safety_xstest_360",
           "pareto_optimal": false
         },
         {
           "accuracy": 0.644444,
-          "ace": 0.072866,
+          "ace": 0.072796,
           "arm_name": "Classy v0.3.3 (VectorScaled OOF)",
-          "aurc": 0.330554,
+          "aurc": 0.330764,
           "base_model": "Classy v0.3.3",
           "bootstrap_ci95": {
             "accuracy": [
@@ -2533,32 +2533,32 @@
               0.763889
             ],
             "brier": [
-              0.386463,
-              0.517608
+              0.386099,
+              0.517975
             ]
           },
-          "brier": 0.458188,
+          "brier": 0.458137,
           "conformal": {
             "0.05": {
               "alpha": 0.05,
               "coverage": 0.952778,
-              "mean_q_hat": 0.703472,
-              "mean_set_size": 1.852778,
-              "singleton_rate": 0.147222
+              "mean_q_hat": 0.70429,
+              "mean_set_size": 1.855556,
+              "singleton_rate": 0.144444
             },
             "0.10": {
               "alpha": 0.1,
               "coverage": 0.9,
-              "mean_q_hat": 0.65115,
+              "mean_q_hat": 0.651517,
               "mean_set_size": 1.686111,
               "singleton_rate": 0.313889
             }
           },
           "conformal_coverage_005": 0.952778,
           "conformal_coverage_010": 0.9,
-          "conformal_mean_set_size_005": 1.852778,
+          "conformal_mean_set_size_005": 1.855556,
           "conformal_mean_set_size_010": 1.686111,
-          "ece": 0.061955,
+          "ece": 0.058462,
           "family": "classy_embedding",
           "kind": "posthoc_vector_oof",
           "macro_f1": 0.621849,
@@ -2571,17 +2571,17 @@
             "reference_arm": "DecisionGemma"
           },
           "mean_latency_ms": 746.2,
-          "mean_normalized_entropy": 0.949421,
+          "mean_normalized_entropy": 0.949029,
           "model": "Classy v0.3.3 (VectorScaled OOF) [XSTest-360]",
-          "murphy_reliability": 0.016586,
-          "murphy_resolution": 0.050758,
+          "murphy_reliability": 0.017531,
+          "murphy_resolution": 0.05322,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.868775,
-          "nll": 0.652046,
+          "nll": 0.652019,
           "p50_latency_ms": 746.2,
-          "p95_latency_ms": 746.2,
+          "p95_latency_ms": 882.4,
           "panel": "safety_xstest_360",
           "pareto_optimal": false
         },
@@ -2636,15 +2636,15 @@
           "mean_latency_ms": 746.2,
           "mean_normalized_entropy": 0.975495,
           "model": "Classy v0.3.3 [XSTest-360]",
-          "murphy_reliability": 0.015062,
-          "murphy_resolution": 0.041149,
+          "murphy_reliability": 0.016388,
+          "murphy_resolution": 0.046766,
           "murphy_uncertainty": 0.493827,
           "n_clusters": 12,
           "n_items": 360,
           "ndcg_at_3": 0.868775,
           "nll": 0.656348,
           "p50_latency_ms": 746.2,
-          "p95_latency_ms": 746.2,
+          "p95_latency_ms": 882.4,
           "panel": "safety_xstest_360",
           "pareto_optimal": false
         }

@@ -315,6 +315,36 @@ def _row_to_shifted_logits(
     return {k: v - max_l for k, v in raw_logs.items()}
 
 
+def _row_to_vector_logits(
+    row: Mapping[str, float],
+    *,
+    is_logits: bool,
+    eps: float = 1e-12,
+) -> dict[str, float]:
+    if not row:
+        raise ValueError("calibration input row must be non-empty")
+    clean: dict[str, float] = {}
+    for raw_k, raw_v in row.items():
+        key = str(raw_k)
+        val = float(raw_v)
+        if not math.isfinite(val):
+            raise ValueError(f"non-finite value for {key!r}: {raw_v!r}")
+        if not is_logits and val < 0.0:
+            raise ValueError(f"probability for {key!r} must be >= 0, got {raw_v!r}")
+        clean[key] = val
+
+    if is_logits:
+        mean_z = sum(clean.values()) / float(len(clean))
+        return {k: v - mean_z for k, v in clean.items()}
+
+    tot = sum(clean.values())
+    if tot <= 0.0:
+        raise ValueError("probability row sum must be > 0")
+    raw_logs = {k: math.log(max(eps, v / tot)) for k, v in clean.items()}
+    mean_l = sum(raw_logs.values()) / float(len(raw_logs))
+    return {k: v - mean_l for k, v in raw_logs.items()}
+
+
 def _softmax_dict(scores: Mapping[str, float]) -> dict[str, float]:
     max_s = max(scores.values())
     exps = {k: math.exp(v - max_s) for k, v in scores.items()}
@@ -357,7 +387,7 @@ class VectorScalingModel:
     scales: dict[str, float]
     biases: dict[str, float]
     temperature_init: float
-    l2_reg: float = 0.1
+    l2_reg: float = 1e-3
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.temperature_init) or self.temperature_init <= 0.0:
@@ -374,7 +404,7 @@ class VectorScalingModel:
         default_scale = 1.0 / self.temperature_init
         out: list[dict[str, float]] = []
         for row in probs_or_logits:
-            logits = _row_to_shifted_logits(row, is_logits=is_logits)
+            logits = _row_to_vector_logits(row, is_logits=is_logits)
             scaled = {
                 k: float(self.scales.get(k, default_scale)) * val + float(self.biases.get(k, 0.0))
                 for k, val in logits.items()
@@ -523,7 +553,7 @@ def fit_vector_scaling(
     labels: Sequence[str],
     *,
     is_logits: bool = False,
-    l2_reg: float = 0.1,
+    l2_reg: float = 1e-3,
 ) -> VectorScalingModel:
     """Fit post-hoc diagonal vector scaling shrunk toward scalar temperature scaling (1 / T_0, 0)."""
     if not probs_or_logits or len(probs_or_logits) != len(labels):
@@ -543,15 +573,20 @@ def fit_vector_scaling(
     logit_rows: list[dict[str, float]] = []
     gold_labels: list[str] = []
     key_set: set[str] = set()
-    for row, raw_lbl in zip(probs_or_logits, labels):
-        logits = _row_to_shifted_logits(row, is_logits=is_logits)
+    for idx, (row, raw_lbl) in enumerate(zip(probs_or_logits, labels)):
+        logits = _row_to_vector_logits(row, is_logits=is_logits)
+        lbl = str(raw_lbl)
+        if lbl not in logits:
+            raise ValueError(f"label {lbl!r} at index {idx} not present in row keys")
         logit_rows.append(logits)
-        gold_labels.append(str(raw_lbl))
+        gold_labels.append(lbl)
         key_set.update(logits.keys())
 
     classes = sorted(key_set)
     cls_to_idx = {c: idx for idx, c in enumerate(classes)}
     c_len = len(classes)
+    gold_set = set(gold_labels)
+    observed_mask = [c in gold_set for c in classes]
 
     indexed_rows: list[list[tuple[int, float]]] = [
         [(cls_to_idx[k], v) for k, v in row.items()] for row in logit_rows
@@ -567,6 +602,10 @@ def fit_vector_scaling(
     loss, ga, gb, da, db = _vector_loss_grad_diag(
         x_vec[:c_len], x_vec[c_len:], indexed_rows, gold_indices, inv_t0, l2_reg
     )
+    for idx_c in range(c_len):
+        if not observed_mask[idx_c]:
+            ga[idx_c] = 0.0
+            gb[idx_c] = 0.0
     grad = ga + gb
     diag = da + db
 
@@ -612,10 +651,19 @@ def fit_vector_scaling(
         while step >= 1e-6:
             cand_x = [xi + step * di for xi, di in zip(x_vec, direction)]
             for idx_a in range(c_len):
-                cand_x[idx_a] = min(50.0, max(0.02, cand_x[idx_a]))
+                if observed_mask[idx_a]:
+                    cand_x[idx_a] = min(50.0, max(0.02, cand_x[idx_a]))
+                    cand_x[c_len + idx_a] = min(20.0, max(-20.0, cand_x[c_len + idx_a]))
+                else:
+                    cand_x[idx_a] = inv_t0
+                    cand_x[c_len + idx_a] = 0.0
             c_loss, c_ga, c_gb, c_da, c_db = _vector_loss_grad_diag(
                 cand_x[:c_len], cand_x[c_len:], indexed_rows, gold_indices, inv_t0, l2_reg
             )
+            for idx_c in range(c_len):
+                if not observed_mask[idx_c]:
+                    c_ga[idx_c] = 0.0
+                    c_gb[idx_c] = 0.0
             if c_loss <= loss + 1e-4 * step * dir_deriv or c_loss < loss - 1e-12:
                 new_x = cand_x
                 new_loss = c_loss

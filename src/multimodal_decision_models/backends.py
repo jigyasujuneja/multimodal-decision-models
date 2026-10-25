@@ -1292,6 +1292,7 @@ class CascadeDecisionOrchestrator:
         conformal_lam_reg: float = 0.01,
         conformal_k_reg: int = 1,
         escalate_on_conformal_ambiguous: bool = True,
+        layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
@@ -1318,6 +1319,11 @@ class CascadeDecisionOrchestrator:
         self.conformal_lam_reg = conformal_lam_reg
         self.conformal_k_reg = conformal_k_reg
         self.escalate_on_conformal_ambiguous = escalate_on_conformal_ambiguous
+        self.layer5_slot_context: dict[str, dict[str, Any]] | None = (
+            {str(qid): dict(ctx) for qid, ctx in layer5_slot_context.items()}
+            if layer5_slot_context is not None
+            else None
+        )
 
     def _resolve_slot_q_hat(self, qid: str) -> float | None:
         if self.conformal_q_hat is None:
@@ -1326,6 +1332,49 @@ class CascadeDecisionOrchestrator:
             val = self.conformal_q_hat.get(qid)
             return float(val) if val is not None else None
         return float(self.conformal_q_hat)
+
+    def _resolve_slot_layer5_args(
+        self,
+        qid: str,
+        *,
+        slot_context_override: Mapping[str, Mapping[str, Any]] | None,
+        candidate_pack_sizes: Mapping[str, int] | None,
+        decoded_pack_size: int | None,
+        visual_energies: Mapping[str, float] | None,
+        rank1_id: str | None,
+        rank1_visual_similarity: float | None,
+    ) -> tuple[
+        Mapping[str, int] | None,
+        int | None,
+        Mapping[str, float] | None,
+        str | None,
+        float | None,
+    ]:
+        ctx: Mapping[str, Any] = {}
+        if slot_context_override is not None and qid in slot_context_override:
+            ctx = slot_context_override[qid]
+        elif self.layer5_slot_context is not None and qid in self.layer5_slot_context:
+            ctx = self.layer5_slot_context[qid]
+        if not ctx:
+            return (
+                candidate_pack_sizes,
+                decoded_pack_size,
+                visual_energies,
+                rank1_id,
+                rank1_visual_similarity,
+            )
+        c_packs = ctx.get("candidate_pack_sizes", candidate_pack_sizes)
+        d_pack = ctx.get("decoded_pack_size", decoded_pack_size)
+        v_en = ctx.get("visual_energies", visual_energies)
+        r1_id = ctx.get("rank1_id", rank1_id)
+        r1_sim = ctx.get("rank1_visual_similarity", rank1_visual_similarity)
+        return (
+            c_packs,
+            int(d_pack) if d_pack is not None else None,
+            v_en,
+            str(r1_id) if r1_id is not None else None,
+            float(r1_sim) if r1_sim is not None else None,
+        )
 
     def _quarantine_result(
         self,
@@ -1383,6 +1432,7 @@ class CascadeDecisionOrchestrator:
         rank1_id: str | None = None,
         rank1_visual_similarity: float | None = None,
         sister_pack_collision: bool = False,
+        layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> DecisionResult:
         t0 = time.perf_counter()
         s2_name = self.stage2_backend.name if self.stage2_backend else "none"
@@ -1398,6 +1448,9 @@ class CascadeDecisionOrchestrator:
             "sister_pack_collision": sister_pack_collision,
             "decoded_pack_size": decoded_pack_size,
         }
+        active_slot_ctx = layer5_slot_context if layer5_slot_context is not None else self.layer5_slot_context
+        if active_slot_ctx is not None:
+            extra_cfg["layer5_slot_context"] = active_slot_ctx
         if self.conformal_q_hat is not None:
             extra_cfg["conformal_q_hat"] = self.conformal_q_hat
             extra_cfg["conformal_method"] = self.conformal_method
@@ -1433,6 +1486,7 @@ class CascadeDecisionOrchestrator:
                 rank1_id=rank1_id,
                 rank1_visual_similarity=rank1_visual_similarity,
                 sister_pack_collision=sister_pack_collision,
+                layer5_slot_context=layer5_slot_context,
             )
         except DecisionContractError as exc:
             if not self.total_contract_mode:
@@ -1455,6 +1509,7 @@ class CascadeDecisionOrchestrator:
         rank1_id: str | None,
         rank1_visual_similarity: float | None,
         sister_pack_collision: bool,
+        layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> DecisionResult:
         # 1. Stage 2A Adaptive Fast-Exit check for single-slot retrieval verification
         if self.enable_stage2a_fast_exit and len(questions) == 1 and prior_logits:
@@ -1594,18 +1649,26 @@ class CascadeDecisionOrchestrator:
             )
             predicted = max(fused_dist.items(), key=lambda kv: kv[1])[0]
             guard_name = "none"
-            if qid != evidence_slot_id and (
-                candidate_pack_sizes or visual_energies or rank1_visual_similarity is not None
-            ):
-                predicted, guard_name = apply_layer5_deterministic_guards(
-                    chosen_id=predicted,
-                    raw_probs=raw_dist,
+            if qid != evidence_slot_id:
+                s1_packs, s1_dec_pack, s1_ven, s1_r1_id, s1_r1_sim = self._resolve_slot_layer5_args(
+                    qid,
+                    slot_context_override=layer5_slot_context,
                     candidate_pack_sizes=candidate_pack_sizes,
                     decoded_pack_size=decoded_pack_size,
                     visual_energies=visual_energies,
                     rank1_id=rank1_id,
                     rank1_visual_similarity=rank1_visual_similarity,
                 )
+                if s1_packs or s1_ven or s1_r1_sim is not None:
+                    predicted, guard_name = apply_layer5_deterministic_guards(
+                        chosen_id=predicted,
+                        raw_probs=raw_dist,
+                        candidate_pack_sizes=s1_packs,
+                        decoded_pack_size=s1_dec_pack,
+                        visual_energies=s1_ven,
+                        rank1_id=s1_r1_id,
+                        rank1_visual_similarity=s1_r1_sim,
+                    )
 
             slot_ev = backend_evidence.get(qid, injected_ev_choice if qid != evidence_slot_id else "")
             inferred_flag = (
@@ -1672,11 +1735,33 @@ class CascadeDecisionOrchestrator:
                     raise SchemaContractViolationError(f"Stage-2 backend returned empty distribution for {qid!r}")
                 s2_h = normalized_entropy(s2_dist)
                 s2_pred = max(s2_dist.items(), key=lambda kv: kv[1])[0]
-                s2_term = (
-                    DecisionTerminalState.ABSTAIN_OOS
-                    if s2_pred in self.oos_keys
-                    else DecisionTerminalState.STAGE2_VERIFIED
-                )
+                s2_guard_name = "none"
+                if qid != evidence_slot_id:
+                    s2_packs, s2_dec_pack, s2_ven, s2_r1_id, s2_r1_sim = self._resolve_slot_layer5_args(
+                        qid,
+                        slot_context_override=layer5_slot_context,
+                        candidate_pack_sizes=candidate_pack_sizes,
+                        decoded_pack_size=decoded_pack_size,
+                        visual_energies=visual_energies,
+                        rank1_id=rank1_id,
+                        rank1_visual_similarity=rank1_visual_similarity,
+                    )
+                    if s2_packs or s2_ven or s2_r1_sim is not None:
+                        s2_pred, s2_guard_name = apply_layer5_deterministic_guards(
+                            chosen_id=s2_pred,
+                            raw_probs=s2_dist,
+                            candidate_pack_sizes=s2_packs,
+                            decoded_pack_size=s2_dec_pack,
+                            visual_energies=s2_ven,
+                            rank1_id=s2_r1_id,
+                            rank1_visual_similarity=s2_r1_sim,
+                        )
+                if s2_pred in self.oos_keys:
+                    s2_term = DecisionTerminalState.ABSTAIN_OOS
+                elif s2_guard_name != "none":
+                    s2_term = DecisionTerminalState.GUARD_OVERRIDDEN
+                else:
+                    s2_term = DecisionTerminalState.STAGE2_VERIFIED
                 slots_out[qid] = SlotReadout(
                     slot_id=qid,
                     predicted=s2_pred,
@@ -1685,7 +1770,7 @@ class CascadeDecisionOrchestrator:
                     h_raw=s2_h,
                     confidence=1.0 - s2_h,
                     escalated=True,
-                    guard_applied=slots_out[qid].guard_applied,
+                    guard_applied=s2_guard_name,
                     backend_name=self.stage2_backend.name,
                     evidence=s2_evidence.get(qid, slots_out[qid].evidence),
                     passes_used=2,
@@ -1703,12 +1788,12 @@ class CascadeDecisionOrchestrator:
         non_ev_states = [
             s.terminal_state for sid, s in slots_out.items() if sid != evidence_slot_id
         ]
-        if did_escalate:
-            overall_state = DecisionTerminalState.STAGE2_VERIFIED
-        elif any(st == DecisionTerminalState.ABSTAIN_OOS for st in non_ev_states):
+        if any(st == DecisionTerminalState.ABSTAIN_OOS for st in non_ev_states):
             overall_state = DecisionTerminalState.ABSTAIN_OOS
         elif any(st == DecisionTerminalState.GUARD_OVERRIDDEN for st in non_ev_states):
             overall_state = DecisionTerminalState.GUARD_OVERRIDDEN
+        elif did_escalate:
+            overall_state = DecisionTerminalState.STAGE2_VERIFIED
         else:
             overall_state = DecisionTerminalState.STAGE1_RESOLVED
 

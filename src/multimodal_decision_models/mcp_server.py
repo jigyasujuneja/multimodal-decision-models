@@ -28,9 +28,11 @@ Supports both standard MCP newline-delimited JSON-RPC 2.0 messages and LSP-style
 from __future__ import annotations
 
 import base64
+import binascii
 import json
+import math
 import sys
-from typing import Any, BinaryIO, Mapping
+from typing import Any, BinaryIO, Mapping, Sequence
 
 from .calibration import pre_gated_bayesian_poe_fusion
 from .conformal import (
@@ -49,7 +51,86 @@ from .visual_compiler import (
 
 MCP_SERVER_NAME = "dgem-catalog"
 MCP_SERVER_VERSION = "0.4.0"
-DEFAULT_MCP_PROTOCOL_VERSION = "2024-11-05"
+DEFAULT_MCP_PROTOCOL_VERSION: str = "2024-11-05"
+MAX_FRAME_BYTES: int = 16 * 1024 * 1024
+MAX_HEADER_LINES: int = 64
+
+
+class _InvalidParamsError(ValueError):
+    """Raised when JSON-RPC params or MCP tool arguments violate schema types."""
+
+
+class _FramingInvalidRequestError(ValueError):
+    """Raised when LSP Content-Length header bounds or header line limits are violated."""
+
+
+def _require_mapping(val: Any, field: str, *, non_empty: bool = False) -> Mapping[str, Any]:
+    if not isinstance(val, Mapping):
+        raise _InvalidParamsError(f"{field} must be an object")
+    if non_empty and not val:
+        raise _InvalidParamsError(f"{field} must be a non-empty object")
+    return val
+
+
+def _require_sequence(val: Any, field: str, *, non_empty: bool = False) -> Sequence[Any]:
+    if not isinstance(val, list):
+        raise _InvalidParamsError(f"{field} must be an array")
+    if non_empty and not val:
+        raise _InvalidParamsError(f"{field} must be a non-empty array")
+    return val
+
+
+def _require_number(val: Any, field: str) -> float:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise _InvalidParamsError(f"{field} must be a finite number")
+    out = float(val)
+    if not math.isfinite(out):
+        raise _InvalidParamsError(f"{field} must be a finite number")
+    return out
+
+
+def _require_int(val: Any, field: str) -> int:
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise _InvalidParamsError(f"{field} must be an integer")
+    return int(val)
+
+
+def _require_str(val: Any, field: str, *, non_empty: bool = False) -> str:
+    if not isinstance(val, str):
+        raise _InvalidParamsError(f"{field} must be a string")
+    if non_empty and not val:
+        raise _InvalidParamsError(f"{field} must be a non-empty string")
+    return val
+
+
+def _require_bool(val: Any, field: str) -> bool:
+    if not isinstance(val, bool):
+        raise _InvalidParamsError(f"{field} must be a boolean")
+    return val
+
+
+def _require_float_map(val: Any, field: str, *, non_empty: bool = False) -> dict[str, float]:
+    m = _require_mapping(val, field, non_empty=non_empty)
+    out: dict[str, float] = {}
+    for k, v in m.items():
+        if not isinstance(k, str) or not k:
+            raise _InvalidParamsError(f"{field} keys must be non-empty strings")
+        out[k] = _require_number(v, f"{field}.{k}")
+    return out
+
+
+def _parse_lab_triple(val: Any, field: str) -> tuple[float, float, float] | None:
+    if val is None:
+        return None
+    seq = _require_sequence(val, field)
+    if len(seq) != 3:
+        raise _InvalidParamsError(f"{field} must have length 3")
+    return (
+        _require_number(seq[0], f"{field}[0]"),
+        _require_number(seq[1], f"{field}[1]"),
+        _require_number(seq[2], f"{field}[2]"),
+    )
+
 
 _TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -174,70 +255,119 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
-def _decode_image_spec(spec: Mapping[str, Any] | str) -> ImageBuffer:
+def _decode_image_spec(spec: Any, field: str = "image") -> ImageBuffer:
     if isinstance(spec, str):
-        raw_bytes = base64.b64decode(spec)
+        if not spec:
+            raise _InvalidParamsError(f"{field} string must be non-empty")
+        try:
+            raw_bytes = base64.b64decode(spec, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(f"invalid base64 in {field}: {exc}") from exc
         if raw_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
             return decode_png(raw_bytes)
         return decode_ppm(raw_bytes)
 
-    if "png_base64" in spec and spec["png_base64"]:
-        return decode_png(base64.b64decode(str(spec["png_base64"])))
-    if "ppm_base64" in spec and spec["ppm_base64"]:
-        return decode_ppm(base64.b64decode(str(spec["ppm_base64"])))
+    if not isinstance(spec, Mapping):
+        raise _InvalidParamsError(f"{field} must be an image object or base64 string")
+
+    if "png_base64" in spec and spec["png_base64"] is not None:
+        png_b64 = _require_str(spec["png_base64"], f"{field}.png_base64", non_empty=True)
+        return decode_png(base64.b64decode(png_b64, validate=True))
+    if "ppm_base64" in spec and spec["ppm_base64"] is not None:
+        ppm_b64 = _require_str(spec["ppm_base64"], f"{field}.ppm_base64", non_empty=True)
+        return decode_ppm(base64.b64decode(ppm_b64, validate=True))
     if "width" in spec and "height" in spec:
-        w = int(spec["width"])
-        h = int(spec["height"])
-        if "rgb_hex" in spec:
-            rgb = bytes.fromhex(str(spec["rgb_hex"]))
-        elif "rgb_base64" in spec:
-            rgb = base64.b64decode(str(spec["rgb_base64"]))
+        w = _require_int(spec["width"], f"{field}.width")
+        h = _require_int(spec["height"], f"{field}.height")
+        if "rgb_hex" in spec and spec["rgb_hex"] is not None:
+            rgb_hex = _require_str(spec["rgb_hex"], f"{field}.rgb_hex", non_empty=True)
+            rgb = bytes.fromhex(rgb_hex)
+        elif "rgb_base64" in spec and spec["rgb_base64"] is not None:
+            rgb_b64 = _require_str(spec["rgb_base64"], f"{field}.rgb_base64", non_empty=True)
+            rgb = base64.b64decode(rgb_b64, validate=True)
         else:
-            raise ValueError("raw ImageBuffer spec requires rgb_hex or rgb_base64")
+            raise _InvalidParamsError(f"{field} raw ImageBuffer spec requires rgb_hex or rgb_base64")
         return ImageBuffer(w, h, rgb)
-    raise ValueError("unsupported image specification; provide png_base64, ppm_base64, or width/height/rgb_hex")
+    raise _InvalidParamsError(
+        f"unsupported {field} specification; provide png_base64, ppm_base64, or width/height/rgb_hex"
+    )
 
 
 def _tool_shortlist_candidates(args: Mapping[str, Any]) -> dict[str, Any]:
-    items = args.get("items")
-    if not isinstance(items, list) or not items:
-        raise ValueError("items must be a non-empty list")
-    query_emb = args.get("query_embedding")
-    if not isinstance(query_emb, list) or not query_emb:
-        raise ValueError("query_embedding must be a non-empty float list")
+    if "items" not in args:
+        raise _InvalidParamsError("items is required")
+    items = _require_sequence(args.get("items"), "items", non_empty=True)
+    if "query_embedding" not in args:
+        raise _InvalidParamsError("query_embedding is required")
+    query_emb_seq = _require_sequence(args.get("query_embedding"), "query_embedding", non_empty=True)
+    query_vec = [
+        _require_number(x, f"query_embedding[{j}]") for j, x in enumerate(query_emb_seq)
+    ]
 
     idx = MultimodalEmbeddingIndex()
-    for raw_item in items:
-        if not isinstance(raw_item, Mapping):
-            raise ValueError("each item in items must be an object")
-        lab_raw = raw_item.get("lab_color")
-        lab_t = (
-            (float(lab_raw[0]), float(lab_raw[1]), float(lab_raw[2]))
-            if isinstance(lab_raw, list) and len(lab_raw) == 3
+    for i, raw_item in enumerate(items):
+        item_obj = _require_mapping(raw_item, f"items[{i}]")
+        if "id" not in item_obj or "embedding" not in item_obj:
+            raise _InvalidParamsError(f"items[{i}] requires id and embedding")
+        item_id = _require_str(item_obj["id"], f"items[{i}].id", non_empty=True)
+        emb_seq = _require_sequence(item_obj["embedding"], f"items[{i}].embedding", non_empty=True)
+        emb_vec = [
+            _require_number(x, f"items[{i}].embedding[{j}]") for j, x in enumerate(emb_seq)
+        ]
+        title = (
+            _require_str(item_obj["title"], f"items[{i}].title")
+            if item_obj.get("title") is not None
+            else ""
+        )
+        lab_t = _parse_lab_triple(item_obj.get("lab_color"), f"items[{i}].lab_color")
+        aspect_bin = (
+            _require_str(item_obj["aspect_bin"], f"items[{i}].aspect_bin", non_empty=True)
+            if item_obj.get("aspect_bin") is not None
+            else "standard"
+        )
+        pack_sz = (
+            _require_int(item_obj["pack_size"], f"items[{i}].pack_size")
+            if item_obj.get("pack_size") is not None
             else None
         )
+        meta_raw = item_obj.get("metadata")
+        meta_clean: dict[str, str] = {}
+        if meta_raw is not None:
+            meta_map = _require_mapping(meta_raw, f"items[{i}].metadata")
+            for mk, mv in meta_map.items():
+                if not isinstance(mk, str):
+                    raise _InvalidParamsError(f"items[{i}].metadata keys must be strings")
+                if mv is None or isinstance(mv, (Mapping, list)):
+                    raise _InvalidParamsError(f"items[{i}].metadata.{mk} must be scalar")
+                meta_clean[mk] = str(mv)
         idx.upsert(
-            str(raw_item["id"]),
-            [float(x) for x in raw_item["embedding"]],
-            title=str(raw_item.get("title", "")),
+            item_id,
+            emb_vec,
+            title=title,
             lab_color=lab_t,
-            aspect_bin=str(raw_item.get("aspect_bin", "standard")),
-            pack_size=int(raw_item["pack_size"]) if raw_item.get("pack_size") is not None else None,
-            metadata={str(k): str(v) for k, v in (raw_item.get("metadata") or {}).items()},
+            aspect_bin=aspect_bin,
+            pack_size=pack_sz,
+            metadata=meta_clean,
         )
 
-    q_lab_raw = args.get("query_lab_color")
-    q_lab = (
-        (float(q_lab_raw[0]), float(q_lab_raw[1]), float(q_lab_raw[2]))
-        if isinstance(q_lab_raw, list) and len(q_lab_raw) == 3
+    q_lab = _parse_lab_triple(args.get("query_lab_color"), "query_lab_color")
+    q_aspect = (
+        _require_str(args["query_aspect_bin"], "query_aspect_bin")
+        if args.get("query_aspect_bin") is not None
         else None
     )
+    top_k = _require_int(args["top_k"], "top_k") if "top_k" in args and args["top_k"] is not None else 6
+    use_csls = (
+        _require_bool(args["use_csls"], "use_csls")
+        if "use_csls" in args and args["use_csls"] is not None
+        else False
+    )
     res = idx.query(
-        [float(x) for x in query_emb],
+        query_vec,
         query_lab_color=q_lab,
-        query_aspect_bin=str(args["query_aspect_bin"]) if args.get("query_aspect_bin") else None,
-        top_k=int(args.get("top_k", 6)),
-        use_csls=bool(args.get("use_csls", False)),
+        query_aspect_bin=q_aspect or None,
+        top_k=top_k,
+        use_csls=use_csls,
     )
     return {
         "shortlist_ids": res.shortlist_ids,
@@ -252,21 +382,49 @@ def _tool_shortlist_candidates(args: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]:
-    raw_probs_in = args.get("probabilities")
-    if not isinstance(raw_probs_in, Mapping) or not raw_probs_in:
-        raise ValueError("probabilities must be a non-empty object")
-    probs = {str(k): float(v) for k, v in raw_probs_in.items()}
+    if "probabilities" not in args:
+        raise _InvalidParamsError("probabilities is required")
+    probs = _require_float_map(args.get("probabilities"), "probabilities", non_empty=True)
 
-    method = str(args.get("method", "raps"))
-    lam_reg = float(args.get("lam_reg", 0.01))
-    k_reg = int(args.get("k_reg", 1))
+    method = (
+        _require_str(args["method"], "method", non_empty=True)
+        if "method" in args and args["method"] is not None
+        else "raps"
+    )
+    lam_reg = (
+        _require_number(args["lam_reg"], "lam_reg")
+        if "lam_reg" in args and args["lam_reg"] is not None
+        else 0.01
+    )
+    k_reg = (
+        _require_int(args["k_reg"], "k_reg")
+        if "k_reg" in args and args["k_reg"] is not None
+        else 1
+    )
+
+    c_probs: list[dict[str, float]] | None = None
+    c_labels: list[str] | None = None
+    if "calib_probs" in args and args["calib_probs"] is not None:
+        cp_seq = _require_sequence(args["calib_probs"], "calib_probs", non_empty=True)
+        c_probs = [
+            _require_float_map(row, f"calib_probs[{i}]", non_empty=True)
+            for i, row in enumerate(cp_seq)
+        ]
+    if "calib_labels" in args and args["calib_labels"] is not None:
+        cl_seq = _require_sequence(args["calib_labels"], "calib_labels", non_empty=True)
+        c_labels = [
+            _require_str(lbl, f"calib_labels[{i}]", non_empty=True)
+            for i, lbl in enumerate(cl_seq)
+        ]
 
     if "q_hat" in args and args["q_hat"] is not None:
-        q_hat = float(args["q_hat"])
-    elif "calib_probs" in args and "calib_labels" in args:
-        c_probs = [{str(k): float(v) for k, v in row.items()} for row in args["calib_probs"]]
-        c_labels = [str(lbl) for lbl in args["calib_labels"]]
-        alpha = float(args.get("alpha", 0.10))
+        q_hat = _require_number(args["q_hat"], "q_hat")
+    elif c_probs is not None and c_labels is not None:
+        alpha = (
+            _require_number(args["alpha"], "alpha")
+            if "alpha" in args and args["alpha"] is not None
+            else 0.10
+        )
         cal_res = calibrate_conformal_quantile(
             c_probs,
             c_labels,
@@ -277,7 +435,7 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         )
         q_hat = cal_res.q_hat
     else:
-        raise ValueError("provide either q_hat or (calib_probs and calib_labels)")
+        raise _InvalidParamsError("provide either q_hat or (calib_probs and calib_labels)")
 
     # Evaluate conformal prediction set strictly on raw_probs BEFORE prior fusion.
     conf_res = conformal_prediction_set(
@@ -291,13 +449,25 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
 
     prior_logits_raw = args.get("prior_logits")
     prior_logits = (
-        {str(k): float(v) for k, v in prior_logits_raw.items()}
-        if isinstance(prior_logits_raw, Mapping)
+        _require_float_map(prior_logits_raw, "prior_logits", non_empty=True)
+        if prior_logits_raw is not None
         else None
     )
-    prior_weight = float(args.get("prior_weight", 0.0))
-    prior_gate_mode = str(args.get("prior_gate_mode", "hesitant"))
-    hesitation_threshold = float(args.get("hesitation_threshold", 0.16))
+    prior_weight = (
+        _require_number(args["prior_weight"], "prior_weight")
+        if "prior_weight" in args and args["prior_weight"] is not None
+        else 0.0
+    )
+    prior_gate_mode = (
+        _require_str(args["prior_gate_mode"], "prior_gate_mode", non_empty=True)
+        if "prior_gate_mode" in args and args["prior_gate_mode"] is not None
+        else "hesitant"
+    )
+    hesitation_threshold = (
+        _require_number(args["hesitation_threshold"], "hesitation_threshold")
+        if "hesitation_threshold" in args and args["hesitation_threshold"] is not None
+        else 0.16
+    )
 
     fused_probs, h_raw, hes_escalate = pre_gated_bayesian_poe_fusion(
         probs,
@@ -323,28 +493,47 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _tool_prune_context_blocks(args: Mapping[str, Any]) -> dict[str, Any]:
-    raw_blocks = args.get("blocks")
-    if not isinstance(raw_blocks, list):
-        raise ValueError("blocks must be a list")
-    blocks = [
-        ContextBlock(
-            id=str(b["id"]),
-            full_tokens=int(b["full_tokens"]),
-            stub_tokens=int(b["stub_tokens"]),
-            full_text=str(b.get("full_text", "")),
-            stub_text=str(b.get("stub_text", "")),
-            pinned=bool(b.get("pinned", False)),
+    if "blocks" not in args:
+        raise _InvalidParamsError("blocks is required")
+    raw_blocks = _require_sequence(args.get("blocks"), "blocks")
+    blocks: list[ContextBlock] = []
+    for i, b_raw in enumerate(raw_blocks):
+        b = _require_mapping(b_raw, f"blocks[{i}]")
+        if "id" not in b or "full_tokens" not in b or "stub_tokens" not in b:
+            raise _InvalidParamsError(f"blocks[{i}] requires id, full_tokens, and stub_tokens")
+        blocks.append(
+            ContextBlock(
+                id=_require_str(b["id"], f"blocks[{i}].id", non_empty=True),
+                full_tokens=_require_int(b["full_tokens"], f"blocks[{i}].full_tokens"),
+                stub_tokens=_require_int(b["stub_tokens"], f"blocks[{i}].stub_tokens"),
+                full_text=(
+                    _require_str(b["full_text"], f"blocks[{i}].full_text")
+                    if b.get("full_text") is not None
+                    else ""
+                ),
+                stub_text=(
+                    _require_str(b["stub_text"], f"blocks[{i}].stub_text")
+                    if b.get("stub_text") is not None
+                    else ""
+                ),
+                pinned=(
+                    _require_bool(b["pinned"], f"blocks[{i}].pinned")
+                    if b.get("pinned") is not None
+                    else False
+                ),
+            )
         )
-        for b in raw_blocks
-    ]
-    raw_sp = args.get("slot_probabilities")
-    if not isinstance(raw_sp, Mapping):
-        raise ValueError("slot_probabilities must be an object")
-    slot_probs = {
-        str(bid): {str(act): float(p) for act, p in dist.items()}
-        for bid, dist in raw_sp.items()
-    }
-    budget = int(args["token_budget"])
+    if "slot_probabilities" not in args:
+        raise _InvalidParamsError("slot_probabilities is required")
+    raw_sp = _require_mapping(args.get("slot_probabilities"), "slot_probabilities")
+    slot_probs: dict[str, dict[str, float]] = {}
+    for bid, dist in raw_sp.items():
+        if not isinstance(bid, str) or not bid:
+            raise _InvalidParamsError("slot_probabilities keys must be non-empty strings")
+        slot_probs[bid] = _require_float_map(dist, f"slot_probabilities.{bid}", non_empty=True)
+    if "token_budget" not in args:
+        raise _InvalidParamsError("token_budget is required")
+    budget = _require_int(args.get("token_budget"), "token_budget")
     res = prune_agent_context_blocks(blocks, slot_probs, budget)
     return {
         "decisions": res.decisions,
@@ -357,10 +546,11 @@ def _tool_prune_context_blocks(args: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _tool_compile_contact_sheet(args: Mapping[str, Any]) -> dict[str, Any]:
-    if "query_png_base64" in args and args["query_png_base64"]:
-        query_buf = _decode_image_spec(str(args["query_png_base64"]))
-    elif "query" in args and isinstance(args["query"], Mapping):
-        query_buf = _decode_image_spec(args["query"])
+    if "query_png_base64" in args and args["query_png_base64"] is not None:
+        q_b64 = _require_str(args["query_png_base64"], "query_png_base64", non_empty=True)
+        query_buf = _decode_image_spec(q_b64, "query_png_base64")
+    elif "query" in args and args["query"] is not None:
+        query_buf = _decode_image_spec(args["query"], "query")
     elif (
         "query_width" in args
         and "query_height" in args
@@ -372,32 +562,48 @@ def _tool_compile_contact_sheet(args: Mapping[str, Any]) -> dict[str, Any]:
                 "height": args["query_height"],
                 "rgb_hex": args.get("query_rgb_hex"),
                 "rgb_base64": args.get("query_rgb_base64"),
-            }
+            },
+            "query",
         )
     else:
-        raise ValueError("compile_contact_sheet requires query_png_base64 or query object")
+        raise _InvalidParamsError("compile_contact_sheet requires query_png_base64 or query object")
 
-    raw_cands = args.get("candidates")
-    if not isinstance(raw_cands, list) or not raw_cands:
-        raise ValueError("candidates must be a non-empty list")
-    cand_bufs = [_decode_image_spec(c) for c in raw_cands]
+    if "candidates" not in args:
+        raise _InvalidParamsError("candidates is required")
+    raw_cands = _require_sequence(args.get("candidates"), "candidates", non_empty=True)
+    cand_bufs = [_decode_image_spec(c, f"candidates[{i}]") for i, c in enumerate(raw_cands)]
 
     raw_meta = args.get("candidate_metadata")
-    meta_list = (
-        [{str(k): str(v) for k, v in m.items()} for m in raw_meta]
-        if isinstance(raw_meta, list)
-        else None
-    )
+    meta_list: list[dict[str, str]] | None = None
+    if raw_meta is not None:
+        meta_seq = _require_sequence(raw_meta, "candidate_metadata")
+        meta_list = []
+        for i, m in enumerate(meta_seq):
+            m_obj = _require_mapping(m, f"candidate_metadata[{i}]")
+            clean_m: dict[str, str] = {}
+            for k, v in m_obj.items():
+                if not isinstance(k, str):
+                    raise _InvalidParamsError(f"candidate_metadata[{i}] keys must be strings")
+                if v is None or isinstance(v, (Mapping, list)):
+                    raise _InvalidParamsError(f"candidate_metadata[{i}].{k} must be scalar")
+                clean_m[k] = str(v)
+            meta_list.append(clean_m)
+
     band_frac = (
-        float(args["band_height_fraction"])
+        _require_number(args["band_height_fraction"], "band_height_fraction")
         if args.get("band_height_fraction") is not None
         else None
+    )
+    curved = (
+        _require_bool(args["curved_container"], "curved_container")
+        if args.get("curved_container") is not None
+        else False
     )
     sheet = compile_dual_buffer_contact_sheet(
         query_buf,
         cand_bufs,
         candidate_metadata=meta_list,
-        curved_container=bool(args.get("curved_container", False)),
+        curved_container=curved,
         band_height_fraction=band_frac,
     )
     return {
@@ -429,8 +635,11 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
     if not has_id:
         return None
 
-    params = msg.get("params") or {}
-    if not isinstance(params, Mapping):
+    if "params" not in msg or msg["params"] is None:
+        params: Mapping[str, Any] = {}
+    elif isinstance(msg["params"], Mapping):
+        params = msg["params"]
+    else:
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -438,7 +647,14 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
         }
 
     if method == "initialize":
-        proto_ver = str(params.get("protocolVersion") or DEFAULT_MCP_PROTOCOL_VERSION)
+        raw_proto = params.get("protocolVersion")
+        if raw_proto is not None and not isinstance(raw_proto, str):
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Invalid params: protocolVersion must be string"},
+            }
+        proto_ver = raw_proto if raw_proto else DEFAULT_MCP_PROTOCOL_VERSION
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -460,12 +676,21 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
 
     if method == "tools/call":
         tool_name = params.get("name")
-        tool_args = params.get("arguments") or {}
-        if not isinstance(tool_name, str) or not isinstance(tool_args, Mapping):
+        if not isinstance(tool_name, str) or not tool_name:
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32602, "message": "tools/call requires string name and object arguments"},
+                "error": {"code": -32602, "message": "tools/call requires non-empty string name"},
+            }
+        if "arguments" not in params:
+            tool_args: Mapping[str, Any] = {}
+        elif isinstance(params["arguments"], Mapping):
+            tool_args = params["arguments"]
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "tools/call requires object arguments"},
             }
         dispatch = {
             "shortlist_candidates": _tool_shortlist_candidates,
@@ -490,14 +715,17 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
                     "isError": False,
                 },
             }
-        except (ValueError, KeyError, TypeError) as exc:
+        except _InvalidParamsError as exc:
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": str(exc)}],
-                    "isError": True,
-                },
+                "error": {"code": -32602, "message": f"Invalid params: {exc}"},
+            }
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Invalid tool arguments: {exc}"},
             }
 
     return {
@@ -518,11 +746,22 @@ def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
             continue
         if stripped.lower().startswith(b"content-length:"):
             parts = stripped.split(b":", 1)
-            content_len = int(parts[1].strip())
-            while True:
+            raw_len_text = parts[1].strip()
+            hdr_count = 0
+            while hdr_count < MAX_HEADER_LINES:
                 hdr_line = stream.readline()
                 if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                     break
+                hdr_count += 1
+            else:
+                raise _FramingInvalidRequestError(
+                    f"exceeded MAX_HEADER_LINES ({MAX_HEADER_LINES})"
+                )
+            content_len = int(raw_len_text)
+            if content_len < 0 or content_len > MAX_FRAME_BYTES:
+                raise _FramingInvalidRequestError(
+                    f"Content-Length {content_len} out of bounds [0, {MAX_FRAME_BYTES}]"
+                )
             body = stream.read(content_len)
             if len(body) < content_len:
                 return None, True
@@ -548,13 +787,21 @@ def serve_stdio(stdin: BinaryIO | None = None, stdout: BinaryIO | None = None) -
     while True:
         try:
             raw_frame, framed = _read_next_frame(in_stream)
+        except _FramingInvalidRequestError as exc:
+            err_resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": f"Invalid Request: {exc}"},
+            }
+            _write_frame(out_stream, err_resp, True)
+            continue
         except ValueError as exc:
             err_resp = {
                 "jsonrpc": "2.0",
                 "id": None,
                 "error": {"code": -32700, "message": f"Framing error: {exc}"},
             }
-            _write_frame(out_stream, err_resp, False)
+            _write_frame(out_stream, err_resp, True)
             continue
 
         if raw_frame is None:

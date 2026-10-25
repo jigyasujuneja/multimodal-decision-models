@@ -21,6 +21,18 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync"
+	"time"
+)
+
+const conformalTieTol = 1e-12
+const maxSeededConformalStreams = 256
+
+var (
+	conformalRNGMu      sync.Mutex
+	defaultConformalRNG = rand.New(rand.NewSource(time.Now().UnixNano()))
+	seededConformalRNGs = make(map[int64]*rand.Rand)
+	seededConformalKeys []int64
 )
 
 var defaultConformalAbstainKeys = []string{
@@ -34,12 +46,13 @@ var defaultConformalAbstainKeys = []string{
 
 // ConformalConfig parameterizes Split Conformal Prediction across LAC, APS, and RAPS.
 type ConformalConfig struct {
-	Method      string   // "lac", "aps", or "raps" (default "raps")
-	LamReg      float64  // RAPS rank penalty >= 0 (default 0.01 when zero-value ConformalConfig{} is passed)
-	KReg        int      // RAPS unpenalized top-k ranks >= 0 (default 1 when zero-value ConformalConfig{} is passed)
-	Randomized  bool     // whether to draw u ~ Uniform(0, 1) using Seed instead of deterministic u = 0
-	Seed        int64    // deterministic RNG seed when Randomized is true
-	AbstainKeys []string // custom abstain/catch-all keys; defaults to defaultConformalAbstainKeys when nil
+	Method      string     // "lac", "aps", or "raps" (default "raps")
+	LamReg      float64    // RAPS rank penalty >= 0 (default 0.01 when zero-value ConformalConfig{} is passed)
+	KReg        int        // RAPS unpenalized top-k ranks >= 0 (default 1 when zero-value ConformalConfig{} is passed)
+	Randomized  bool       // whether to draw u ~ Uniform(0, 1) instead of deterministic u = 0
+	Seed        int64      // deterministic RNG seed when Randomized is true (0 draws from shared stream)
+	RNG         *rand.Rand // optional caller-managed RNG stream when Randomized is true
+	AbstainKeys []string   // custom abstain/catch-all keys; defaults to defaultConformalAbstainKeys when nil
 }
 
 // ConformalSet holds the calibrated prediction set C_alpha(x) and pre-fusion cascade gate flags.
@@ -69,6 +82,73 @@ type ContextPruneResult struct {
 	TokensAfter         int
 	TokenReductionRatio float64
 	ExpectedUtility     float64
+}
+
+func storeSeededConformalRNG(seed int64, r *rand.Rand) {
+	conformalRNGMu.Lock()
+	defer conformalRNGMu.Unlock()
+	if _, exists := seededConformalRNGs[seed]; !exists {
+		seededConformalKeys = append(seededConformalKeys, seed)
+		if len(seededConformalKeys) > maxSeededConformalStreams {
+			evict := seededConformalKeys[0]
+			seededConformalKeys = seededConformalKeys[1:]
+			delete(seededConformalRNGs, evict)
+		}
+	}
+	seededConformalRNGs[seed] = r
+}
+
+func partitionConformalTieGroups(ranked []string, norm map[string]float64) [][]string {
+	groups := make([][]string, 0, len(ranked))
+	for _, k := range ranked {
+		pk := norm[k]
+		if len(groups) == 0 || math.Abs(pk-norm[groups[len(groups)-1][0]]) > conformalTieTol {
+			groups = append(groups, []string{k})
+		} else {
+			last := len(groups) - 1
+			groups[last] = append(groups[last], k)
+		}
+	}
+	return groups
+}
+
+func drawWithRand(r *rand.Rand, groups [][]string) (float64, []string) {
+	u := r.Float64()
+	flat := make([]string, 0, len(groups)*2)
+	for _, grp := range groups {
+		if len(grp) > 1 {
+			cp := make([]string, len(grp))
+			copy(cp, grp)
+			r.Shuffle(len(cp), func(i, j int) { cp[i], cp[j] = cp[j], cp[i] })
+			flat = append(flat, cp...)
+		} else {
+			flat = append(flat, grp[0])
+		}
+	}
+	return u, flat
+}
+
+func drawRandomizedOrderAndU(groups [][]string, cfg ConformalConfig) (float64, []string) {
+	if cfg.RNG != nil {
+		return drawWithRand(cfg.RNG, groups)
+	}
+	conformalRNGMu.Lock()
+	defer conformalRNGMu.Unlock()
+	if cfg.Seed == 0 {
+		return drawWithRand(defaultConformalRNG, groups)
+	}
+	r, ok := seededConformalRNGs[cfg.Seed]
+	if !ok {
+		r = rand.New(rand.NewSource(cfg.Seed))
+		seededConformalKeys = append(seededConformalKeys, cfg.Seed)
+		if len(seededConformalKeys) > maxSeededConformalStreams {
+			evict := seededConformalKeys[0]
+			seededConformalKeys = seededConformalKeys[1:]
+			delete(seededConformalRNGs, evict)
+		}
+		seededConformalRNGs[cfg.Seed] = r
+	}
+	return drawWithRand(r, groups)
 }
 
 func resolveConformalConfig(cfg ConformalConfig) (ConformalConfig, error) {
@@ -132,15 +212,48 @@ func normalizeAndRankConformalProbs(probs map[string]float64) ([]string, map[str
 	return ranked, norm, nil
 }
 
-func computeConformalScores(
-	ranked []string,
+func computeDeterministicConformalScores(
+	groups [][]string,
+	norm map[string]float64,
+	cfg ConformalConfig,
+) map[string]float64 {
+	scores := make(map[string]float64)
+	cumStrictlyGreater := 0.0
+	strictCount := 0
+	for _, grp := range groups {
+		pGrp := norm[grp[0]]
+		strictRank := strictCount + 1
+		var grpScore float64
+		switch cfg.Method {
+		case "lac":
+			grpScore = 1.0 - pGrp
+		case "aps":
+			grpScore = cumStrictlyGreater
+		default:
+			pen := 0.0
+			if strictRank > cfg.KReg {
+				pen = cfg.LamReg * float64(strictRank-cfg.KReg)
+			}
+			grpScore = cumStrictlyGreater + pen
+		}
+		for _, k := range grp {
+			scores[k] = grpScore
+		}
+		cumStrictlyGreater += pGrp * float64(len(grp))
+		strictCount += len(grp)
+	}
+	return scores
+}
+
+func computeRandomizedConformalScores(
+	ordered []string,
 	norm map[string]float64,
 	cfg ConformalConfig,
 	uDraw float64,
 ) map[string]float64 {
-	scores := make(map[string]float64, len(ranked))
+	scores := make(map[string]float64, len(ordered))
 	cumBefore := 0.0
-	for idx, k := range ranked {
+	for idx, k := range ordered {
 		rank1 := idx + 1
 		pk := norm[k]
 		switch cfg.Method {
@@ -180,7 +293,18 @@ func CalibrateConformalQuantile(
 		return 0, err
 	}
 
-	rng := rand.New(rand.NewSource(resolved.Seed))
+	var calRNG *rand.Rand
+	useGlobal := false
+	if resolved.Randomized {
+		if resolved.RNG != nil {
+			calRNG = resolved.RNG
+		} else if resolved.Seed != 0 {
+			calRNG = rand.New(rand.NewSource(resolved.Seed))
+		} else {
+			useGlobal = true
+		}
+	}
+
 	scores := make([]float64, len(calibProbs))
 	for i, dist := range calibProbs {
 		ranked, norm, nErr := normalizeAndRankConformalProbs(dist)
@@ -191,12 +315,24 @@ func CalibrateConformalQuantile(
 		if _, ok := norm[gold]; !ok {
 			return 0, fmt.Errorf("mdm: calibration label %q at index %d missing from probabilities", gold, i)
 		}
-		uVal := 0.0
-		if resolved.Randomized {
-			uVal = rng.Float64()
+		groups := partitionConformalTieGroups(ranked, norm)
+		var itemScores map[string]float64
+		if !resolved.Randomized {
+			itemScores = computeDeterministicConformalScores(groups, norm, resolved)
+		} else if useGlobal {
+			conformalRNGMu.Lock()
+			uVal, ordered := drawWithRand(defaultConformalRNG, groups)
+			conformalRNGMu.Unlock()
+			itemScores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
+		} else {
+			uVal, ordered := drawWithRand(calRNG, groups)
+			itemScores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
 		}
-		itemScores := computeConformalScores(ranked, norm, resolved, uVal)
 		scores[i] = itemScores[gold]
+	}
+
+	if resolved.Randomized && resolved.RNG == nil && resolved.Seed != 0 && calRNG != nil {
+		storeSeededConformalRNG(resolved.Seed, calRNG)
 	}
 
 	sort.Float64s(scores)
@@ -230,11 +366,14 @@ func ConformalPredictionSet(
 		return ConformalSet{}, err
 	}
 
-	uVal := 0.0
-	if resolved.Randomized {
-		uVal = rand.New(rand.NewSource(resolved.Seed)).Float64()
+	groups := partitionConformalTieGroups(ranked, norm)
+	var scores map[string]float64
+	if !resolved.Randomized {
+		scores = computeDeterministicConformalScores(groups, norm, resolved)
+	} else {
+		uVal, ordered := drawRandomizedOrderAndU(groups, resolved)
+		scores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
 	}
-	scores := computeConformalScores(ranked, norm, resolved, uVal)
 
 	predSet := make([]string, 0, len(ranked))
 	if math.IsInf(qHat, 1) {

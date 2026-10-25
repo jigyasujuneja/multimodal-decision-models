@@ -332,9 +332,13 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
         tail_labels: list[str] = []
         for idx_t in range(600):
             if idx_t % 12 == 0:
-                unif_p = 1.0 / float(len(classes))
-                tail_probs.append({c_name: unif_p for c_name in classes})
-                tail_labels.append(classes[idx_t % len(classes)])
+                rot = idx_t % len(classes)
+                raw_w = [1.0 + 0.02 * float(len(classes) - 1 - j) for j in range(len(classes))]
+                w_sum = sum(raw_w)
+                tail_probs.append(
+                    {classes[(rot + j) % len(classes)]: raw_w[j] / w_sum for j in range(len(classes))}
+                )
+                tail_labels.append(classes[(rot + (idx_t // 12)) % len(classes)])
             else:
                 w0 = classes[idx_t % len(classes)]
                 w1 = classes[(idx_t + 1) % len(classes)]
@@ -1025,6 +1029,305 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
         self.assertTrue(out_raw.startswith(b"Content-Length:"))
         _, body_part = out_raw.split(b"\r\n\r\n", 1)
         self.assertEqual(json.loads(body_part.decode("utf-8"))["id"], 99)
+
+
+class TestIter2AdversarialContractsAndRegressions(unittest.TestCase):
+    """Regression suite covering Iteration 2 conformal, MCP, cascade, Murphy/ACE, calibration, and PNG contracts."""
+
+    def test_conformal_exact_tie_symmetry_and_stateful_randomized_coverage(self) -> None:
+        unif_a = {"A": 0.25, "B": 0.25, "C": 0.25, "D": 0.25}
+        unif_z = {"z_3": 0.25, "z_1": 0.25, "z_2": 0.25, "z_0": 0.25}
+        for method in ("aps", "raps"):
+            set_a = mdm.conformal_prediction_set(unif_a, q_hat=0.0, method=method, lam_reg=0.05, k_reg=1)
+            set_z = mdm.conformal_prediction_set(unif_z, q_hat=0.0, method=method, lam_reg=0.05, k_reg=1)
+            self.assertEqual(len(set_a.prediction_set), 4)
+            self.assertEqual(len(set_z.prediction_set), 4)
+            self.assertTrue(set_a.should_escalate)
+            self.assertFalse(set_a.singleton)
+
+            pt_set = mdm.conformal_prediction_set(
+                {"A": 1.0, "B": 0.0, "C": 0.0}, q_hat=0.0, method=method, lam_reg=0.05, k_reg=1
+            )
+            self.assertEqual(pt_set.prediction_set, ["A"])
+            self.assertTrue(pt_set.singleton)
+            self.assertFalse(pt_set.should_escalate)
+
+        # Repeated calls with fixed seed=2 advance stateful stream across exact ties
+        calib_tie = [{"A": 0.5, "B": 0.5} for _ in range(100)]
+        labels_tie = ["A" if i % 2 == 0 else "B" for i in range(100)]
+        cal_res = mdm.calibrate_conformal_quantile(
+            calib_tie, labels_tie, alpha=0.10, method="aps", randomized=True, seed=2
+        )
+        hits_seed = 0
+        for idx in range(200):
+            gold = "A" if idx % 2 == 0 else "B"
+            cset = mdm.conformal_prediction_set(
+                {"A": 0.5, "B": 0.5}, cal_res.q_hat, method="aps", randomized=True, seed=2
+            )
+            if gold in cset.prediction_set:
+                hits_seed += 1
+        self.assertGreaterEqual(hits_seed / 200.0, 0.85)
+
+        # seed=None randomized stream smooths discrete point-mass coverage toward 1 - alpha = 0.75
+        calib_pt = [{"A": 1.0, "B": 0.0} for _ in range(120)]
+        labels_pt = ["A"] * 120
+        cal_pt = mdm.calibrate_conformal_quantile(
+            calib_pt, labels_pt, alpha=0.25, method="aps", randomized=True
+        )
+        hits_pt = sum(
+            1
+            for _ in range(400)
+            if "A"
+            in mdm.conformal_prediction_set(
+                {"A": 1.0, "B": 0.0}, cal_pt.q_hat, method="aps", randomized=True
+            ).prediction_set
+        )
+        cov_pt = hits_pt / 400.0
+        self.assertGreaterEqual(cov_pt, 0.65)
+        self.assertLessEqual(cov_pt, 0.85)
+
+    def test_mcp_stdio_framing_bounds_and_strict_jsonrpc_param_validation(self) -> None:
+        chunks: list[bytes] = [
+            b"Content-Length: -1\r\n\r\n",
+            b"Content-Length: 999999999\r\nX-Extra: 1\r\n\r\n",
+        ]
+        bad_msgs = [
+            {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": []},
+            {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "shortlist_candidates", "arguments": None}},
+            {"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "shortlist_candidates", "arguments": {"query_embedding": [1.0, 0.0], "candidates": [None]}}},
+            {"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "evaluate_conformal_decision", "arguments": {"probabilities": {"a": 0.6, "b": 0.4}, "q_hat": True}}},
+            {"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "evaluate_conformal_decision", "arguments": {"probabilities": {"a": 0.6, "b": 0.4}, "calib_probs": [None], "calib_labels": ["a"]}}},
+            {"jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": {"name": "prune_context_blocks", "arguments": {"blocks": [None], "slot_probs": {}, "token_budget": 100}}},
+            {"jsonrpc": "2.0", "id": 16, "method": "tools/call", "params": {"name": "compile_contact_sheet", "arguments": {"query_png_base64": "AAAA", "candidates": [123]}}},
+            {"jsonrpc": "2.0", "id": 77, "method": "ping"},
+        ]
+        for msg in bad_msgs:
+            raw_b = json.dumps(msg).encode("utf-8")
+            chunks.append(f"Content-Length: {len(raw_b)}\r\n\r\n".encode("ascii") + raw_b)
+
+        in_buf = io.BytesIO(b"".join(chunks))
+        out_buf = io.BytesIO()
+        rc = mdm.serve_stdio(in_buf, out_buf)
+        self.assertEqual(rc, 0)
+
+        # Parse all framed JSON-RPC responses and verify live session survived to id=77
+        raw_out = out_buf.getvalue()
+        pos = 0
+        responses: list[dict[str, Any]] = []
+        while pos < len(raw_out):
+            hdr_end = raw_out.index(b"\r\n\r\n", pos)
+            hdr_text = raw_out[pos:hdr_end].decode("ascii")
+            clen = int(hdr_text.split(":", 1)[1].strip())
+            body_start = hdr_end + 4
+            body_bytes = raw_out[body_start : body_start + clen]
+            responses.append(json.loads(body_bytes.decode("utf-8")))
+            pos = body_start + clen
+
+        self.assertEqual(responses[0]["error"]["code"], -32600)
+        self.assertEqual(responses[1]["error"]["code"], -32600)
+        by_id = {r["id"]: r for r in responses if r.get("id") is not None}
+        for bad_id in (10, 11, 12, 13, 14, 15, 16):
+            self.assertEqual(by_id[bad_id]["error"]["code"], -32602, msg=f"id={bad_id}: {by_id[bad_id]}")
+        self.assertEqual(by_id[77]["result"], {})
+
+    def test_stage2_escalation_reapplies_layer5_guards_and_accurate_slot_telemetry(self) -> None:
+        q_pack = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Select pack variant.",
+            criteria={"6pk": "6 pack", "12pk": "12 pack"},
+            order=["6pk", "12pk"],
+        )
+        q_clean = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Select brand.",
+            criteria={"b_6": "Brand 6", "b_12": "Brand 12"},
+            order=["b_6", "b_12"],
+        )
+        questions = {"pack": q_pack, "brand": q_clean}
+
+        # Stage 1 predicts wrong 12pk on both slots with hesitation triggering escalation;
+        # Stage 2 still predicts wrong 12pk on "pack" (must be overridden to 6pk by Layer-5),
+        # while Stage 2 already predicts valid b_6 on "brand" (guard_applied must be "none", not leaked).
+        s1 = mdm.MockCallableBackend(
+            "s1_fast",
+            lambda st, qs, imgs: {
+                "pack": {"12pk": 0.55, "6pk": 0.45},
+                "brand": {"b_12": 0.55, "b_6": 0.45},
+            },
+        )
+        s2 = mdm.MockCallableBackend(
+            "s2_vlm",
+            lambda st, qs, imgs: {
+                "pack": {"12pk": 0.88, "6pk": 0.12},
+                "brand": {"b_6": 0.91, "b_12": 0.09},
+            },
+        )
+        orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=s1,
+            stage2_backend=s2,
+            hesitation_threshold=0.20,
+            layer5_slot_context={
+                "pack": {"candidate_pack_sizes": {"6pk": 6, "12pk": 12}, "decoded_pack_size": 6},
+                "brand": {"candidate_pack_sizes": {"b_6": 6, "b_12": 12}, "decoded_pack_size": 6},
+            },
+        )
+        res = orch.evaluate({"item": "case_layer5"}, questions)
+        self.assertTrue(res.escalated)
+        self.assertEqual(res.terminal_state, mdm.DecisionTerminalState.GUARD_OVERRIDDEN)
+
+        pack_slot = res.slots["pack"]
+        self.assertEqual(pack_slot.predicted, "6pk")
+        self.assertEqual(pack_slot.guard_applied, "layer5_pack_size_sister_switch")
+        self.assertEqual(pack_slot.terminal_state, mdm.DecisionTerminalState.GUARD_OVERRIDDEN)
+
+        brand_slot = res.slots["brand"]
+        self.assertEqual(brand_slot.predicted, "b_6")
+        self.assertEqual(brand_slot.guard_applied, "none")
+        self.assertEqual(brand_slot.terminal_state, mdm.DecisionTerminalState.STAGE2_VERIFIED)
+
+    def test_murphy_exact_continuous_identity_and_heterogeneous_active_support_ace(self) -> None:
+        rng = random.Random(20261025)
+        probs_list: list[dict[str, float]] = []
+        golds: list[str] = []
+        for _ in range(150):
+            raw = [rng.random() + 0.05 for _ in range(3)]
+            s = sum(raw)
+            dist = {"c0": raw[0] / s, "c1": raw[1] / s, "c2": raw[2] / s}
+            probs_list.append(dist)
+            u = rng.random()
+            if u < dist["c0"]:
+                golds.append("c0")
+            elif u < dist["c0"] + dist["c1"]:
+                golds.append("c1")
+            else:
+                golds.append("c2")
+
+        murphy = mdm.brier_murphy_decomposition(probs_list, golds, num_bins=10)
+        self.assertGreaterEqual(murphy.reliability, 0.0)
+        self.assertGreaterEqual(murphy.resolution, 0.0)
+        self.assertAlmostEqual(
+            murphy.brier,
+            murphy.reliability - murphy.resolution + murphy.uncertainty,
+            places=12,
+        )
+
+        # 50 completely wrong binary predictions with disjoint option schemas -> ACE == 1.0
+        disjoint_probs = [{f"opt_{i}_a": 1.0, f"opt_{i}_b": 0.0} for i in range(50)]
+        disjoint_golds = [f"opt_{i}_b" for i in range(50)]
+        ace_val = mdm.adaptive_calibration_error(disjoint_probs, disjoint_golds, num_bins=10)
+        self.assertAlmostEqual(ace_val, 1.0, places=9)
+
+    def test_vector_scaling_shift_invariance_underconfident_gain_and_unobserved_class(self) -> None:
+        rng = random.Random(77)
+        classes = ["A", "B", "C"]
+        true_bias = {"A": 0.85, "B": -0.35, "C": -0.50}
+        train_logits: list[dict[str, float]] = []
+        train_shifted: list[dict[str, float]] = []
+        train_probs: list[dict[str, float]] = []
+        train_golds: list[str] = []
+        val_logits: list[dict[str, float]] = []
+        val_probs: list[dict[str, float]] = []
+        val_golds: list[str] = []
+
+        for idx in range(320):
+            true_l = {c: rng.gauss(0.0, 1.4) + true_bias[c] for c in classes}
+            max_tl = max(true_l.values())
+            true_exps = {c: math.exp(true_l[c] - max_tl) for c in classes}
+            tsum = sum(true_exps.values())
+            true_p = {c: true_exps[c] / tsum for c in classes}
+            u = rng.random()
+            cum = 0.0
+            gold = "C"
+            for c in classes:
+                cum += true_p[c]
+                if u <= cum:
+                    gold = c
+                    break
+
+            # Underconfident T=3.0 model with class bias distortion
+            raw_m = {
+                "A": true_l["A"] / 3.0 - 0.65,
+                "B": true_l["B"] / 3.0 + 0.45,
+                "C": true_l["C"] / 3.0 + 0.20,
+            }
+            max_ml = max(raw_m.values())
+            m_exps = {c: math.exp(raw_m[c] - max_ml) for c in classes}
+            msum = sum(m_exps.values())
+            mp = {c: m_exps[c] / msum for c in classes}
+
+            if idx < 200:
+                train_logits.append(raw_m)
+                train_shifted.append({c: v + 17.5 for c, v in raw_m.items()})
+                train_probs.append(mp)
+                train_golds.append(gold)
+            else:
+                val_logits.append(raw_m)
+                val_probs.append(mp)
+                val_golds.append(gold)
+
+        vs_base = mdm.fit_vector_scaling(train_logits, train_golds, is_logits=True, l2_reg=1e-2)
+        vs_shift = mdm.fit_vector_scaling(train_shifted, train_golds, is_logits=True, l2_reg=1e-2)
+        preds_b = vs_base.predict_proba(train_logits[:20], is_logits=True)
+        preds_s = vs_shift.predict_proba(train_shifted[:20], is_logits=True)
+        for p_b, p_s in zip(preds_b, preds_s):
+            for c in classes:
+                self.assertAlmostEqual(p_b[c], p_s[c], places=10)
+
+        cal_val_from_l = vs_base.predict_proba(val_logits, is_logits=True)
+        vs_prob = mdm.fit_vector_scaling(train_probs, train_golds, is_logits=False)
+        cal_val_from_p = vs_prob.predict_proba(val_probs, is_logits=False)
+        raw_nll = mdm.negative_log_likelihood(val_probs, val_golds)
+        raw_ece = mdm.expected_calibration_error(val_probs, val_golds, num_bins=10)
+        self.assertLess(mdm.negative_log_likelihood(cal_val_from_l, val_golds), raw_nll)
+        self.assertLess(mdm.negative_log_likelihood(cal_val_from_p, val_golds), raw_nll)
+        self.assertLess(mdm.expected_calibration_error(cal_val_from_p, val_golds, num_bins=10), raw_ece)
+
+        # Unobserved class "C" with l2_reg=0.0 must not inflate rare class probability
+        unobs_rows = [{"A": 0.45, "B": 0.40, "C": 0.15} for _ in range(30)]
+        unobs_golds = ["A" if i % 2 == 0 else "B" for i in range(30)]
+        vs_unobs = mdm.fit_vector_scaling(unobs_rows, unobs_golds, is_logits=False, l2_reg=0.0)
+        pred_unobs = vs_unobs.predict_proba([{"A": 0.40, "B": 0.40, "C": 0.20}], is_logits=False)[0]
+        self.assertLess(pred_unobs["C"], 0.40)
+
+    def test_png_chunk_invariants_and_tall_vertical_gradient_saliency_band(self) -> None:
+        base_img = _make_solid_buffer(4, 4, (20, 40, 60))
+        valid_png = mdm.encode_png(base_img)
+
+        # Inject duplicate IHDR before IDAT
+        ihdr_end = 8 + 8 + 13 + 4
+        ihdr_chunk = valid_png[8:ihdr_end]
+        dup_ihdr_png = valid_png[:ihdr_end] + ihdr_chunk + valid_png[ihdr_end:]
+        with self.assertRaisesRegex(ValueError, "duplicate IHDR"):
+            mdm.decode_png(dup_ihdr_png)
+
+        # Replace IEND with non-empty IEND chunk
+        iend_offset = valid_png.rindex(b"IEND") - 4
+        bad_iend_png = valid_png[:iend_offset] + _png_chunk_raw(b"IEND", b"\x00")
+        with self.assertRaisesRegex(ValueError, "IEND chunk must have 0 payload bytes"):
+            mdm.decode_png(bad_iend_png)
+
+        # 80%-height vertical linear gradient discriminative band (rows 6..54 on H=60)
+        h, w = 60, 24
+        px1 = bytearray(w * h * 3)
+        px2 = bytearray(w * h * 3)
+        for y in range(h):
+            for x in range(w):
+                off = (y * w + x) * 3
+                if 6 <= y < 54:
+                    alpha_g = (y - 6) / 47.0
+                    delta = int(round(20.0 + 180.0 * alpha_g))
+                    px1[off : off + 3] = bytes((min(255, 30 + delta), 40, 40))
+                    px2[off : off + 3] = bytes((30, 40, min(255, 40 + delta)))
+                else:
+                    px1[off : off + 3] = bytes((90, 90, 90))
+                    px2[off : off + 3] = bytes((90, 90, 90))
+        c1 = mdm.ImageBuffer(w, h, bytes(px1))
+        c2 = mdm.ImageBuffer(w, h, bytes(px2))
+        y0, y1, _ = mdm.extract_inter_candidate_saliency_band([c1, c2])
+        inter = max(0, min(y1, 54) - max(y0, 6))
+        union = max(y1, 54) - min(y0, 6)
+        iou = inter / float(union)
+        self.assertGreaterEqual(iou, 0.80, f"expected IoU >= 0.80 on 80% gradient band, got {iou:.3f} ({y0}..{y1})")
 
 
 if __name__ == "__main__":

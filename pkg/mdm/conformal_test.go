@@ -208,3 +208,123 @@ func TestPruneAgentContextBlocksExactMCKP(t *testing.T) {
 		t.Fatal("expected error when tokenBudget < pinned stub sum")
 	}
 }
+
+func TestConformalTieSymmetryAndStatefulRandomizedCoverage(t *testing.T) {
+	// 1. Exact 4-way uniform tie at qHat=0 must include all 4 tied classes symmetrically (never collapse to 1)
+	unifA := map[string]float64{"A": 0.25, "B": 0.25, "C": 0.25, "D": 0.25}
+	unifZ := map[string]float64{"z_3": 0.25, "z_1": 0.25, "z_2": 0.25, "z_0": 0.25}
+	for _, method := range []string{"aps", "raps"} {
+		cfg := ConformalConfig{Method: method, LamReg: 0.05, KReg: 1}
+		resA, err := ConformalPredictionSet(unifA, 0.0, cfg)
+		if err != nil {
+			t.Fatalf("ConformalPredictionSet(%s) failed: %v", method, err)
+		}
+		resZ, err := ConformalPredictionSet(unifZ, 0.0, cfg)
+		if err != nil {
+			t.Fatalf("ConformalPredictionSet(%s) failed: %v", method, err)
+		}
+		if len(resA.PredictionSet) != 4 || !resA.ShouldEscalate || resA.Singleton {
+			t.Fatalf("expected all 4 tied options with ShouldEscalate=true for %s, got %+v", method, resA)
+		}
+		if len(resZ.PredictionSet) != 4 || !resZ.ShouldEscalate {
+			t.Fatalf("expected label-rename invariant 4-element set for %s, got %+v", method, resZ)
+		}
+
+		// Point mass [1, 0, 0] at qHat=0 must still yield singleton ["A"] without zero-prob tail inflation
+		ptRes, err := ConformalPredictionSet(map[string]float64{"A": 1.0, "B": 0.0, "C": 0.0}, 0.0, cfg)
+		if err != nil {
+			t.Fatalf("ConformalPredictionSet point mass failed: %v", err)
+		}
+		if len(ptRes.PredictionSet) != 1 || ptRes.PredictionSet[0] != "A" || !ptRes.Singleton || ptRes.ShouldEscalate {
+			t.Fatalf("expected confident singleton [A] at qHat=0, got %+v", ptRes)
+		}
+	}
+
+	// 2. Repeated calls with fixed Seed: 2 advance stateful stream rather than freezing u or tie order
+	calibTie := make([]map[string]float64, 100)
+	labelsTie := make([]string, 100)
+	for i := 0; i < 100; i++ {
+		calibTie[i] = map[string]float64{"A": 0.5, "B": 0.5}
+		if i%2 == 0 {
+			labelsTie[i] = "A"
+		} else {
+			labelsTie[i] = "B"
+		}
+	}
+	seedCfg := ConformalConfig{Method: "aps", Randomized: true, Seed: 2}
+	qTie, err := CalibrateConformalQuantile(calibTie, labelsTie, 0.10, seedCfg)
+	if err != nil {
+		t.Fatalf("CalibrateConformalQuantile failed: %v", err)
+	}
+	hitsSeed := 0
+	for i := 0; i < 200; i++ {
+		gold := "A"
+		if i%2 == 1 {
+			gold = "B"
+		}
+		cset, err := ConformalPredictionSet(map[string]float64{"A": 0.5, "B": 0.5}, qTie, seedCfg)
+		if err != nil {
+			t.Fatalf("ConformalPredictionSet failed: %v", err)
+		}
+		for _, k := range cset.PredictionSet {
+			if k == gold {
+				hitsSeed++
+				break
+			}
+		}
+	}
+	covSeed := float64(hitsSeed) / 200.0
+	if covSeed < 0.85 {
+		t.Fatalf("expected stateful Seed=2 randomized coverage >= 0.85 on exact ties, got %.4f", covSeed)
+	}
+
+	// 3. Seed: 0 (default randomized stream) smooths point-mass discrete jump toward 1 - alpha = 0.75
+	calibPt := make([]map[string]float64, 120)
+	labelsPt := make([]string, 120)
+	for i := 0; i < 120; i++ {
+		calibPt[i] = map[string]float64{"A": 1.0, "B": 0.0}
+		labelsPt[i] = "A"
+	}
+	defRandCfg := ConformalConfig{Method: "aps", Randomized: true}
+	qPt, err := CalibrateConformalQuantile(calibPt, labelsPt, 0.25, defRandCfg)
+	if err != nil {
+		t.Fatalf("CalibrateConformalQuantile point mass failed: %v", err)
+	}
+	hitsPt := 0
+	for i := 0; i < 400; i++ {
+		cset, err := ConformalPredictionSet(map[string]float64{"A": 1.0, "B": 0.0}, qPt, defRandCfg)
+		if err != nil {
+			t.Fatalf("ConformalPredictionSet point mass failed: %v", err)
+		}
+		for _, k := range cset.PredictionSet {
+			if k == "A" {
+				hitsPt++
+				break
+			}
+		}
+	}
+	covPt := float64(hitsPt) / 400.0
+	if covPt < 0.65 || covPt > 0.85 {
+		t.Fatalf("expected smoothed randomized coverage near 0.75 in [0.65, 0.85], got %.4f", covPt)
+	}
+
+	// 4. Concurrent goroutine race-detector verification across shared and seeded streams
+	done := make(chan error, 8)
+	for g := 0; g < 8; g++ {
+		go func(gid int) {
+			c := ConformalConfig{Method: "raps", LamReg: 0.02, KReg: 1, Randomized: true, Seed: int64(gid % 3)}
+			for j := 0; j < 25; j++ {
+				if _, e := ConformalPredictionSet(unifA, 0.50, c); e != nil {
+					done <- e
+					return
+				}
+			}
+			done <- nil
+		}(g)
+	}
+	for g := 0; g < 8; g++ {
+		if e := <-done; e != nil {
+			t.Fatalf("concurrent ConformalPredictionSet failed: %v", e)
+		}
+	}
+}

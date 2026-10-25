@@ -276,7 +276,7 @@ def brier_murphy_decomposition(
     golds: Sequence[str],
     num_bins: int = 15,
 ) -> MurphyDecomposition:
-    """Decompose multiclass Brier score into sum_k REL_k, RES_k, and UNC_k across equal-width bins."""
+    """Decompose multiclass Brier score into exact non-negative REL, RES, and UNC (Stephenson et al., 2008)."""
     if len(predictions) != len(golds) or not predictions:
         raise ValueError("predictions and golds must be non-empty sequences of equal length")
     if num_bins < 1:
@@ -295,27 +295,49 @@ def brier_murphy_decomposition(
     for cls_key in all_classes:
         outcomes = [1.0 if g == cls_key else 0.0 for g in gold_strs]
         o_bar = sum(outcomes) / n
-        unc_total += o_bar * (1.0 - o_bar)
+        unc_k = o_bar * (1.0 - o_bar)
+        unc_total += unc_k
 
-        bin_counts = [0] * num_bins
-        bin_p_sums = [0.0] * num_bins
-        bin_o_sums = [0.0] * num_bins
+        bins_p: list[list[float]] = [[] for _ in range(num_bins)]
+        bins_o: list[list[float]] = [[] for _ in range(num_bins)]
 
         for dist, out_val in zip(norm_preds, outcomes):
             p_val = dist.get(cls_key, 0.0)
             b_idx = min(num_bins - 1, max(0, int(p_val * num_bins)))
-            bin_counts[b_idx] += 1
-            bin_p_sums[b_idx] += p_val
-            bin_o_sums[b_idx] += out_val
+            bins_p[b_idx].append(p_val)
+            bins_o[b_idx].append(out_val)
 
+        rel_k = 0.0
+        res_k = 0.0
         for b_idx in range(num_bins):
-            cnt = bin_counts[b_idx]
+            p_list = bins_p[b_idx]
+            cnt = len(p_list)
             if cnt > 0:
-                p_b = bin_p_sums[b_idx] / float(cnt)
-                o_b = bin_o_sums[b_idx] / float(cnt)
-                weight = float(cnt) / n
-                rel_total += weight * ((p_b - o_b) ** 2)
-                res_total += weight * ((o_b - o_bar) ** 2)
+                o_list = bins_o[b_idx]
+                f_cnt = float(cnt)
+                p_b = sum(p_list) / f_cnt
+                o_b = sum(o_list) / f_cnt
+                weight = f_cnt / n
+                wbv_b = sum((pv - p_b) ** 2 for pv in p_list) / n
+                wbc_b = 2.0 * sum((pv - p_b) * (ov - o_b) for pv, ov in zip(p_list, o_list)) / n
+                rel_k += weight * ((p_b - o_b) ** 2) + wbv_b
+                res_k += weight * ((o_b - o_bar) ** 2) + wbc_b
+
+        if res_k < 0.0:
+            rel_k -= res_k
+            res_k = 0.0
+        if rel_k < 0.0:
+            res_k -= rel_k
+            rel_k = 0.0
+
+        rel_total += rel_k
+        res_total += res_k
+
+    residual = brier - (rel_total - res_total + unc_total)
+    if rel_total + residual >= 0.0:
+        rel_total += residual
+    else:
+        res_total -= residual
 
     return MurphyDecomposition(
         brier=brier,
@@ -330,7 +352,7 @@ def adaptive_calibration_error(
     golds: Sequence[str],
     num_bins: int = 15,
 ) -> float:
-    """Compute equal-mass Adaptive Calibration Error (ACE, Nixon et al. 2019) across all classes."""
+    """Compute equal-mass Adaptive Calibration Error (ACE, Nixon et al. 2019) over active candidate options."""
     if len(predictions) != len(golds) or not predictions:
         raise ValueError("predictions and golds must be non-empty sequences of equal length")
     if num_bins < 1:
@@ -342,29 +364,36 @@ def adaptive_calibration_error(
     if not all_classes:
         return 0.0
 
-    n = len(norm_preds)
-    r_bins = min(num_bins, n)
-    ace_sum = 0.0
+    weighted_err_sum = 0.0
+    total_active_pairs = 0
 
     for cls_key in all_classes:
-        pairs = sorted(
+        active_pairs = sorted(
             (dist.get(cls_key, 0.0), 1.0 if g == cls_key else 0.0)
             for dist, g in zip(norm_preds, gold_strs)
+            if (cls_key in dist) or (g == cls_key)
         )
+        m = len(active_pairs)
+        if m == 0:
+            continue
+        r_bins = min(num_bins, m)
         cursor = 0
         cls_err = 0.0
         for r_idx in range(r_bins):
-            b_size = (n // r_bins) + (1 if r_idx < (n % r_bins) else 0)
+            b_size = (m // r_bins) + (1 if r_idx < (m % r_bins) else 0)
             if b_size <= 0:
                 continue
-            bucket = pairs[cursor : cursor + b_size]
+            bucket = active_pairs[cursor : cursor + b_size]
             cursor += b_size
             avg_p = sum(p for p, _ in bucket) / float(b_size)
             avg_o = sum(o for _, o in bucket) / float(b_size)
-            cls_err += (float(b_size) / float(n)) * abs(avg_o - avg_p)
-        ace_sum += cls_err
+            cls_err += (float(b_size) / float(m)) * abs(avg_o - avg_p)
+        weighted_err_sum += float(m) * cls_err
+        total_active_pairs += m
 
-    return ace_sum / float(len(all_classes))
+    if total_active_pairs == 0:
+        return 0.0
+    return weighted_err_sum / float(total_active_pairs)
 
 
 def macro_f1_score(

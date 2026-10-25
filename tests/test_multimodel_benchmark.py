@@ -95,6 +95,24 @@ class TestMultiModelBenchmarkSuite(unittest.TestCase):
             )
             ci_lo, ci_hi = arm["bootstrap_ci95"]["brier"]
             self.assertLessEqual(ci_lo, ci_hi)
+            self.assertGreaterEqual(arm["murphy_reliability"], 0.0)
+            self.assertGreaterEqual(arm["murphy_resolution"], 0.0)
+            self.assertAlmostEqual(
+                arm["brier"],
+                arm["murphy_reliability"] - arm["murphy_resolution"] + arm["murphy_uncertainty"],
+                places=5,
+                msg=f"Murphy algebraic identity violated for {arm['model']}",
+            )
+            if arm["panel"] == "safety_xstest_360":
+                self.assertGreater(
+                    arm["p95_latency_ms"],
+                    arm["mean_latency_ms"],
+                    f"Expected p95 > mean latency on safety_xstest_360 for {arm['model']}",
+                )
+            if arm["model"] == "DecisionGemma [XSTest-360]":
+                self.assertAlmostEqual(arm["p95_latency_ms"], 265.6, places=2)
+            if arm["model"] == "Gemini 3.6 Flash (Dirichlet M=3) [Calib-50]":
+                self.assertGreater(arm["ace"], 0.05)
 
     def test_deterministic_reexecution_matches_committed_outputs_byte_for_byte(self) -> None:
         mod = _load_benchmark_module()

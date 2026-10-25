@@ -254,9 +254,13 @@ def decode_png(data: bytes) -> ImageBuffer:
             if comp_m != 0 or filt_m != 0:
                 raise ValueError("unsupported PNG compression or filter method")
             seen_ihdr = True
+        elif ctype == b"IHDR":
+            raise ValueError("duplicate IHDR chunk in PNG stream")
         elif ctype == b"IDAT":
             idat_parts.append(cdata)
         elif ctype == b"IEND":
+            if len(cdata) != 0:
+                raise ValueError(f"IEND chunk must have 0 payload bytes, got {len(cdata)}")
             seen_iend = True
             break
 
@@ -673,9 +677,9 @@ def extract_inter_candidate_saliency_band(
         return y0_def, min(target_h, y1_def), variances
 
     sorted_v = sorted(variances)
-    v_base = sorted_v[int(0.25 * (len(sorted_v) - 1))]
-    thresh = v_base + 0.25 * (v_max - v_base)
-    bridge_thresh = v_base + 0.10 * (v_max - v_base)
+    v_base = sorted_v[int(0.05 * (len(sorted_v) - 1))]
+    thresh = v_base + 0.03 * (v_max - v_base)
+    bridge_thresh = v_base + 0.01 * (v_max - v_base)
 
     active = [v >= thresh for v in variances]
     for y in range(1, target_h - 1):

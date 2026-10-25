@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import math
 import random
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Collection, Mapping, Sequence
 
@@ -35,6 +37,51 @@ DEFAULT_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset(
 )
 
 _VALID_CONFORMAL_METHODS: frozenset[str] = frozenset({"lac", "aps", "raps"})
+_TIE_TOL: float = 1e-12
+_MAX_SEEDED_STREAMS: int = 256
+_RNG_LOCK = threading.Lock()
+_DEFAULT_RNG = random.Random()
+_SEEDED_STREAMS: OrderedDict[int, random.Random] = OrderedDict()
+
+
+def _store_seeded_rng(seed: int, rng_obj: random.Random) -> None:
+    with _RNG_LOCK:
+        _SEEDED_STREAMS[seed] = rng_obj
+        _SEEDED_STREAMS.move_to_end(seed)
+        while len(_SEEDED_STREAMS) > _MAX_SEEDED_STREAMS:
+            _SEEDED_STREAMS.popitem(last=False)
+
+
+def _get_or_create_inference_rng(seed: int | None, rng: random.Random | None) -> random.Random:
+    if rng is not None:
+        return rng
+    if seed is None:
+        return _DEFAULT_RNG
+    key = int(seed)
+    with _RNG_LOCK:
+        existing = _SEEDED_STREAMS.get(key)
+        if existing is not None:
+            _SEEDED_STREAMS.move_to_end(key)
+            return existing
+        created = random.Random(key)
+        _SEEDED_STREAMS[key] = created
+        while len(_SEEDED_STREAMS) > _MAX_SEEDED_STREAMS:
+            _SEEDED_STREAMS.popitem(last=False)
+        return created
+
+
+def _partition_tie_groups(
+    ranked_keys: Sequence[str],
+    norm_probs: Mapping[str, float],
+) -> list[list[str]]:
+    groups: list[list[str]] = []
+    for key in ranked_keys:
+        p_k = norm_probs[key]
+        if not groups or abs(p_k - norm_probs[groups[-1][0]]) > _TIE_TOL:
+            groups.append([key])
+        else:
+            groups[-1].append(key)
+    return groups
 
 
 @dataclass(frozen=True)
@@ -99,11 +146,58 @@ def _compute_all_nonconformity_scores(
     method: str,
     lam_reg: float,
     k_reg: int,
-    u_draw: float,
+    *,
+    randomized: bool = False,
+    active_rng: random.Random | None = None,
+    use_global_lock: bool = False,
 ) -> dict[str, float]:
     scores: dict[str, float] = {}
+    groups = _partition_tie_groups(ranked_keys, norm_probs)
+
+    if not randomized:
+        cum_strictly_greater = 0.0
+        strict_count = 0
+        for grp in groups:
+            p_grp = norm_probs[grp[0]]
+            strict_rank = strict_count + 1
+            if method == "lac":
+                grp_score = 1.0 - p_grp
+            elif method == "aps":
+                grp_score = cum_strictly_greater
+            else:
+                penalty = lam_reg * float(max(0, strict_rank - k_reg))
+                grp_score = cum_strictly_greater + penalty
+            for key in grp:
+                scores[key] = grp_score
+            cum_strictly_greater += p_grp * float(len(grp))
+            strict_count += len(grp)
+        return scores
+
+    rng_use = active_rng if active_rng is not None else _DEFAULT_RNG
+    if use_global_lock:
+        with _RNG_LOCK:
+            u_draw = rng_use.random()
+            ordered_rand: list[str] = []
+            for grp in groups:
+                if len(grp) > 1:
+                    grp_copy = list(grp)
+                    rng_use.shuffle(grp_copy)
+                    ordered_rand.extend(grp_copy)
+                else:
+                    ordered_rand.append(grp[0])
+    else:
+        u_draw = rng_use.random()
+        ordered_rand = []
+        for grp in groups:
+            if len(grp) > 1:
+                grp_copy = list(grp)
+                rng_use.shuffle(grp_copy)
+                ordered_rand.extend(grp_copy)
+            else:
+                ordered_rand.append(grp[0])
+
     cum_before = 0.0
-    for idx, key in enumerate(ranked_keys):
+    for idx, key in enumerate(ordered_rand):
         rank_1based = idx + 1
         p_k = norm_probs[key]
         if method == "lac":
@@ -126,7 +220,8 @@ def calibrate_conformal_quantile(
     lam_reg: float = 0.01,
     k_reg: int = 1,
     randomized: bool = False,
-    seed: int = 42,
+    seed: int | None = None,
+    rng: random.Random | None = None,
 ) -> ConformalCalibrationResult:
     """Compute the finite-sample split conformal quantile q_hat at miscoverage level alpha in (0, 1).
 
@@ -140,23 +235,37 @@ def calibrate_conformal_quantile(
         raise ValueError("calib_probs and calib_labels must be non-empty sequences of equal length")
     clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
 
-    rng = random.Random(seed)
+    use_lock = False
+    cal_rng: random.Random | None = None
+    if randomized:
+        if rng is not None:
+            cal_rng = rng
+        elif seed is not None:
+            cal_rng = random.Random(int(seed))
+        else:
+            cal_rng = _DEFAULT_RNG
+            use_lock = True
+
     calib_scores: list[float] = []
     for idx, (dist, gold_raw) in enumerate(zip(calib_probs, calib_labels)):
         gold = str(gold_raw)
         ranked_keys, norm_probs, _ = _normalize_and_rank_probs(dist)
         if gold not in norm_probs:
             raise ValueError(f"calibration label {gold!r} at index {idx} not present in option probabilities")
-        u_val = rng.random() if randomized else 0.0
         item_scores = _compute_all_nonconformity_scores(
             ranked_keys,
             norm_probs,
             clean_method,
             lam_reg,
             k_reg,
-            u_val,
+            randomized=randomized,
+            active_rng=cal_rng,
+            use_global_lock=use_lock,
         )
         calib_scores.append(item_scores[gold])
+
+    if randomized and rng is None and seed is not None and cal_rng is not None:
+        _store_seeded_rng(int(seed), cal_rng)
 
     n = len(calib_scores)
     sorted_scores = sorted(calib_scores)
@@ -189,7 +298,8 @@ def conformal_prediction_set(
     lam_reg: float = 0.01,
     k_reg: int = 1,
     randomized: bool = False,
-    seed: int = 42,
+    seed: int | None = None,
+    rng: random.Random | None = None,
     abstain_keys: Collection[str] = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
 ) -> ConformalSetResult:
     """Construct the calibrated prediction set C_alpha(x) = {y : s(x, y) <= q_hat} in probability rank order.
@@ -201,14 +311,17 @@ def conformal_prediction_set(
     clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
     ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
 
-    u_val = random.Random(seed).random() if randomized else 0.0
+    active_rng = _get_or_create_inference_rng(seed, rng) if randomized else None
+    use_lock = bool(randomized and rng is None)
     scores = _compute_all_nonconformity_scores(
         ranked_keys,
         norm_probs,
         clean_method,
         lam_reg,
         k_reg,
-        u_val,
+        randomized=randomized,
+        active_rng=active_rng,
+        use_global_lock=use_lock,
     )
 
     if math.isinf(q_hat):
