@@ -100,6 +100,50 @@ def _validate_resource_segment(label: str, value: str) -> str:
     return value
 
 
+def _require_finite_number(val: Any, field: str) -> float:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise SchemaContractViolationError(
+            f"{field} must be a finite non-boolean number, got {val!r}"
+        )
+    out = float(val)
+    if not math.isfinite(out):
+        raise SchemaContractViolationError(f"{field} must be finite, got {val!r}")
+    return 0.0 if out == 0.0 else out
+
+
+def _require_nonneg_finite_number(val: Any, field: str) -> float:
+    out = _require_finite_number(val, field)
+    if out < 0.0:
+        raise SchemaContractViolationError(f"{field} must be >= 0, got {val!r}")
+    return out
+
+
+def _require_strict_int(val: Any, field: str) -> int:
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise SchemaContractViolationError(
+            f"{field} must be a non-boolean integer, got {val!r}"
+        )
+    return int(val)
+
+
+def _validate_slot_distribution(dist: Any, label: str) -> dict[str, float]:
+    if not isinstance(dist, Mapping) or not dist:
+        raise SchemaContractViolationError(f"{label} returned empty or non-mapping distribution")
+    clean: dict[str, float] = {}
+    total = 0.0
+    for raw_k, raw_v in dist.items():
+        if not isinstance(raw_k, str) or not raw_k:
+            raise SchemaContractViolationError(
+                f"{label} distribution keys must be non-empty strings, got {raw_k!r}"
+            )
+        prob = _require_nonneg_finite_number(raw_v, f"{label}[{raw_k!r}]")
+        clean[raw_k] = prob
+        total += prob
+    if total <= 0.0 or not math.isfinite(total):
+        raise SchemaContractViolationError(f"{label} probability mass must be positive and finite")
+    return clean
+
+
 def _post_json_with_retry(
     url: str,
     payload: Mapping[str, Any],
@@ -111,7 +155,10 @@ def _post_json_with_retry(
     sla_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Execute a JSON POST with bounded jittered retries on transient HTTP/network errors."""
-    raw_body = json.dumps(payload).encode("utf-8")
+    try:
+        raw_body = json.dumps(payload, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise SchemaContractViolationError(f"failed to serialize request payload: {exc}") from exc
     attempts = max(0, int(max_retries)) + 1
     last_err: Exception | None = None
 
@@ -245,9 +292,18 @@ class DgemSystemOneBackend:
                     "instructions": q.instructions,
                     "criteria": ordered_crit,
                 }
-            merged_priors = dict(q.prior_logits)
+            merged_priors: dict[str, float] = {
+                str(pk): _require_finite_number(pv, f"prior_logits[{qid!r}][{pk!r}]")
+                for pk, pv in q.prior_logits.items()
+            }
             if prior_logits and qid in prior_logits:
-                merged_priors.update(prior_logits[qid])
+                slot_pl = prior_logits[qid]
+                if not isinstance(slot_pl, Mapping):
+                    raise SchemaContractViolationError(f"prior_logits[{qid!r}] must be a mapping")
+                for pk, pv in slot_pl.items():
+                    merged_priors[str(pk)] = _require_finite_number(
+                        pv, f"prior_logits[{qid!r}][{pk!r}]"
+                    )
             if merged_priors:
                 entry["prior_logits"] = merged_priors
             if q.evidence_prompt.strip():
@@ -267,32 +323,51 @@ class DgemSystemOneBackend:
         questions: Mapping[str, DecisionQuestion],
     ) -> tuple[dict[str, dict[str, float]], dict[str, str], dict[str, Any]]:
         """Parse a /v1/systemone response envelope (or legacy flat predictions map)."""
+        if not isinstance(data, Mapping):
+            raise SchemaContractViolationError("invalid /v1/systemone response root")
         evidence_map: dict[str, str] = {}
-        trace = dict(data.get("evaluation_trace") or {})
+        raw_trace = data.get("evaluation_trace")
+        if raw_trace is not None and not isinstance(raw_trace, Mapping):
+            raise SchemaContractViolationError("evaluation_trace must be a JSON object")
+        trace = dict(raw_trace) if isinstance(raw_trace, Mapping) else {}
 
-        if "answers" in data and isinstance(data["answers"], Mapping):
+        if "answers" in data:
             answers = data["answers"]
+            if not isinstance(answers, Mapping):
+                raise SchemaContractViolationError("answers field must be a JSON object")
             out: dict[str, dict[str, float]] = {}
             for qid, q in questions.items():
                 ans = answers.get(qid)
                 if not isinstance(ans, Mapping):
                     raise SchemaContractViolationError(f"missing answer object for question {qid!r}")
-                probs = dict(ans.get("probabilities") or {})
-                if not probs:
+                raw_probs = ans.get("probabilities")
+                if raw_probs is None or (isinstance(raw_probs, Mapping) and not raw_probs):
                     raise LogprobAlignmentError(f"empty probabilities map for question {qid!r}")
+                if not isinstance(raw_probs, Mapping):
+                    raise SchemaContractViolationError(
+                        f"probabilities for question {qid!r} must be a JSON object"
+                    )
                 if q.type == "score":
-                    legend = ans.get("legend") or {}
+                    legend = ans.get("legend")
+                    if legend is not None and not isinstance(legend, Mapping):
+                        raise SchemaContractViolationError(
+                            f"legend for score question {qid!r} must be a JSON object"
+                        )
                     mapped_probs: dict[str, float] = {}
-                    for idx_str, p_val in probs.items():
+                    for idx_key, p_val in raw_probs.items():
+                        idx_str = str(idx_key)
+                        prob = _require_nonneg_finite_number(
+                            p_val, f"answers[{qid!r}].probabilities[{idx_str!r}]"
+                        )
                         if isinstance(legend, Mapping) and idx_str in legend:
-                            mapped_probs[str(legend[idx_str])] = float(p_val)
+                            mapped_probs[str(legend[idx_str])] = prob
                         elif idx_str.isdigit() and int(idx_str) < len(q.levels):
-                            mapped_probs[q.levels[int(idx_str)]] = float(p_val)
+                            mapped_probs[q.levels[int(idx_str)]] = prob
                         else:
-                            mapped_probs[str(idx_str)] = float(p_val)
-                    out[qid] = mapped_probs
+                            mapped_probs[idx_str] = prob
+                    out[qid] = _validate_slot_distribution(mapped_probs, f"SystemOne slot {qid!r}")
                 else:
-                    out[qid] = {str(k): float(v) for k, v in probs.items()}
+                    out[qid] = _validate_slot_distribution(raw_probs, f"SystemOne slot {qid!r}")
                 ev = ans.get("evidence")
                 if isinstance(ev, str) and ev:
                     evidence_map[qid] = ev
@@ -300,14 +375,14 @@ class DgemSystemOneBackend:
 
         preds = data.get("predictions", data)
         if isinstance(preds, Mapping):
-            parsed_preds = {
-                str(qid): {str(k): float(v) for k, v in dist.items()}
-                for qid, dist in preds.items()
-                if isinstance(dist, Mapping) and dist
-            }
+            parsed_preds: dict[str, dict[str, float]] = {}
             for qid in questions:
-                if qid not in parsed_preds:
+                if qid not in preds:
                     raise SchemaContractViolationError(f"missing prediction probabilities for {qid!r}")
+                raw_dist = preds[qid]
+                if raw_dist is None or (isinstance(raw_dist, Mapping) and not raw_dist):
+                    raise LogprobAlignmentError(f"empty probabilities map for question {qid!r}")
+                parsed_preds[qid] = _validate_slot_distribution(raw_dist, f"SystemOne slot {qid!r}")
             return parsed_preds, evidence_map, trace
         raise SchemaContractViolationError("invalid /v1/systemone response structure")
 
@@ -418,16 +493,22 @@ class OpenAILogprobBackend:
         min_captured_mass: float = 1e-6,
     ) -> dict[str, float]:
         """Convert token top_logprobs into a normalized distribution; fail closed when unaligned."""
-        if not top_logprobs:
+        if not isinstance(top_logprobs, Mapping) or not top_logprobs:
             raise LogprobAlignmentError("upstream chat completion omitted top_logprobs")
 
         letter_logits: dict[str, float] = {}
         for letter, key in letter_to_key.items():
             best_lp = float("-inf")
             for tok, lp in top_logprobs.items():
+                if not isinstance(tok, str):
+                    raise SchemaContractViolationError("top_logprobs token key must be a string")
+                if isinstance(lp, bool) or not isinstance(lp, (int, float)):
+                    raise SchemaContractViolationError(
+                        f"non-numeric logprob encountered on token {tok!r}: {lp!r}"
+                    )
                 val = float(lp)
-                if math.isnan(val):
-                    raise LogprobAlignmentError(f"NaN logprob encountered on token {tok!r}")
+                if math.isnan(val) or (math.isinf(val) and val > 0.0):
+                    raise LogprobAlignmentError(f"invalid non-finite logprob {val!r} on token {tok!r}")
                 if tok.strip() == letter and val > best_lp:
                     best_lp = val
             letter_logits[key] = best_lp
@@ -496,16 +577,42 @@ class OpenAILogprobBackend:
             max_retries=self.max_retries,
             base_backoff_sec=self.base_backoff_sec,
         )
-        choices = data.get("choices") or []
-        if not choices:
-            raise SchemaContractViolationError("upstream chat completion returned empty choices")
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+            raise SchemaContractViolationError("upstream chat completion returned empty or invalid choices")
         choice0 = choices[0]
-        content_lp = (choice0.get("logprobs") or {}).get("content") or []
-        if not content_lp:
+        lp_root = choice0.get("logprobs")
+        if lp_root is None:
+            raise LogprobAlignmentError("upstream chat completion missing logprobs")
+        if not isinstance(lp_root, Mapping):
+            raise SchemaContractViolationError("upstream logprobs must be a JSON object")
+        content_lp = lp_root.get("content")
+        if content_lp is None or (isinstance(content_lp, list) and not content_lp):
             raise LogprobAlignmentError("upstream chat completion missing logprobs.content")
+        if not isinstance(content_lp, list) or not isinstance(content_lp[0], Mapping):
+            raise SchemaContractViolationError("upstream logprobs.content must be a non-empty array of objects")
+        top_entries = content_lp[0].get("top_logprobs")
+        if top_entries is None or (isinstance(top_entries, list) and not top_entries):
+            raise LogprobAlignmentError("upstream chat completion omitted top_logprobs")
+        if not isinstance(top_entries, list):
+            raise SchemaContractViolationError("upstream top_logprobs must be a JSON array")
         top_map: dict[str, float] = {}
-        for entry in content_lp[0].get("top_logprobs") or []:
-            top_map[str(entry["token"])] = float(entry["logprob"])
+        for entry in top_entries:
+            if not isinstance(entry, Mapping) or "token" not in entry or "logprob" not in entry:
+                raise SchemaContractViolationError("malformed top_logprobs entry in chat completion")
+            raw_tok = entry["token"]
+            raw_lp = entry["logprob"]
+            if not isinstance(raw_tok, str):
+                raise SchemaContractViolationError("top_logprobs entry token must be a string")
+            if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, float)):
+                raise SchemaContractViolationError(
+                    f"top_logprobs entry logprob must be numeric, got {raw_lp!r}"
+                )
+            lp_val = float(raw_lp)
+            if math.isnan(lp_val) or (math.isinf(lp_val) and lp_val > 0.0):
+                raise LogprobAlignmentError(f"invalid non-finite logprob {lp_val!r} on token {raw_tok!r}")
+            if raw_tok not in top_map or lp_val > top_map[raw_tok]:
+                top_map[raw_tok] = lp_val
         return self.extract_letter_distribution(
             top_map,
             letter_to_key,
@@ -683,12 +790,19 @@ class VertexGeminiBackend:
         questions: Mapping[str, DecisionQuestion],
     ) -> tuple[dict[str, dict[str, float]], str]:
         """Parse Vertex Gemini response + exact token logprobs; fail closed (`LogprobAlignmentError`) if missing."""
-        candidates = data.get("candidates") or []
-        if not candidates:
-            raise SchemaContractViolationError("Vertex Gemini response contained zero candidates")
+        if not isinstance(data, Mapping):
+            raise SchemaContractViolationError("Vertex Gemini response root must be a JSON object")
+        candidates = data.get("candidates")
+        if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], Mapping):
+            raise SchemaContractViolationError("Vertex Gemini response contained zero or invalid candidates")
         cand0 = candidates[0]
-        parts = (cand0.get("content") or {}).get("parts") or []
-        raw_text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, Mapping))
+        content_obj = cand0.get("content")
+        if content_obj is not None and not isinstance(content_obj, Mapping):
+            raise SchemaContractViolationError("Vertex Gemini candidate content must be a JSON object")
+        parts = (content_obj or {}).get("parts")
+        if parts is not None and not isinstance(parts, list):
+            raise SchemaContractViolationError("Vertex Gemini content.parts must be a JSON array")
+        raw_text = "".join(str(p.get("text", "")) for p in (parts or []) if isinstance(p, Mapping))
         if not raw_text.strip():
             raise SchemaContractViolationError("Vertex Gemini candidate returned empty content text")
         try:
@@ -699,11 +813,27 @@ class VertexGeminiBackend:
             raise SchemaContractViolationError("Vertex Gemini structured output must be a JSON object")
 
         evidence_read = str(parsed_json.get("evidence_read", ""))
-        chosen_steps = (cand0.get("logprobsResult") or {}).get("chosenCandidates") or []
-        top_steps = (cand0.get("logprobsResult") or {}).get("topCandidates") or []
-        if not chosen_steps or not top_steps:
+        lp_res = cand0.get("logprobsResult")
+        if lp_res is None:
             raise LogprobAlignmentError(
                 "Vertex Gemini response omitted logprobsResult; synthetic probability fallbacks are prohibited"
+            )
+        if not isinstance(lp_res, Mapping):
+            raise SchemaContractViolationError("Vertex Gemini logprobsResult must be a JSON object")
+        chosen_steps = lp_res.get("chosenCandidates")
+        top_steps = lp_res.get("topCandidates")
+        if (
+            chosen_steps is None
+            or top_steps is None
+            or (isinstance(chosen_steps, list) and not chosen_steps)
+            or (isinstance(top_steps, list) and not top_steps)
+        ):
+            raise LogprobAlignmentError(
+                "Vertex Gemini response omitted logprobsResult; synthetic probability fallbacks are prohibited"
+            )
+        if not isinstance(chosen_steps, list) or not isinstance(top_steps, list):
+            raise SchemaContractViolationError(
+                "Vertex Gemini chosenCandidates and topCandidates must be JSON arrays"
             )
 
         out: dict[str, dict[str, float]] = {}
@@ -714,7 +844,12 @@ class VertexGeminiBackend:
             keys = q.option_keys()
             if qid not in parsed_json:
                 raise SchemaContractViolationError(f"Vertex Gemini JSON missing required slot {qid!r}")
-            raw_val = str(parsed_json[qid]).strip()
+            raw_slot_val = parsed_json[qid]
+            if raw_slot_val is None or isinstance(raw_slot_val, (bool, Mapping, list)):
+                raise SchemaContractViolationError(
+                    f"slot {qid!r} must be a string or scalar token, got {raw_slot_val!r}"
+                )
+            raw_val = str(raw_slot_val).strip()
             if raw_val in letter_to_key:
                 selected_letter = raw_val
                 selected_key = letter_to_key[raw_val]
@@ -730,19 +865,38 @@ class VertexGeminiBackend:
             for step_idx, chosen_tok in enumerate(chosen_steps):
                 if step_idx in used_step_indices or step_idx >= len(top_steps):
                     continue
+                if not isinstance(chosen_tok, Mapping) or not isinstance(top_steps[step_idx], Mapping):
+                    raise SchemaContractViolationError(
+                        "Vertex Gemini logprob step entries must be JSON objects"
+                    )
                 tok_str = str(chosen_tok.get("token", "")).strip('" ')
                 if tok_str not in (selected_letter, selected_key):
                     continue
-                cands = top_steps[step_idx].get("candidates") or []
+                cands = top_steps[step_idx].get("candidates")
+                if cands is not None and not isinstance(cands, list):
+                    raise SchemaContractViolationError(
+                        "Vertex Gemini topCandidates.candidates must be a JSON array"
+                    )
                 logits: dict[str, float] = {}
                 for ltr, k in letter_to_key.items():
                     best_lp = float("-inf")
-                    for c_entry in cands:
+                    for c_entry in cands or []:
+                        if not isinstance(c_entry, Mapping):
+                            raise SchemaContractViolationError(
+                                "Vertex Gemini topCandidates entry must be a JSON object"
+                            )
                         ct = str(c_entry.get("token", "")).strip('" ')
                         if ct == ltr or ct == k:
-                            lp = float(c_entry.get("logProbability", float("-inf")))
-                            if math.isnan(lp):
-                                raise LogprobAlignmentError(f"NaN logProbability on slot {qid!r}")
+                            raw_lp = c_entry.get("logProbability", float("-inf"))
+                            if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, float)):
+                                raise SchemaContractViolationError(
+                                    f"non-numeric logProbability on slot {qid!r}: {raw_lp!r}"
+                                )
+                            lp = float(raw_lp)
+                            if math.isnan(lp) or (math.isinf(lp) and lp > 0.0):
+                                raise LogprobAlignmentError(
+                                    f"invalid non-finite logProbability {lp!r} on slot {qid!r}"
+                                )
                             if lp > best_lp:
                                 best_lp = lp
                     logits[k] = best_lp
@@ -901,14 +1055,23 @@ class BlackBoxSampledBackend:
         max_concurrency: int = 8,
         catch_all_keys: Collection[str] = _DEFAULT_OOS_KEYS,
     ) -> None:
-        if not name or not str(name).strip():
-            raise ValueError("BlackBoxSampledBackend name must be non-empty")
-        if num_samples < 1:
-            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
-        if not math.isfinite(prior_alpha) or prior_alpha <= 0.0:
-            raise ValueError(f"prior_alpha must be finite and > 0, got {prior_alpha!r}")
+        if not isinstance(name, str) or not name.strip():
+            raise SchemaContractViolationError("BlackBoxSampledBackend name must be non-empty")
+        if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
+            raise SchemaContractViolationError(f"num_samples must be an int >= 1, got {num_samples!r}")
+        if (
+            isinstance(prior_alpha, bool)
+            or not isinstance(prior_alpha, (int, float))
+            or not math.isfinite(float(prior_alpha))
+            or float(prior_alpha) <= 0.0
+        ):
+            raise SchemaContractViolationError(
+                f"prior_alpha must be finite and > 0, got {prior_alpha!r}"
+            )
         if sampler is None and not endpoint_url:
-            raise ValueError("BlackBoxSampledBackend requires either a callable `sampler` or `endpoint_url`")
+            raise SchemaContractViolationError(
+                "BlackBoxSampledBackend requires either a callable `sampler` or `endpoint_url`"
+            )
 
         self.name = str(name).strip()
         self.sampler = sampler
@@ -971,17 +1134,20 @@ class BlackBoxSampledBackend:
             c0 = data["choices"][0]
             if isinstance(c0, Mapping):
                 msg = c0.get("message")
-                if isinstance(msg, Mapping) and "content" in msg:
+                if isinstance(msg, Mapping) and msg.get("content") is not None:
                     return str(msg["content"])
-                if "text" in c0:
+                if c0.get("text") is not None:
                     return str(c0["text"])
         if isinstance(data.get("candidates"), list) and data["candidates"]:
             cand0 = data["candidates"][0]
             if isinstance(cand0, Mapping):
-                parts = (cand0.get("content") or {}).get("parts") or []
-                txt = "".join(str(p.get("text", "")) for p in parts if isinstance(p, Mapping))
-                if txt:
-                    return txt
+                content_obj = cand0.get("content")
+                if isinstance(content_obj, Mapping):
+                    parts = content_obj.get("parts")
+                    if isinstance(parts, list):
+                        txt = "".join(str(p.get("text", "")) for p in parts if isinstance(p, Mapping))
+                        if txt:
+                            return txt
         return data
 
     def _invoke_callable_sampler(
@@ -1012,9 +1178,15 @@ class BlackBoxSampledBackend:
         fallback_key: str | None,
     ) -> None:
         for raw_opt, raw_w in votes_raw.items():
+            if isinstance(raw_w, bool) or not isinstance(raw_w, (int, float)):
+                raise SchemaContractViolationError(
+                    f"verbalized vote count for {raw_opt!r} must be a finite non-boolean number, got {raw_w!r}"
+                )
             weight = float(raw_w)
             if not math.isfinite(weight) or weight < 0.0:
-                raise ValueError(f"verbalized vote count for {raw_opt!r} must be finite and >= 0, got {raw_w!r}")
+                raise SchemaContractViolationError(
+                    f"verbalized vote count for {raw_opt!r} must be finite and >= 0, got {raw_w!r}"
+                )
             if weight == 0.0:
                 continue
             matched = _resolve_option_token(str(raw_opt), valid_keys, letter_to_key)
@@ -1058,14 +1230,36 @@ class BlackBoxSampledBackend:
         assert parsed_map is not None
         top_ev = str(parsed_map.get("evidence_read") or parsed_map.get("evidence") or "").strip()
 
-        top_votes = parsed_map.get("votes") or parsed_map.get("counts")
-        if isinstance(top_votes, Mapping):
+        for v_field in ("votes", "counts"):
+            if v_field in parsed_map and parsed_map[v_field] is not None and not isinstance(
+                parsed_map[v_field], Mapping
+            ):
+                raise SchemaContractViolationError(
+                    f"BlackBoxSampledBackend {v_field!r} field must be a JSON object, got {parsed_map[v_field]!r}"
+                )
+
+        top_votes: Mapping[str, Any] | None = None
+        if isinstance(parsed_map.get("votes"), Mapping):
+            top_votes = parsed_map["votes"]
+        elif isinstance(parsed_map.get("counts"), Mapping):
+            top_votes = parsed_map["counts"]
+
+        if top_votes is not None:
             # Support either {qid: {opt: count}} or single-slot {opt: count}
             if len(questions) == 1:
                 only_qid = next(iter(questions.keys()))
-                first_val = next(iter(top_votes.values()), None)
-                if not isinstance(first_val, Mapping):
-                    saw_explicit_votes = True
+                if only_qid in top_votes and isinstance(top_votes[only_qid], Mapping):
+                    self._accumulate_votes_map(
+                        top_votes[only_qid],
+                        counts[only_qid],
+                        valid_keys_map[only_qid],
+                        bijections[only_qid],
+                        fallback_keys[only_qid],
+                    )
+                    if top_ev:
+                        evidences[only_qid].append(top_ev)
+                    return True
+                if not any(isinstance(v, Mapping) for v in top_votes.values()):
                     self._accumulate_votes_map(
                         top_votes,
                         counts[only_qid],
@@ -1077,8 +1271,12 @@ class BlackBoxSampledBackend:
                         evidences[only_qid].append(top_ev)
                     return True
             for qid in questions:
-                q_votes = top_votes.get(qid)
-                if isinstance(q_votes, Mapping):
+                if qid in top_votes:
+                    q_votes = top_votes[qid]
+                    if not isinstance(q_votes, Mapping):
+                        raise SchemaContractViolationError(
+                            f"verbalized votes for slot {qid!r} must be a JSON object, got {q_votes!r}"
+                        )
                     saw_explicit_votes = True
                     self._accumulate_votes_map(
                         q_votes,
@@ -1092,6 +1290,10 @@ class BlackBoxSampledBackend:
             if saw_explicit_votes:
                 return True
 
+        if "answers" in parsed_map and parsed_map["answers"] is not None and not isinstance(
+            parsed_map["answers"], Mapping
+        ):
+            raise SchemaContractViolationError("BlackBoxSampledBackend 'answers' field must be a JSON object")
         container_raw = parsed_map.get("answers")
         container: Mapping[str, Any] = container_raw if isinstance(container_raw, Mapping) else parsed_map
 
@@ -1101,7 +1303,7 @@ class BlackBoxSampledBackend:
             slot_entry: Any = container.get(qid)
             if slot_entry is None and len(questions) == 1:
                 for alias in ("choice", "answer", "selected", "predicted"):
-                    if alias in container:
+                    if alias in container and container[alias] is not None:
                         slot_entry = container[alias]
                         break
             if slot_entry is None:
@@ -1111,8 +1313,21 @@ class BlackBoxSampledBackend:
                 slot_ev = str(slot_entry.get("evidence") or slot_entry.get("evidence_read") or "").strip()
                 if slot_ev:
                     evidences[qid].append(slot_ev)
-                sub_votes = slot_entry.get("votes") or slot_entry.get("counts")
-                if isinstance(sub_votes, Mapping):
+                for sv_field in ("votes", "counts"):
+                    if (
+                        sv_field in slot_entry
+                        and slot_entry[sv_field] is not None
+                        and not isinstance(slot_entry[sv_field], Mapping)
+                    ):
+                        raise SchemaContractViolationError(
+                            f"slot {qid!r} {sv_field!r} field must be a JSON object, got {slot_entry[sv_field]!r}"
+                        )
+                sub_votes: Mapping[str, Any] | None = None
+                if isinstance(slot_entry.get("votes"), Mapping):
+                    sub_votes = slot_entry["votes"]
+                elif isinstance(slot_entry.get("counts"), Mapping):
+                    sub_votes = slot_entry["counts"]
+                if sub_votes is not None:
                     saw_explicit_votes = True
                     self._accumulate_votes_map(
                         sub_votes,
@@ -1122,16 +1337,31 @@ class BlackBoxSampledBackend:
                         fallback_keys[qid],
                     )
                     continue
-                tok_raw = (
-                    slot_entry.get("choice")
-                    or slot_entry.get("answer")
-                    or slot_entry.get("selected")
-                    or slot_entry.get("predicted")
-                )
+                tok_raw: Any = None
+                for alias in ("choice", "answer", "selected", "predicted"):
+                    if alias in slot_entry and slot_entry[alias] is not None:
+                        tok_raw = slot_entry[alias]
+                        break
                 if tok_raw is None:
                     continue
+                if isinstance(tok_raw, (bool, Mapping, list, tuple, set)):
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} choice value must be a string or scalar token, got {tok_raw!r}"
+                    )
+                if isinstance(tok_raw, float) and not math.isfinite(tok_raw):
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} choice value must be finite, got {tok_raw!r}"
+                    )
                 token_str = str(tok_raw)
             else:
+                if isinstance(slot_entry, (bool, list, tuple, set)):
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} draw entry must be a string, scalar, or object, got {slot_entry!r}"
+                    )
+                if isinstance(slot_entry, float) and not math.isfinite(slot_entry):
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} draw entry must be finite, got {slot_entry!r}"
+                    )
                 token_str = str(slot_entry)
 
             matched = _resolve_option_token(token_str, valid_keys_map[qid], bijections[qid])
@@ -1293,6 +1523,9 @@ class CascadeDecisionOrchestrator:
         conformal_k_reg: int = 1,
         escalate_on_conformal_ambiguous: bool = True,
         layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
+        conformal_randomized: bool = False,
+        conformal_seed: int | None = None,
+        conformal_rng: random.Random | None = None,
     ) -> None:
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
@@ -1303,35 +1536,173 @@ class CascadeDecisionOrchestrator:
         self.shortlist_top_k = shortlist_top_k
         self.shortlist_pairwise_diff = shortlist_pairwise_diff
         self.evidence_prompt = evidence_prompt
-        self.evidence_criteria = evidence_criteria
+        self.evidence_criteria: dict[str, str] | Any = (
+            {str(k): str(v) for k, v in evidence_criteria.items()}
+            if isinstance(evidence_criteria, Mapping)
+            else evidence_criteria
+        )
         self.enable_stage2a_fast_exit = enable_stage2a_fast_exit
         self.escalate_on_inferred_evidence = escalate_on_inferred_evidence
         self.total_contract_mode = total_contract_mode
         self.sla_timeout_sec = sla_timeout_sec
         self.response_cache = response_cache
-        self.oos_keys = frozenset(oos_keys)
-        self.conformal_q_hat = (
-            {str(k): float(v) for k, v in conformal_q_hat.items()}
-            if isinstance(conformal_q_hat, Mapping)
-            else (float(conformal_q_hat) if conformal_q_hat is not None else None)
+        self.oos_keys: frozenset[str] | Any = (
+            frozenset(str(k) for k in oos_keys)
+            if isinstance(oos_keys, Collection) and not isinstance(oos_keys, (str, bytes, bytearray))
+            else oos_keys
+        )
+        self.conformal_q_hat: float | dict[str, float] | Any = (
+            dict(conformal_q_hat) if isinstance(conformal_q_hat, Mapping) else conformal_q_hat
         )
         self.conformal_method = conformal_method
         self.conformal_lam_reg = conformal_lam_reg
         self.conformal_k_reg = conformal_k_reg
         self.escalate_on_conformal_ambiguous = escalate_on_conformal_ambiguous
-        self.layer5_slot_context: dict[str, dict[str, Any]] | None = (
-            {str(qid): dict(ctx) for qid, ctx in layer5_slot_context.items()}
-            if layer5_slot_context is not None
-            else None
+        self.conformal_randomized = conformal_randomized
+        self.conformal_seed = conformal_seed
+        self.conformal_rng = conformal_rng
+        self.layer5_slot_context: dict[str, dict[str, Any]] | Any = (
+            {
+                str(qid): (dict(ctx) if isinstance(ctx, Mapping) else ctx)
+                for qid, ctx in layer5_slot_context.items()
+            }
+            if isinstance(layer5_slot_context, Mapping)
+            else layer5_slot_context
         )
 
-    def _resolve_slot_q_hat(self, qid: str) -> float | None:
+    @staticmethod
+    def _validate_conformal_q_hat_value(raw_q: Any, field: str) -> float:
+        if isinstance(raw_q, bool) or not isinstance(raw_q, (int, float)):
+            raise SchemaContractViolationError(
+                f"{field} must be a non-boolean number >= 0, got {raw_q!r}"
+            )
+        val = float(raw_q)
+        if math.isnan(val) or val < 0.0:
+            raise SchemaContractViolationError(f"{field} must be >= 0 and not NaN, got {raw_q!r}")
+        return 0.0 if val == 0.0 else val
+
+    def _validated_conformal_q_hat(self) -> float | dict[str, float] | None:
         if self.conformal_q_hat is None:
             return None
         if isinstance(self.conformal_q_hat, Mapping):
-            val = self.conformal_q_hat.get(qid)
-            return float(val) if val is not None else None
-        return float(self.conformal_q_hat)
+            out: dict[str, float] = {}
+            for raw_k, raw_v in self.conformal_q_hat.items():
+                if not isinstance(raw_k, str) or not raw_k:
+                    raise SchemaContractViolationError(
+                        "conformal_q_hat mapping keys must be non-empty strings"
+                    )
+                out[raw_k] = self._validate_conformal_q_hat_value(
+                    raw_v, f"conformal_q_hat[{raw_k!r}]"
+                )
+            return out
+        return self._validate_conformal_q_hat_value(self.conformal_q_hat, "conformal_q_hat")
+
+    def _resolve_slot_q_hat(self, qid: str) -> float | None:
+        clean_q = self._validated_conformal_q_hat()
+        if clean_q is None:
+            return None
+        if isinstance(clean_q, Mapping):
+            return clean_q.get(qid)
+        return clean_q
+
+    @staticmethod
+    def _validate_nested_float_map(
+        raw: Mapping[str, Mapping[str, float]] | None,
+        field: str,
+    ) -> dict[str, dict[str, float]] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise SchemaContractViolationError(f"{field} must be a mapping")
+        out: dict[str, dict[str, float]] = {}
+        for qid, inner in raw.items():
+            if not isinstance(qid, str) or not qid:
+                raise SchemaContractViolationError(f"{field} slot keys must be non-empty strings")
+            if not isinstance(inner, Mapping):
+                raise SchemaContractViolationError(f"{field}[{qid!r}] must be a mapping")
+            slot_out: dict[str, float] = {}
+            for opt_k, opt_v in inner.items():
+                if not isinstance(opt_k, str) or not opt_k:
+                    raise SchemaContractViolationError(
+                        f"{field}[{qid!r}] option keys must be non-empty strings"
+                    )
+                slot_out[opt_k] = _require_finite_number(opt_v, f"{field}[{qid!r}][{opt_k!r}]")
+            out[qid] = slot_out
+        return out
+
+    @staticmethod
+    def _validate_pack_map(
+        raw: Mapping[str, int] | None,
+        field: str,
+    ) -> dict[str, int] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise SchemaContractViolationError(f"{field} must be a mapping")
+        out: dict[str, int] = {}
+        for k, v in raw.items():
+            if not isinstance(k, str) or not k:
+                raise SchemaContractViolationError(f"{field} keys must be non-empty strings")
+            out[k] = _require_strict_int(v, f"{field}[{k!r}]")
+        return out
+
+    @staticmethod
+    def _validate_flat_float_map(
+        raw: Mapping[str, float] | None,
+        field: str,
+    ) -> dict[str, float] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise SchemaContractViolationError(f"{field} must be a mapping")
+        out: dict[str, float] = {}
+        for k, v in raw.items():
+            if not isinstance(k, str) or not k:
+                raise SchemaContractViolationError(f"{field} keys must be non-empty strings")
+            out[k] = _require_finite_number(v, f"{field}[{k!r}]")
+        return out
+
+    @classmethod
+    def _validate_slot_context_map(
+        cls,
+        raw: Mapping[str, Mapping[str, Any]] | None,
+        field: str,
+    ) -> dict[str, dict[str, Any]] | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise SchemaContractViolationError(f"{field} must be a mapping")
+        out: dict[str, dict[str, Any]] = {}
+        for qid, ctx in raw.items():
+            if not isinstance(qid, str) or not qid:
+                raise SchemaContractViolationError(f"{field} slot keys must be non-empty strings")
+            if not isinstance(ctx, Mapping):
+                raise SchemaContractViolationError(f"{field}[{qid!r}] must be a mapping")
+            clean_ctx: dict[str, Any] = dict(ctx)
+            if "candidate_pack_sizes" in ctx and ctx["candidate_pack_sizes"] is not None:
+                clean_ctx["candidate_pack_sizes"] = cls._validate_pack_map(
+                    ctx["candidate_pack_sizes"], f"{field}[{qid!r}].candidate_pack_sizes"
+                )
+            if "decoded_pack_size" in ctx and ctx["decoded_pack_size"] is not None:
+                clean_ctx["decoded_pack_size"] = _require_strict_int(
+                    ctx["decoded_pack_size"], f"{field}[{qid!r}].decoded_pack_size"
+                )
+            if "visual_energies" in ctx and ctx["visual_energies"] is not None:
+                clean_ctx["visual_energies"] = cls._validate_flat_float_map(
+                    ctx["visual_energies"], f"{field}[{qid!r}].visual_energies"
+                )
+            if "rank1_id" in ctx and ctx["rank1_id"] is not None:
+                if not isinstance(ctx["rank1_id"], str):
+                    raise SchemaContractViolationError(
+                        f"{field}[{qid!r}].rank1_id must be a string"
+                    )
+                clean_ctx["rank1_id"] = ctx["rank1_id"]
+            if "rank1_visual_similarity" in ctx and ctx["rank1_visual_similarity"] is not None:
+                clean_ctx["rank1_visual_similarity"] = _require_finite_number(
+                    ctx["rank1_visual_similarity"], f"{field}[{qid!r}].rank1_visual_similarity"
+                )
+            out[qid] = clean_ctx
+        return out
 
     def _resolve_slot_layer5_args(
         self,
@@ -1353,7 +1724,7 @@ class CascadeDecisionOrchestrator:
         ctx: Mapping[str, Any] = {}
         if slot_context_override is not None and qid in slot_context_override:
             ctx = slot_context_override[qid]
-        elif self.layer5_slot_context is not None and qid in self.layer5_slot_context:
+        elif isinstance(self.layer5_slot_context, Mapping) and qid in self.layer5_slot_context:
             ctx = self.layer5_slot_context[qid]
         if not ctx:
             return (
@@ -1368,12 +1739,18 @@ class CascadeDecisionOrchestrator:
         v_en = ctx.get("visual_energies", visual_energies)
         r1_id = ctx.get("rank1_id", rank1_id)
         r1_sim = ctx.get("rank1_visual_similarity", rank1_visual_similarity)
+        if r1_id is not None and not isinstance(r1_id, str):
+            raise SchemaContractViolationError(f"layer5_slot_context[{qid!r}].rank1_id must be str")
         return (
-            c_packs,
-            int(d_pack) if d_pack is not None else None,
-            v_en,
-            str(r1_id) if r1_id is not None else None,
-            float(r1_sim) if r1_sim is not None else None,
+            self._validate_pack_map(c_packs, f"layer5_slot_context[{qid!r}].candidate_pack_sizes"),
+            _require_strict_int(d_pack, f"layer5_slot_context[{qid!r}].decoded_pack_size")
+            if d_pack is not None
+            else None,
+            self._validate_flat_float_map(v_en, f"layer5_slot_context[{qid!r}].visual_energies"),
+            r1_id,
+            _require_finite_number(r1_sim, f"layer5_slot_context[{qid!r}].rank1_visual_similarity")
+            if r1_sim is not None
+            else None,
         )
 
     def _quarantine_result(
@@ -1389,6 +1766,9 @@ class CascadeDecisionOrchestrator:
             else DecisionTerminalState.REJECTED_CONTRACT_VIOLATION
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        safe_qids = (
+            [str(qid) for qid in questions.keys()] if isinstance(questions, Mapping) else []
+        )
         slots_err = {
             qid: SlotReadout(
                 slot_id=qid,
@@ -1404,7 +1784,7 @@ class CascadeDecisionOrchestrator:
                 terminal_state=term,
                 failure_category=exc.failure_category,
             )
-            for qid in questions
+            for qid in safe_qids
         }
         return DecisionResult(
             slots=slots_err,
@@ -1435,58 +1815,171 @@ class CascadeDecisionOrchestrator:
         layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> DecisionResult:
         t0 = time.perf_counter()
-        s2_name = self.stage2_backend.name if self.stage2_backend else "none"
-        extra_cfg: dict[str, Any] = {
-            "hesitation_threshold": self.hesitation_threshold,
-            "prior_weight": self.prior_weight,
-            "prior_gate_mode": self.prior_gate_mode,
-            "temperature": self.temperature,
-            "shortlist_top_k": self.shortlist_top_k,
-            "shortlist_pairwise_diff": self.shortlist_pairwise_diff,
-            "evidence_prompt": self.evidence_prompt,
-            "enable_stage2a_fast_exit": self.enable_stage2a_fast_exit,
-            "sister_pack_collision": sister_pack_collision,
-            "decoded_pack_size": decoded_pack_size,
-        }
-        active_slot_ctx = layer5_slot_context if layer5_slot_context is not None else self.layer5_slot_context
-        if active_slot_ctx is not None:
-            extra_cfg["layer5_slot_context"] = active_slot_ctx
-        if self.conformal_q_hat is not None:
-            extra_cfg["conformal_q_hat"] = self.conformal_q_hat
-            extra_cfg["conformal_method"] = self.conformal_method
-            extra_cfg["conformal_lam_reg"] = self.conformal_lam_reg
-            extra_cfg["conformal_k_reg"] = self.conformal_k_reg
-            extra_cfg["escalate_on_conformal_ambiguous"] = self.escalate_on_conformal_ambiguous
-
-        cache_key = compute_decision_cache_key(
-            f"{self.stage1_backend.name}->{s2_name}",
-            state,
-            questions,
-            images,
-            extra_config=extra_cfg,
-        )
-        if self.response_cache is not None:
-            cached = self.response_cache.get(cache_key)
-            if cached is not None:
-                cached.latency_ms = (time.perf_counter() - t0) * 1000.0
-                return cached
-
+        cache_key = ""
         try:
+            clean_hes = _require_finite_number(self.hesitation_threshold, "hesitation_threshold")
+            clean_pw = _require_nonneg_finite_number(self.prior_weight, "prior_weight")
+            clean_temp = _require_finite_number(self.temperature, "temperature")
+            if clean_temp <= 0.0:
+                raise SchemaContractViolationError(f"temperature must be > 0, got {self.temperature!r}")
+            clean_top_k = _require_strict_int(self.shortlist_top_k, "shortlist_top_k")
+            clean_sla = _require_finite_number(self.sla_timeout_sec, "sla_timeout_sec")
+            if clean_sla <= 0.0:
+                raise SchemaContractViolationError(
+                    f"sla_timeout_sec must be > 0, got {self.sla_timeout_sec!r}"
+                )
+            if not isinstance(sister_pack_collision, bool):
+                raise SchemaContractViolationError(
+                    f"sister_pack_collision must be bool, got {sister_pack_collision!r}"
+                )
+            if not isinstance(self.oos_keys, frozenset):
+                raise SchemaContractViolationError("oos_keys must be a collection of strings")
+            clean_dec_pack = (
+                _require_strict_int(decoded_pack_size, "decoded_pack_size")
+                if decoded_pack_size is not None
+                else None
+            )
+            if rank1_id is not None and not isinstance(rank1_id, str):
+                raise SchemaContractViolationError(
+                    f"rank1_id must be a string when provided, got {rank1_id!r}"
+                )
+            clean_r1_sim = (
+                _require_finite_number(rank1_visual_similarity, "rank1_visual_similarity")
+                if rank1_visual_similarity is not None
+                else None
+            )
+            clean_prior_logits = self._validate_nested_float_map(prior_logits, "prior_logits")
+            clean_shortlist_scores = self._validate_nested_float_map(
+                shortlist_scores, "shortlist_scores"
+            )
+            clean_pack_sizes = self._validate_pack_map(candidate_pack_sizes, "candidate_pack_sizes")
+            clean_visual_energies = self._validate_flat_float_map(visual_energies, "visual_energies")
+            clean_init_slot_ctx = self._validate_slot_context_map(
+                self.layer5_slot_context, "layer5_slot_context"
+            )
+            clean_call_slot_ctx = self._validate_slot_context_map(
+                layer5_slot_context, "call_layer5_slot_context"
+            )
+            if not isinstance(self.prior_gate_mode, str) or self.prior_gate_mode not in (
+                "hesitant",
+                "always",
+                "never",
+            ):
+                raise SchemaContractViolationError(
+                    f"prior_gate_mode must be 'hesitant', 'always', or 'never', got {self.prior_gate_mode!r}"
+                )
+            if not isinstance(self.evidence_prompt, str):
+                raise SchemaContractViolationError(
+                    f"evidence_prompt must be str, got {self.evidence_prompt!r}"
+                )
+            if self.evidence_criteria is not None and not isinstance(self.evidence_criteria, Mapping):
+                raise SchemaContractViolationError("evidence_criteria must be a mapping when provided")
+            clean_q_hat = self._validated_conformal_q_hat()
+            if not isinstance(self.conformal_randomized, bool):
+                raise SchemaContractViolationError(
+                    f"conformal_randomized must be bool, got {self.conformal_randomized!r}"
+                )
+            if self.conformal_seed is not None:
+                _require_strict_int(self.conformal_seed, "conformal_seed")
+
+            s2_name = self.stage2_backend.name if self.stage2_backend else "none"
+            extra_cfg: dict[str, Any] = {
+                "hesitation_threshold": clean_hes,
+                "prior_weight": clean_pw,
+                "prior_gate_mode": self.prior_gate_mode,
+                "temperature": clean_temp,
+                "shortlist_top_k": clean_top_k,
+                "shortlist_pairwise_diff": bool(self.shortlist_pairwise_diff),
+                "evidence_prompt": self.evidence_prompt,
+                "enable_stage2a_fast_exit": bool(self.enable_stage2a_fast_exit),
+                "sister_pack_collision": sister_pack_collision,
+                "decoded_pack_size": clean_dec_pack,
+            }
+            if self.oos_keys != _DEFAULT_OOS_KEYS:
+                extra_cfg["oos_keys"] = sorted(self.oos_keys)
+            if self.evidence_criteria is not None:
+                extra_cfg["evidence_criteria"] = dict(self.evidence_criteria)
+            if self.escalate_on_inferred_evidence:
+                extra_cfg["escalate_on_inferred_evidence"] = True
+            if clean_init_slot_ctx is not None and clean_call_slot_ctx is None:
+                extra_cfg["layer5_slot_context"] = clean_init_slot_ctx
+            elif clean_init_slot_ctx is None and clean_call_slot_ctx is not None:
+                extra_cfg["call_layer5_slot_context"] = clean_call_slot_ctx
+            elif clean_init_slot_ctx is not None and clean_call_slot_ctx is not None:
+                extra_cfg["layer5_slot_context"] = clean_init_slot_ctx
+                extra_cfg["call_layer5_slot_context"] = clean_call_slot_ctx
+
+            if clean_prior_logits is not None:
+                extra_cfg["prior_logits"] = clean_prior_logits
+            if clean_shortlist_scores is not None:
+                extra_cfg["shortlist_scores"] = clean_shortlist_scores
+            if clean_pack_sizes is not None:
+                extra_cfg["candidate_pack_sizes"] = clean_pack_sizes
+            if clean_visual_energies is not None:
+                extra_cfg["visual_energies"] = clean_visual_energies
+            if rank1_id is not None:
+                extra_cfg["rank1_id"] = rank1_id
+            if clean_r1_sim is not None:
+                extra_cfg["rank1_visual_similarity"] = clean_r1_sim
+
+            if clean_q_hat is not None:
+                if not isinstance(self.conformal_method, str) or self.conformal_method not in (
+                    "lac",
+                    "aps",
+                    "raps",
+                ):
+                    raise SchemaContractViolationError(
+                        f"conformal_method must be 'lac', 'aps', or 'raps', got {self.conformal_method!r}"
+                    )
+                clean_lam = _require_nonneg_finite_number(self.conformal_lam_reg, "conformal_lam_reg")
+                clean_k = _require_strict_int(self.conformal_k_reg, "conformal_k_reg")
+                if clean_k < 0:
+                    raise SchemaContractViolationError(
+                        f"conformal_k_reg must be >= 0, got {self.conformal_k_reg!r}"
+                    )
+                extra_cfg["conformal_q_hat"] = clean_q_hat
+                extra_cfg["conformal_method"] = self.conformal_method
+                extra_cfg["conformal_lam_reg"] = clean_lam
+                extra_cfg["conformal_k_reg"] = clean_k
+                extra_cfg["escalate_on_conformal_ambiguous"] = bool(
+                    self.escalate_on_conformal_ambiguous
+                )
+                if self.conformal_randomized or self.conformal_seed is not None:
+                    extra_cfg["conformal_randomized"] = self.conformal_randomized
+                    extra_cfg["conformal_seed"] = self.conformal_seed
+
+            cache_key = compute_decision_cache_key(
+                f"{self.stage1_backend.name}->{s2_name}",
+                state,
+                questions,
+                images,
+                extra_config=extra_cfg,
+            )
+            can_use_cache = self.response_cache is not None and not (
+                clean_q_hat is not None and self.conformal_randomized
+            )
+            if can_use_cache and self.response_cache is not None:
+                cached = self.response_cache.get(cache_key)
+                if cached is not None:
+                    cached.latency_ms = (time.perf_counter() - t0) * 1000.0
+                    return cached
+
             return self._evaluate_inner(
                 t0=t0,
                 cache_key=cache_key,
+                can_use_cache=can_use_cache,
                 state=state,
                 questions=questions,
                 images=images,
-                prior_logits=prior_logits,
-                shortlist_scores=shortlist_scores,
-                candidate_pack_sizes=candidate_pack_sizes,
-                decoded_pack_size=decoded_pack_size,
-                visual_energies=visual_energies,
+                prior_logits=clean_prior_logits,
+                shortlist_scores=clean_shortlist_scores,
+                candidate_pack_sizes=clean_pack_sizes,
+                decoded_pack_size=clean_dec_pack,
+                visual_energies=clean_visual_energies,
                 rank1_id=rank1_id,
-                rank1_visual_similarity=rank1_visual_similarity,
+                rank1_visual_similarity=clean_r1_sim,
                 sister_pack_collision=sister_pack_collision,
-                layer5_slot_context=layer5_slot_context,
+                layer5_slot_context=clean_call_slot_ctx,
             )
         except DecisionContractError as exc:
             if not self.total_contract_mode:
@@ -1498,6 +1991,7 @@ class CascadeDecisionOrchestrator:
         *,
         t0: float,
         cache_key: str,
+        can_use_cache: bool = True,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
         images: list[str] | None,
@@ -1559,7 +2053,7 @@ class CascadeDecisionOrchestrator:
                         terminal_state=term,
                         cache_key=cache_key,
                     )
-                    if self.response_cache is not None:
+                    if can_use_cache and self.response_cache is not None:
                         self.response_cache.put(cache_key, res)
                     return res
 
@@ -1574,12 +2068,17 @@ class CascadeDecisionOrchestrator:
                     or {}
                 )
                 if s_map:
-                    active_questions[qid] = shortlist_wide_question(
-                        q,
-                        s_map,
-                        top_k=self.shortlist_top_k,
-                        pairwise_diff=self.shortlist_pairwise_diff,
-                    )
+                    try:
+                        active_questions[qid] = shortlist_wide_question(
+                            q,
+                            s_map,
+                            top_k=self.shortlist_top_k,
+                            pairwise_diff=self.shortlist_pairwise_diff,
+                        )
+                    except DecisionContractError:
+                        raise
+                    except (ValueError, TypeError) as exc:
+                        raise SchemaContractViolationError(str(exc)) from exc
                 else:
                     active_questions[qid] = q
             else:
@@ -1588,11 +2087,16 @@ class CascadeDecisionOrchestrator:
         # 3. Optional Co-Denoised / Causal Evidence Slot Injection
         evidence_slot_id: str | None = None
         if self.evidence_prompt.strip():
-            active_questions = inject_evidence_slot(
-                active_questions,
-                self.evidence_prompt,
-                self.evidence_criteria,
-            )
+            try:
+                active_questions = inject_evidence_slot(
+                    active_questions,
+                    self.evidence_prompt,
+                    self.evidence_criteria,
+                )
+            except DecisionContractError:
+                raise
+            except (ValueError, TypeError) as exc:
+                raise SchemaContractViolationError(str(exc)) from exc
             evidence_slot_id = "evidence_feature"
 
         # 4. Run Stage-1 Fast Backend with SLA check
@@ -1601,35 +2105,46 @@ class CascadeDecisionOrchestrator:
             raise UpstreamTransientError(
                 f"Stage-1 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
             )
+        if not isinstance(raw_stage1, Mapping):
+            raise SchemaContractViolationError("Stage-1 backend returned non-mapping response")
         backend_evidence: Mapping[str, str] = getattr(self.stage1_backend, "last_evidence", {}) or {}
         stage1_epistemic: Mapping[str, float] = getattr(self.stage1_backend, "last_epistemic_variance", {}) or {}
 
         injected_ev_choice = ""
         if evidence_slot_id and evidence_slot_id in raw_stage1 and raw_stage1[evidence_slot_id]:
-            injected_ev_choice = max(raw_stage1[evidence_slot_id].items(), key=lambda kv: kv[1])[0]
+            ev_dist = _validate_slot_distribution(
+                raw_stage1[evidence_slot_id], f"Stage-1 slot {evidence_slot_id!r}"
+            )
+            injected_ev_choice = max(ev_dist.items(), key=lambda kv: kv[1])[0]
 
         slots_out: dict[str, SlotReadout] = {}
         escalated_qids: list[str] = []
         escalation_reasons: list[str] = []
 
         for qid, q in active_questions.items():
-            raw_dist = raw_stage1.get(qid, {})
-            if not raw_dist:
-                raise SchemaContractViolationError(f"Stage-1 backend returned empty distribution for {qid!r}")
+            raw_dist = _validate_slot_distribution(raw_stage1.get(qid), f"Stage-1 slot {qid!r}")
 
             # Evaluate Split Conformal / RAPS set strictly on raw_dist BEFORE Stage-1 prior fusion.
             slot_conformal_set: list[str] = []
             conformal_esc = False
             slot_q_hat = self._resolve_slot_q_hat(qid) if qid != evidence_slot_id else None
             if slot_q_hat is not None:
-                conf_res = conformal_prediction_set(
-                    raw_dist,
-                    slot_q_hat,
-                    method=self.conformal_method,
-                    lam_reg=self.conformal_lam_reg,
-                    k_reg=self.conformal_k_reg,
-                    abstain_keys=self.oos_keys | DEFAULT_CONFORMAL_ABSTAIN_KEYS,
-                )
+                try:
+                    conf_res = conformal_prediction_set(
+                        raw_dist,
+                        slot_q_hat,
+                        method=self.conformal_method,
+                        lam_reg=self.conformal_lam_reg,
+                        k_reg=self.conformal_k_reg,
+                        abstain_keys=self.oos_keys | DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+                        randomized=self.conformal_randomized,
+                        seed=self.conformal_seed,
+                        rng=self.conformal_rng,
+                    )
+                except DecisionContractError:
+                    raise
+                except (ValueError, TypeError) as exc:
+                    raise SchemaContractViolationError(str(exc)) from exc
                 slot_conformal_set = conf_res.prediction_set
                 if self.escalate_on_conformal_ambiguous:
                     conformal_esc = conf_res.should_escalate
@@ -1639,14 +2154,19 @@ class CascadeDecisionOrchestrator:
                 if qid != evidence_slot_id
                 else None
             )
-            fused_dist, h_raw, should_esc = pre_gated_bayesian_poe_fusion(
-                raw_dist,
-                prior_logits=slot_prior,
-                prior_weight=self.prior_weight if slot_prior else 0.0,
-                temperature=self.temperature,
-                hesitation_threshold=self.hesitation_threshold,
-                gate_mode=self.prior_gate_mode,
-            )
+            try:
+                fused_dist, h_raw, should_esc = pre_gated_bayesian_poe_fusion(
+                    raw_dist,
+                    prior_logits=slot_prior,
+                    prior_weight=self.prior_weight if slot_prior else 0.0,
+                    temperature=self.temperature,
+                    hesitation_threshold=self.hesitation_threshold,
+                    gate_mode=self.prior_gate_mode,
+                )
+            except DecisionContractError:
+                raise
+            except (ValueError, TypeError) as exc:
+                raise SchemaContractViolationError(str(exc)) from exc
             predicted = max(fused_dist.items(), key=lambda kv: kv[1])[0]
             guard_name = "none"
             if qid != evidence_slot_id:
@@ -1660,15 +2180,20 @@ class CascadeDecisionOrchestrator:
                     rank1_visual_similarity=rank1_visual_similarity,
                 )
                 if s1_packs or s1_ven or s1_r1_sim is not None:
-                    predicted, guard_name = apply_layer5_deterministic_guards(
-                        chosen_id=predicted,
-                        raw_probs=raw_dist,
-                        candidate_pack_sizes=s1_packs,
-                        decoded_pack_size=s1_dec_pack,
-                        visual_energies=s1_ven,
-                        rank1_id=s1_r1_id,
-                        rank1_visual_similarity=s1_r1_sim,
-                    )
+                    try:
+                        predicted, guard_name = apply_layer5_deterministic_guards(
+                            chosen_id=predicted,
+                            raw_probs=raw_dist,
+                            candidate_pack_sizes=s1_packs,
+                            decoded_pack_size=s1_dec_pack,
+                            visual_energies=s1_ven,
+                            rank1_id=s1_r1_id,
+                            rank1_visual_similarity=s1_r1_sim,
+                        )
+                    except DecisionContractError:
+                        raise
+                    except (ValueError, TypeError) as exc:
+                        raise SchemaContractViolationError(str(exc)) from exc
 
             slot_ev = backend_evidence.get(qid, injected_ev_choice if qid != evidence_slot_id else "")
             inferred_flag = (
@@ -1727,12 +2252,12 @@ class CascadeDecisionOrchestrator:
                 raise UpstreamTransientError(
                     f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
                 )
+            if not isinstance(stage2_dists, Mapping):
+                raise SchemaContractViolationError("Stage-2 backend returned non-mapping response")
             s2_evidence: Mapping[str, str] = getattr(self.stage2_backend, "last_evidence", {}) or {}
             s2_epistemic: Mapping[str, float] = getattr(self.stage2_backend, "last_epistemic_variance", {}) or {}
             for qid in escalated_qids:
-                s2_dist = stage2_dists.get(qid) or {}
-                if not s2_dist:
-                    raise SchemaContractViolationError(f"Stage-2 backend returned empty distribution for {qid!r}")
+                s2_dist = _validate_slot_distribution(stage2_dists.get(qid), f"Stage-2 slot {qid!r}")
                 s2_h = normalized_entropy(s2_dist)
                 s2_pred = max(s2_dist.items(), key=lambda kv: kv[1])[0]
                 s2_guard_name = "none"
@@ -1747,15 +2272,20 @@ class CascadeDecisionOrchestrator:
                         rank1_visual_similarity=rank1_visual_similarity,
                     )
                     if s2_packs or s2_ven or s2_r1_sim is not None:
-                        s2_pred, s2_guard_name = apply_layer5_deterministic_guards(
-                            chosen_id=s2_pred,
-                            raw_probs=s2_dist,
-                            candidate_pack_sizes=s2_packs,
-                            decoded_pack_size=s2_dec_pack,
-                            visual_energies=s2_ven,
-                            rank1_id=s2_r1_id,
-                            rank1_visual_similarity=s2_r1_sim,
-                        )
+                        try:
+                            s2_pred, s2_guard_name = apply_layer5_deterministic_guards(
+                                chosen_id=s2_pred,
+                                raw_probs=s2_dist,
+                                candidate_pack_sizes=s2_packs,
+                                decoded_pack_size=s2_dec_pack,
+                                visual_energies=s2_ven,
+                                rank1_id=s2_r1_id,
+                                rank1_visual_similarity=s2_r1_sim,
+                            )
+                        except DecisionContractError:
+                            raise
+                        except (ValueError, TypeError) as exc:
+                            raise SchemaContractViolationError(str(exc)) from exc
                 if s2_pred in self.oos_keys:
                     s2_term = DecisionTerminalState.ABSTAIN_OOS
                 elif s2_guard_name != "none":
@@ -1815,6 +2345,6 @@ class CascadeDecisionOrchestrator:
             cache_hit=False,
             cache_key=cache_key,
         )
-        if self.response_cache is not None:
+        if can_use_cache and self.response_cache is not None:
             self.response_cache.put(cache_key, result)
         return result

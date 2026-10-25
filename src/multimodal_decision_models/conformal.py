@@ -33,7 +33,17 @@ from dataclasses import dataclass
 from typing import Collection, Mapping, Sequence
 
 DEFAULT_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset(
-    {"0", "none", "none_of_the_above", "none_visible", "oos", "abstain"}
+    {
+        "0",
+        "abstain",
+        "insufficient_evidence",
+        "none",
+        "none_of_the_above",
+        "none_visible",
+        "oos",
+        "uncertain",
+        "unknown",
+    }
 )
 
 _VALID_CONFORMAL_METHODS: frozenset[str] = frozenset({"lac", "aps", "raps"})
@@ -110,12 +120,14 @@ class ConformalSetResult:
 
 
 def _normalize_and_rank_probs(probs: Mapping[str, float]) -> tuple[list[str], dict[str, float], dict[str, int]]:
-    if not probs:
+    if not isinstance(probs, Mapping) or not probs:
         raise ValueError("probability mapping must be non-empty")
     total = 0.0
     clean: dict[str, float] = {}
     for raw_k, raw_v in probs.items():
         key = str(raw_k)
+        if isinstance(raw_v, bool) or not isinstance(raw_v, (int, float)):
+            raise ValueError(f"probability for {key!r} must be a non-boolean number, got {raw_v!r}")
         val = float(raw_v)
         if not math.isfinite(val) or val < 0.0:
             raise ValueError(f"probability for {key!r} must be finite and >= 0, got {raw_v!r}")
@@ -130,12 +142,14 @@ def _normalize_and_rank_probs(probs: Mapping[str, float]) -> tuple[list[str], di
 
 
 def _validate_conformal_hyperparams(method: str, lam_reg: float, k_reg: int) -> str:
+    if not isinstance(method, str):
+        raise ValueError(f"conformal method must be a string, got {method!r}")
     clean_method = method.strip().lower()
     if clean_method not in _VALID_CONFORMAL_METHODS:
         raise ValueError(f"unsupported conformal method {method!r}; expected one of {sorted(_VALID_CONFORMAL_METHODS)}")
-    if not math.isfinite(lam_reg) or lam_reg < 0.0:
+    if isinstance(lam_reg, bool) or not isinstance(lam_reg, (int, float)) or not math.isfinite(float(lam_reg)) or float(lam_reg) < 0.0:
         raise ValueError(f"lam_reg must be finite and >= 0, got {lam_reg!r}")
-    if k_reg < 0:
+    if isinstance(k_reg, bool) or not isinstance(k_reg, int) or k_reg < 0:
         raise ValueError(f"k_reg must be >= 0, got {k_reg!r}")
     return clean_method
 
@@ -229,7 +243,7 @@ def calibrate_conformal_quantile(
     calibration nonconformity scores. When m > n, returns q_hat = +inf so prediction sets cover
     the full label space conservatively.
     """
-    if not math.isfinite(alpha) or alpha <= 0.0 or alpha >= 1.0:
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or float(alpha) <= 0.0 or float(alpha) >= 1.0:
         raise ValueError(f"alpha must be finite and strictly in (0, 1), got {alpha!r}")
     if not calib_probs or len(calib_probs) != len(calib_labels):
         raise ValueError("calib_probs and calib_labels must be non-empty sequences of equal length")
@@ -300,14 +314,15 @@ def conformal_prediction_set(
     randomized: bool = False,
     seed: int | None = None,
     rng: random.Random | None = None,
-    abstain_keys: Collection[str] = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+    abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
 ) -> ConformalSetResult:
     """Construct the calibrated prediction set C_alpha(x) = {y : s(x, y) <= q_hat} in probability rank order.
 
     Flags should_escalate = True whenever |C_alpha(x)| != 1 or any abstain/catch-all option belongs to C_alpha(x).
     """
-    if math.isnan(q_hat) or q_hat < 0.0:
+    if isinstance(q_hat, bool) or not isinstance(q_hat, (int, float)) or math.isnan(float(q_hat)) or float(q_hat) < 0.0:
         raise ValueError(f"q_hat must be >= 0 and not NaN, got {q_hat!r}")
+    q_hat_f = float(q_hat)
     clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
     ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
 
@@ -324,19 +339,20 @@ def conformal_prediction_set(
         use_global_lock=use_lock,
     )
 
-    if math.isinf(q_hat):
+    if math.isinf(q_hat_f):
         pred_set = list(ranked_keys)
     else:
-        pred_set = [k for k in ranked_keys if scores[k] <= q_hat + 1e-12]
+        pred_set = [k for k in ranked_keys if scores[k] <= q_hat_f + 1e-12]
 
-    abstain_lookup = {str(k) for k in abstain_keys}
+    effective_abstain = DEFAULT_CONFORMAL_ABSTAIN_KEYS if abstain_keys is None else abstain_keys
+    abstain_lookup = {str(k).strip().lower() for k in effective_abstain if str(k).strip()}
     singleton = len(pred_set) == 1
-    contains_abstain = any(k in abstain_lookup for k in pred_set)
+    contains_abstain = any(str(k).strip().lower() in abstain_lookup for k in pred_set)
     should_escalate = (not singleton) or contains_abstain
 
     return ConformalSetResult(
         prediction_set=pred_set,
-        q_hat=q_hat,
+        q_hat=q_hat_f,
         singleton=singleton,
         contains_abstain=contains_abstain,
         should_escalate=should_escalate,

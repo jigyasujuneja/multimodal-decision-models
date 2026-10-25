@@ -37,22 +37,38 @@ var (
 
 var defaultConformalAbstainKeys = []string{
 	"0",
+	"abstain",
+	"insufficient_evidence",
 	"none",
 	"none_of_the_above",
 	"none_visible",
 	"oos",
-	"abstain",
+	"uncertain",
+	"unknown",
 }
 
 // ConformalConfig parameterizes Split Conformal Prediction across LAC, APS, and RAPS.
 type ConformalConfig struct {
-	Method      string     // "lac", "aps", or "raps" (default "raps")
-	LamReg      float64    // RAPS rank penalty >= 0 (default 0.01 when zero-value ConformalConfig{} is passed)
-	KReg        int        // RAPS unpenalized top-k ranks >= 0 (default 1 when zero-value ConformalConfig{} is passed)
-	Randomized  bool       // whether to draw u ~ Uniform(0, 1) instead of deterministic u = 0
-	Seed        int64      // deterministic RNG seed when Randomized is true (0 draws from shared stream)
-	RNG         *rand.Rand // optional caller-managed RNG stream when Randomized is true
-	AbstainKeys []string   // custom abstain/catch-all keys; defaults to defaultConformalAbstainKeys when nil
+	Method      string     `json:"method,omitempty"`       // "lac", "aps", or "raps" (default "raps")
+	Alpha       float64    `json:"alpha,omitempty"`        // default miscoverage level 0.10 in DefaultConformalConfig()
+	LamReg      float64    `json:"lam_reg,omitempty"`      // RAPS rank penalty >= 0 (default 0.01 when zero-value ConformalConfig{} is passed)
+	KReg        int        `json:"k_reg,omitempty"`        // RAPS unpenalized top-k ranks >= 0 (default 1 when zero-value ConformalConfig{} is passed)
+	Randomized  bool       `json:"randomized,omitempty"`   // whether to draw u ~ Uniform(0, 1) instead of deterministic u = 0
+	Seed        int64      `json:"seed,omitempty"`         // deterministic RNG seed when Randomized is true (0 draws from shared stream)
+	RNG         *rand.Rand `json:"-"`                      // optional caller-managed RNG stream when Randomized is true
+	AbstainKeys []string   `json:"abstain_keys,omitempty"` // custom abstain/catch-all keys; defaults to defaultConformalAbstainKeys when nil
+}
+
+// DefaultConformalConfig returns the standard RAPS configuration (Method: "raps", Alpha: 0.10, LamReg: 0.01, KReg: 1)
+// with a fresh copy of the 9-key default abstain union.
+func DefaultConformalConfig() ConformalConfig {
+	return ConformalConfig{
+		Method:      "raps",
+		Alpha:       0.10,
+		LamReg:      0.01,
+		KReg:        1,
+		AbstainKeys: append([]string(nil), defaultConformalAbstainKeys...),
+	}
 }
 
 // ConformalSet holds the calibrated prediction set C_alpha(x) and pre-fusion cascade gate flags.
@@ -388,11 +404,14 @@ func ConformalPredictionSet(
 
 	abstainLookup := make(map[string]bool, len(resolved.AbstainKeys))
 	for _, ak := range resolved.AbstainKeys {
-		abstainLookup[ak] = true
+		trimmed := strings.ToLower(strings.TrimSpace(ak))
+		if trimmed != "" {
+			abstainLookup[trimmed] = true
+		}
 	}
 	containsAbstain := false
 	for _, k := range predSet {
-		if abstainLookup[k] {
+		if abstainLookup[strings.ToLower(strings.TrimSpace(k))] {
 			containsAbstain = true
 			break
 		}

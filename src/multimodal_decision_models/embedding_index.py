@@ -74,16 +74,45 @@ class EmbeddingIndexQueryResult:
     z_score: float
 
 
+def _is_non_str_sequence(val: Any) -> bool:
+    return isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray))
+
+
+def _coerce_finite_float(val: Any, label: str) -> float:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise SchemaContractViolationError(
+            f"{label} must be a finite int or float, got {type(val).__name__}"
+        )
+    out = float(val)
+    if not math.isfinite(out):
+        raise SchemaContractViolationError(f"{label} contains non-finite value {val!r}")
+    return out
+
+
+def _l2_normalize_finite(vals: Sequence[float], label: str) -> tuple[float, ...]:
+    max_abs = max(abs(v) for v in vals)
+    if max_abs <= 0.0:
+        raise SchemaContractViolationError(f"{label} L2 norm must be > 0")
+    scaled = [v / max_abs for v in vals]
+    unit_hypot = math.hypot(*scaled)
+    return tuple(s / unit_hypot for s in scaled)
+
+
+def _validate_lab_triple(lab: Any, label: str) -> tuple[float, float, float]:
+    if not _is_non_str_sequence(lab) or len(lab) != 3:
+        raise SchemaContractViolationError(f"{label} must be a finite 3-element numeric sequence")
+    return (
+        _coerce_finite_float(lab[0], f"{label}[0]"),
+        _coerce_finite_float(lab[1], f"{label}[1]"),
+        _coerce_finite_float(lab[2], f"{label}[2]"),
+    )
+
+
 def _normalize_vector(vec: Sequence[float], label: str = "embedding") -> tuple[float, ...]:
-    if not vec:
-        raise ValueError(f"{label} must be non-empty")
-    vals = [float(v) for v in vec]
-    if any(not math.isfinite(v) for v in vals):
-        raise ValueError(f"{label} contains non-finite values")
-    norm = math.sqrt(sum(v * v for v in vals))
-    if norm <= 1e-12:
-        raise ValueError(f"{label} L2 norm must be > 0")
-    return tuple(v / norm for v in vals)
+    if not _is_non_str_sequence(vec) or len(vec) == 0:
+        raise SchemaContractViolationError(f"{label} must be a non-empty numeric sequence")
+    vals = [_coerce_finite_float(v, label) for v in vec]
+    return _l2_normalize_finite(vals, label)
 
 
 def _aspect_bin_from_buffer(buf: ImageBuffer) -> str:
@@ -114,13 +143,28 @@ class VertexMultimodalEmbeddingAdapter:
         self.project = _validate_resource_segment("project", project)
         self.model = _validate_resource_segment("model", model)
         self.location = _validate_resource_segment("location", location)
-        if output_dimensionality is not None and output_dimensionality < 1:
-            raise ValueError(f"output_dimensionality must be >= 1, got {output_dimensionality}")
+        if output_dimensionality is not None:
+            if (
+                isinstance(output_dimensionality, bool)
+                or not isinstance(output_dimensionality, int)
+                or output_dimensionality < 1
+            ):
+                raise SchemaContractViolationError(
+                    f"output_dimensionality must be an int >= 1, got {output_dimensionality!r}"
+                )
+        f_timeout = _coerce_finite_float(timeout_sec, "timeout_sec")
+        if f_timeout <= 0.0:
+            raise SchemaContractViolationError(f"timeout_sec must be > 0, got {timeout_sec!r}")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise SchemaContractViolationError(f"max_retries must be an int >= 0, got {max_retries!r}")
+        f_backoff = _coerce_finite_float(base_backoff_sec, "base_backoff_sec")
+        if f_backoff < 0.0:
+            raise SchemaContractViolationError(f"base_backoff_sec must be >= 0, got {base_backoff_sec!r}")
         self.output_dimensionality = output_dimensionality
         self.access_token_fn = access_token_fn
-        self.timeout_sec = timeout_sec
+        self.timeout_sec = f_timeout
         self.max_retries = max_retries
-        self.base_backoff_sec = base_backoff_sec
+        self.base_backoff_sec = f_backoff
         if endpoint_override is not None:
             _validate_http_url(endpoint_override)
         self.endpoint_override = endpoint_override
@@ -145,18 +189,25 @@ class VertexMultimodalEmbeddingAdapter:
         image_bytes: bytes | None = None,
         image_mime_type: str = "image/png",
     ) -> dict[str, Any]:
+        if text is not None and not isinstance(text, str):
+            raise SchemaContractViolationError("text must be a string or None")
+        if image_bytes is not None and not isinstance(image_bytes, (bytes, bytearray, memoryview)):
+            raise SchemaContractViolationError("image_bytes must be bytes-like or None")
+        if not isinstance(image_mime_type, str) or not image_mime_type.strip():
+            raise SchemaContractViolationError("image_mime_type must be a non-empty string")
         clean_text = text.strip() if isinstance(text, str) else ""
-        has_image = image_bytes is not None and len(image_bytes) > 0
+        raw_img = bytes(image_bytes) if image_bytes is not None else b""
+        has_image = len(raw_img) > 0
         if not clean_text and not has_image:
-            raise ValueError("build_predict_payload requires non-empty text or image_bytes")
+            raise SchemaContractViolationError("build_predict_payload requires non-empty text or image_bytes")
 
         instance: dict[str, Any] = {}
         if clean_text:
             instance["text"] = clean_text
-        if has_image and image_bytes is not None:
+        if has_image:
             instance["image"] = {
-                "bytesBase64Encoded": base64.b64encode(image_bytes).decode("ascii"),
-                "mimeType": image_mime_type,
+                "bytesBase64Encoded": base64.b64encode(raw_img).decode("ascii"),
+                "mimeType": image_mime_type.strip(),
             }
 
         payload: dict[str, Any] = {"instances": [instance]}
@@ -166,38 +217,39 @@ class VertexMultimodalEmbeddingAdapter:
 
     @staticmethod
     def parse_predict_response(data: Mapping[str, Any]) -> list[float]:
+        if not isinstance(data, Mapping):
+            raise SchemaContractViolationError("Vertex embedding response must be a JSON object")
         raw_vec: Any = None
         preds = data.get("predictions")
-        if isinstance(preds, Sequence) and len(preds) > 0 and isinstance(preds[0], Mapping):
+        if _is_non_str_sequence(preds) and len(preds) > 0 and isinstance(preds[0], Mapping):
             p0 = preds[0]
             for key in ("multimodalEmbedding", "imageEmbedding", "textEmbedding", "embedding"):
-                if key in p0 and isinstance(p0[key], Sequence):
-                    raw_vec = p0[key]
-                    break
+                if key in p0 and p0[key] is not None:
+                    cand = p0[key]
+                    if _is_non_str_sequence(cand):
+                        raw_vec = cand
+                        break
+                    if key == "embedding" and isinstance(cand, Mapping):
+                        nested_vals = cand.get("values")
+                        if _is_non_str_sequence(nested_vals):
+                            raw_vec = nested_vals
+                            break
             if raw_vec is None and isinstance(p0.get("embeddings"), Mapping):
                 vals = p0["embeddings"].get("values")
-                if isinstance(vals, Sequence):
+                if _is_non_str_sequence(vals):
                     raw_vec = vals
         elif isinstance(data.get("embedding"), Mapping):
             vals = data["embedding"].get("values")
-            if isinstance(vals, Sequence):
+            if _is_non_str_sequence(vals):
                 raw_vec = vals
 
-        if not isinstance(raw_vec, Sequence) or len(raw_vec) == 0:
+        if not _is_non_str_sequence(raw_vec) or len(raw_vec) == 0:
             raise SchemaContractViolationError(
-                "Vertex embedding response omitted non-empty embedding vector"
+                "Vertex embedding response omitted non-empty numeric embedding vector"
             )
 
-        out: list[float] = []
-        for idx, v in enumerate(raw_vec):
-            fv = float(v)
-            if not math.isfinite(fv):
-                raise SchemaContractViolationError(f"non-finite embedding value at index {idx}")
-            out.append(fv)
-        norm = math.sqrt(sum(x * x for x in out))
-        if norm <= 1e-12:
-            raise SchemaContractViolationError("Vertex embedding response vector has zero L2 norm")
-        return [x / norm for x in out]
+        out = [_coerce_finite_float(v, f"Vertex embedding[{idx}]") for idx, v in enumerate(raw_vec)]
+        return list(_l2_normalize_finite(out, "Vertex embedding response vector"))
 
     def _resolve_access_token(self) -> str:
         if self.access_token_fn is not None:
@@ -261,23 +313,51 @@ class MultimodalEmbeddingIndex:
         adapter_w2: Sequence[Sequence[float]] | None = None,
         adapter_alpha: float = 0.35,
     ) -> None:
-        if w_cos < 0.0 or w_lab < 0.0 or w_shape < 0.0 or (w_cos + w_lab + w_shape) <= 0.0:
-            raise ValueError("weights w_cos, w_lab, w_shape must be >= 0 with positive sum")
-        if not math.isfinite(inv_temperature) or inv_temperature <= 0.0:
-            raise ValueError(f"inv_temperature must be finite and > 0, got {inv_temperature!r}")
-        if not math.isfinite(lidstone_eps) or lidstone_eps <= 0.0:
-            raise ValueError(f"lidstone_eps must be finite and > 0, got {lidstone_eps!r}")
+        fw_cos = _coerce_finite_float(w_cos, "w_cos")
+        fw_lab = _coerce_finite_float(w_lab, "w_lab")
+        fw_shape = _coerce_finite_float(w_shape, "w_shape")
+        if fw_cos < 0.0 or fw_lab < 0.0 or fw_shape < 0.0 or (fw_cos + fw_lab + fw_shape) <= 0.0:
+            raise SchemaContractViolationError("weights w_cos, w_lab, w_shape must be >= 0 with positive sum")
+        f_inv_temp = _coerce_finite_float(inv_temperature, "inv_temperature")
+        if f_inv_temp <= 0.0:
+            raise SchemaContractViolationError(f"inv_temperature must be finite and > 0, got {inv_temperature!r}")
+        f_lidstone = _coerce_finite_float(lidstone_eps, "lidstone_eps")
+        if f_lidstone <= 0.0:
+            raise SchemaContractViolationError(f"lidstone_eps must be finite and > 0, got {lidstone_eps!r}")
+        f_margin = _coerce_finite_float(fast_exit_margin, "fast_exit_margin")
+        f_min_z = _coerce_finite_float(fast_exit_min_z, "fast_exit_min_z")
+        f_alpha = _coerce_finite_float(adapter_alpha, "adapter_alpha")
 
-        self.w_cos = float(w_cos)
-        self.w_lab = float(w_lab)
-        self.w_shape = float(w_shape)
-        self.inv_temperature = float(inv_temperature)
-        self.lidstone_eps = float(lidstone_eps)
-        self.fast_exit_margin = float(fast_exit_margin)
-        self.fast_exit_min_z = float(fast_exit_min_z)
-        self.adapter_w1 = [[float(x) for x in row] for row in adapter_w1] if adapter_w1 is not None else None
-        self.adapter_w2 = [[float(x) for x in row] for row in adapter_w2] if adapter_w2 is not None else None
-        self.adapter_alpha = float(adapter_alpha)
+        if (adapter_w1 is None) != (adapter_w2 is None):
+            raise SchemaContractViolationError("adapter_w1 and adapter_w2 must both be provided or both be None")
+        clean_w1: list[list[float]] | None = None
+        clean_w2: list[list[float]] | None = None
+        if adapter_w1 is not None and adapter_w2 is not None:
+            if not _is_non_str_sequence(adapter_w1) or not adapter_w1:
+                raise SchemaContractViolationError("adapter_w1 must be a non-empty 2D numeric matrix")
+            if any(not _is_non_str_sequence(row) or not row for row in adapter_w1):
+                raise SchemaContractViolationError("adapter_w1 rows must be non-empty numeric sequences")
+            in_dim = len(adapter_w1[0])
+            if any(len(row) != in_dim for row in adapter_w1):
+                raise SchemaContractViolationError("adapter_w1 rows must have uniform width")
+            h_dim = len(adapter_w1)
+            if not _is_non_str_sequence(adapter_w2) or len(adapter_w2) != in_dim:
+                raise SchemaContractViolationError(f"adapter_w2 must have {in_dim} rows")
+            if any(not _is_non_str_sequence(row) or len(row) != h_dim for row in adapter_w2):
+                raise SchemaContractViolationError(f"adapter_w2 rows must have width {h_dim}")
+            clean_w1 = [[_coerce_finite_float(x, "adapter_w1") for x in row] for row in adapter_w1]
+            clean_w2 = [[_coerce_finite_float(x, "adapter_w2") for x in row] for row in adapter_w2]
+
+        self.w_cos = fw_cos
+        self.w_lab = fw_lab
+        self.w_shape = fw_shape
+        self.inv_temperature = f_inv_temp
+        self.lidstone_eps = f_lidstone
+        self.fast_exit_margin = f_margin
+        self.fast_exit_min_z = f_min_z
+        self.adapter_w1 = clean_w1
+        self.adapter_w2 = clean_w2
+        self.adapter_alpha = f_alpha
 
         self._items: dict[str, CatalogItem] = {}
         self._dim: int | None = None
@@ -300,36 +380,65 @@ class MultimodalEmbeddingIndex:
         pack_size: int | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> CatalogItem:
-        clean_id = str(item_id).strip()
+        if not isinstance(item_id, str):
+            raise SchemaContractViolationError(f"item_id must be a string, got {type(item_id).__name__}")
+        clean_id = item_id.strip()
         if not clean_id:
-            raise ValueError("item_id must be non-empty")
+            raise SchemaContractViolationError("item_id must be non-empty")
         norm_emb = _normalize_vector(embedding, label=f"embedding[{clean_id}]")
-        if self._dim is not None and len(norm_emb) != self._dim:
-            raise ValueError(
-                f"embedding dimension mismatch for {clean_id!r}: expected {self._dim}, got {len(norm_emb)}"
+        expected_dim = self._dim
+        if expected_dim is None and self.adapter_w1 is not None:
+            expected_dim = len(self.adapter_w1[0])
+        if expected_dim is not None and len(norm_emb) != expected_dim:
+            raise SchemaContractViolationError(
+                f"embedding dimension mismatch for {clean_id!r}: expected {expected_dim}, got {len(norm_emb)}"
             )
+
+        if image is not None and not isinstance(image, ImageBuffer):
+            raise SchemaContractViolationError("image must be an ImageBuffer or None")
 
         resolved_lab: tuple[float, float, float] | None = None
         if lab_color is not None:
-            if len(lab_color) != 3 or any(not math.isfinite(float(c)) for c in lab_color):
-                raise ValueError(f"lab_color for {clean_id!r} must be a finite 3-tuple")
-            resolved_lab = (float(lab_color[0]), float(lab_color[1]), float(lab_color[2]))
+            resolved_lab = _validate_lab_triple(lab_color, f"lab_color[{clean_id}]")
         elif image is not None:
             wb_img = shades_of_gray_white_balance(image, p=6.0)
             resolved_lab = mean_inner_crop_cie_lab(wb_img, crop_fraction=0.80)
 
+        if not isinstance(title, str):
+            raise SchemaContractViolationError(f"title for {clean_id!r} must be a string")
+        if not isinstance(aspect_bin, str):
+            raise SchemaContractViolationError(f"aspect_bin for {clean_id!r} must be a string")
         resolved_aspect = aspect_bin.strip() if aspect_bin.strip() else "standard"
         if image is not None and aspect_bin == "standard":
             resolved_aspect = _aspect_bin_from_buffer(image)
 
+        resolved_pack: int | None = None
+        if pack_size is not None:
+            if isinstance(pack_size, bool) or not isinstance(pack_size, int) or pack_size < 1:
+                raise SchemaContractViolationError(
+                    f"pack_size for {clean_id!r} must be an integer >= 1, got {pack_size!r}"
+                )
+            resolved_pack = int(pack_size)
+
+        clean_meta: dict[str, str] = {}
+        if metadata is not None:
+            if not isinstance(metadata, Mapping):
+                raise SchemaContractViolationError(f"metadata for {clean_id!r} must be a mapping")
+            for k, v in metadata.items():
+                if not isinstance(k, str) or v is None or isinstance(v, (Mapping, list)):
+                    raise SchemaContractViolationError(
+                        f"metadata entries for {clean_id!r} must have string keys and scalar values"
+                    )
+                clean_meta[k] = str(v)
+
         return CatalogItem(
             id=clean_id,
             embedding=norm_emb,
-            title=str(title),
+            title=title,
             lab_color=resolved_lab,
             aspect_bin=resolved_aspect,
-            pack_size=int(pack_size) if pack_size is not None else None,
-            metadata={str(k): str(v) for k, v in (metadata or {}).items()},
+            pack_size=resolved_pack,
+            metadata=clean_meta,
         )
 
     def add(
@@ -344,9 +453,11 @@ class MultimodalEmbeddingIndex:
         pack_size: int | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> None:
-        clean_id = str(item_id).strip()
+        if not isinstance(item_id, str):
+            raise SchemaContractViolationError(f"item_id must be a string, got {type(item_id).__name__}")
+        clean_id = item_id.strip()
         if clean_id in self._items:
-            raise ValueError(f"item_id {clean_id!r} already exists; call upsert() to overwrite")
+            raise SchemaContractViolationError(f"item_id {clean_id!r} already exists; call upsert() to overwrite")
         item = self._build_catalog_item(
             clean_id,
             embedding,
@@ -411,13 +522,21 @@ class MultimodalEmbeddingIndex:
         use_csls: bool = False,
     ) -> EmbeddingIndexQueryResult:
         if not self._items:
-            raise ValueError("cannot query an empty MultimodalEmbeddingIndex")
-        if top_k < 1:
-            raise ValueError(f"top_k must be >= 1, got {top_k}")
+            raise SchemaContractViolationError("cannot query an empty MultimodalEmbeddingIndex")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise SchemaContractViolationError(f"top_k must be an int >= 1, got {top_k!r}")
+        if not isinstance(use_csls, bool):
+            raise SchemaContractViolationError(f"use_csls must be a bool, got {use_csls!r}")
+        if query_image is not None and not isinstance(query_image, ImageBuffer):
+            raise SchemaContractViolationError("query_image must be an ImageBuffer or None")
+        if query_aspect_bin is not None and not isinstance(query_aspect_bin, str):
+            raise SchemaContractViolationError("query_aspect_bin must be a string or None")
 
         q_norm = _normalize_vector(query_embedding, label="query_embedding")
         if self._dim is not None and len(q_norm) != self._dim:
-            raise ValueError(f"query_embedding dimension {len(q_norm)} != index dimension {self._dim}")
+            raise SchemaContractViolationError(
+                f"query_embedding dimension {len(q_norm)} != index dimension {self._dim}"
+            )
 
         if self.adapter_w1 is not None and self.adapter_w2 is not None:
             q_vec: Sequence[float] = apply_residual_mlp_adapter(
@@ -431,16 +550,16 @@ class MultimodalEmbeddingIndex:
 
         resolved_q_lab: tuple[float, float, float] | None = None
         if query_lab_color is not None:
-            resolved_q_lab = (
-                float(query_lab_color[0]),
-                float(query_lab_color[1]),
-                float(query_lab_color[2]),
-            )
+            resolved_q_lab = _validate_lab_triple(query_lab_color, "query_lab_color")
         elif query_image is not None:
             wb_q = shades_of_gray_white_balance(query_image, p=6.0)
             resolved_q_lab = mean_inner_crop_cie_lab(wb_q, crop_fraction=0.80)
 
-        resolved_q_aspect = query_aspect_bin
+        resolved_q_aspect = (
+            query_aspect_bin.strip()
+            if isinstance(query_aspect_bin, str) and query_aspect_bin.strip()
+            else None
+        )
         if resolved_q_aspect is None and query_image is not None:
             resolved_q_aspect = _aspect_bin_from_buffer(query_image)
 
@@ -465,7 +584,7 @@ class MultimodalEmbeddingIndex:
                 dl = resolved_q_lab[0] - item.lab_color[0]
                 da = resolved_q_lab[1] - item.lab_color[1]
                 db = resolved_q_lab[2] - item.lab_color[2]
-                delta_e = math.sqrt(dl * dl + da * da + db * db)
+                delta_e = math.hypot(dl, da, db)
                 s_lab = math.exp(-delta_e / 25.0)
                 eff_w_cos = self.w_cos
                 eff_w_lab = self.w_lab
@@ -596,13 +715,18 @@ class MultimodalEmbeddingIndex:
         cfg_kwargs: dict[str, Any] = {}
         item_rows: list[dict[str, Any]] = []
 
-        for raw_line in in_path.read_text(encoding="utf-8").splitlines():
+        for line_no, raw_line in enumerate(in_path.read_text(encoding="utf-8").splitlines(), start=1):
             stripped = raw_line.strip()
             if not stripped:
                 continue
-            row = json.loads(stripped)
+            try:
+                row = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise SchemaContractViolationError(
+                    f"invalid JSON in MultimodalEmbeddingIndex JSONL at line {line_no}: {exc}"
+                ) from exc
             if not isinstance(row, Mapping):
-                raise ValueError("JSONL row in MultimodalEmbeddingIndex must be a JSON object")
+                raise SchemaContractViolationError("JSONL row in MultimodalEmbeddingIndex must be a JSON object")
             rtype = row.get("_record_type", "item")
             if rtype == "index_config":
                 for key in (
@@ -619,24 +743,41 @@ class MultimodalEmbeddingIndex:
                 ):
                     if key in row:
                         cfg_kwargs[key] = row[key]
-            else:
+            elif rtype == "item":
                 item_rows.append(dict(row))
+            else:
+                raise SchemaContractViolationError(
+                    f"unsupported _record_type {rtype!r} in MultimodalEmbeddingIndex JSONL at line {line_no}"
+                )
 
         index = cls(**cfg_kwargs)
         for row in item_rows:
+            if "id" not in row or not isinstance(row["id"], str):
+                raise SchemaContractViolationError("JSONL item row requires string 'id'")
+            if "embedding" not in row:
+                raise SchemaContractViolationError(f"JSONL item row {row['id']!r} requires 'embedding'")
             lab_raw = row.get("lab_color")
-            lab_tuple = (
-                (float(lab_raw[0]), float(lab_raw[1]), float(lab_raw[2]))
-                if isinstance(lab_raw, Sequence) and len(lab_raw) == 3
-                else None
-            )
+            lab_tuple = _validate_lab_triple(lab_raw, f"lab_color[{row['id']}]") if lab_raw is not None else None
+            title_raw = row.get("title", "")
+            if title_raw is None:
+                title_raw = ""
+            if not isinstance(title_raw, str):
+                raise SchemaContractViolationError(f"JSONL item row {row['id']!r} title must be string")
+            aspect_raw = row.get("aspect_bin", "standard")
+            if aspect_raw is None:
+                aspect_raw = "standard"
+            if not isinstance(aspect_raw, str):
+                raise SchemaContractViolationError(f"JSONL item row {row['id']!r} aspect_bin must be string")
+            meta_raw = row.get("metadata")
+            if meta_raw is not None and not isinstance(meta_raw, Mapping):
+                raise SchemaContractViolationError(f"JSONL item row {row['id']!r} metadata must be object")
             index.upsert(
-                str(row["id"]),
-                [float(x) for x in row["embedding"]],
-                title=str(row.get("title", "")),
+                row["id"],
+                row["embedding"],
+                title=title_raw,
                 lab_color=lab_tuple,
-                aspect_bin=str(row.get("aspect_bin", "standard")),
-                pack_size=int(row["pack_size"]) if row.get("pack_size") is not None else None,
-                metadata=dict(row.get("metadata") or {}),
+                aspect_bin=aspect_raw,
+                pack_size=row.get("pack_size"),
+                metadata=meta_raw,
             )
         return index

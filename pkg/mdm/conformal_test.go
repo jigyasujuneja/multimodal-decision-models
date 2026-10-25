@@ -279,9 +279,9 @@ func TestConformalTieSymmetryAndStatefulRandomizedCoverage(t *testing.T) {
 	}
 
 	// 3. Seed: 0 (default randomized stream) smooths point-mass discrete jump toward 1 - alpha = 0.75
-	calibPt := make([]map[string]float64, 120)
-	labelsPt := make([]string, 120)
-	for i := 0; i < 120; i++ {
+	calibPt := make([]map[string]float64, 600)
+	labelsPt := make([]string, 600)
+	for i := 0; i < 600; i++ {
 		calibPt[i] = map[string]float64{"A": 1.0, "B": 0.0}
 		labelsPt[i] = "A"
 	}
@@ -291,7 +291,7 @@ func TestConformalTieSymmetryAndStatefulRandomizedCoverage(t *testing.T) {
 		t.Fatalf("CalibrateConformalQuantile point mass failed: %v", err)
 	}
 	hitsPt := 0
-	for i := 0; i < 400; i++ {
+	for i := 0; i < 2000; i++ {
 		cset, err := ConformalPredictionSet(map[string]float64{"A": 1.0, "B": 0.0}, qPt, defRandCfg)
 		if err != nil {
 			t.Fatalf("ConformalPredictionSet point mass failed: %v", err)
@@ -303,7 +303,7 @@ func TestConformalTieSymmetryAndStatefulRandomizedCoverage(t *testing.T) {
 			}
 		}
 	}
-	covPt := float64(hitsPt) / 400.0
+	covPt := float64(hitsPt) / 2000.0
 	if covPt < 0.65 || covPt > 0.85 {
 		t.Fatalf("expected smoothed randomized coverage near 0.75 in [0.65, 0.85], got %.4f", covPt)
 	}
@@ -325,6 +325,93 @@ func TestConformalTieSymmetryAndStatefulRandomizedCoverage(t *testing.T) {
 	for g := 0; g < 8; g++ {
 		if e := <-done; e != nil {
 			t.Fatalf("concurrent ConformalPredictionSet failed: %v", e)
+		}
+	}
+}
+
+func TestDefaultConformalConfigRapsZeroBoundariesAndNineKeyAbstainUnion(t *testing.T) {
+	defCfg := DefaultConformalConfig()
+	if defCfg.Method != "raps" || defCfg.Alpha != 0.10 || defCfg.LamReg != 0.01 || defCfg.KReg != 1 || len(defCfg.AbstainKeys) != 9 {
+		t.Fatalf("unexpected DefaultConformalConfig(): %+v", defCfg)
+	}
+	defCfg.AbstainKeys[0] = "mutated_caller_copy"
+	if DefaultConformalConfig().AbstainKeys[0] != "0" {
+		t.Fatal("DefaultConformalConfig() must return an isolated AbstainKeys slice copy")
+	}
+
+	sixOpts := map[string]float64{
+		"o1": 0.30, "o2": 0.25, "o3": 0.20, "o4": 0.12, "o5": 0.08, "o6": 0.05,
+	}
+	// DefaultConformalConfig() and zero-value ConformalConfig{} both apply RAPS(KReg=1, LamReg=0.01):
+	// rank 5 score = 0.87 + 0.04 = 0.91; rank 6 score = 0.95 + 0.05 = 1.00.
+	for _, cfgUse := range []ConformalConfig{DefaultConformalConfig(), {}} {
+		res5, err := ConformalPredictionSet(sixOpts, 0.91, cfgUse)
+		if err != nil || len(res5.PredictionSet) != 5 {
+			t.Fatalf("expected 5 items at qHat=0.91 for %+v, got res=%+v err=%v", cfgUse, res5, err)
+		}
+		res4, err := ConformalPredictionSet(sixOpts, 0.909, cfgUse)
+		if err != nil || len(res4.PredictionSet) != 4 {
+			t.Fatalf("expected 4 items at qHat=0.909 for %+v, got res=%+v err=%v", cfgUse, res4, err)
+		}
+	}
+
+	// Explicit LamReg=0.0 reduces RAPS identically to APS across all calibration and prediction thresholds.
+	calibP := []map[string]float64{sixOpts, {"o1": 0.10, "o2": 0.40, "o3": 0.20, "o4": 0.15, "o5": 0.10, "o6": 0.05}}
+	calibL := []string{"o5", "o3"}
+	apsCfg := ConformalConfig{Method: "aps"}
+	qAPS, err := CalibrateConformalQuantile(calibP, calibL, 0.40, apsCfg)
+	if err != nil {
+		t.Fatalf("APS calibration failed: %v", err)
+	}
+	for _, kZero := range []int{0, 1, 3} {
+		rapsZero := ConformalConfig{Method: "raps", LamReg: 0.0, KReg: kZero}
+		qRAPS, err := CalibrateConformalQuantile(calibP, calibL, 0.40, rapsZero)
+		if err != nil || math.Abs(qRAPS-qAPS) > 1e-12 {
+			t.Fatalf("expected RAPS(LamReg=0, KReg=%d) qHat=%v to equal APS qHat=%v (err=%v)", kZero, qRAPS, qAPS, err)
+		}
+		setR, err1 := ConformalPredictionSet(sixOpts, 0.87, rapsZero)
+		setA, err2 := ConformalPredictionSet(sixOpts, 0.87, apsCfg)
+		if err1 != nil || err2 != nil || len(setR.PredictionSet) != len(setA.PredictionSet) {
+			t.Fatalf("expected identical prediction sets at LamReg=0, got %+v vs %+v", setR, setA)
+		}
+	}
+
+	// Explicit KReg=0 with LamReg=0.20 penalizes rank 1 (rank 1 score = 0.0 + 0.20 = 0.20).
+	k0Cfg := ConformalConfig{Method: "raps", LamReg: 0.20, KReg: 0}
+	emptySet, err := ConformalPredictionSet(sixOpts, 0.19, k0Cfg)
+	if err != nil || len(emptySet.PredictionSet) != 0 || !emptySet.ShouldEscalate {
+		t.Fatalf("expected empty prediction set at qHat=0.19 under KReg=0 LamReg=0.20, got %+v err=%v", emptySet, err)
+	}
+	rank1Set, err := ConformalPredictionSet(sixOpts, 0.20, k0Cfg)
+	if err != nil || len(rank1Set.PredictionSet) != 1 || rank1Set.PredictionSet[0] != "o1" {
+		t.Fatalf("expected singleton [o1] at qHat=0.20 under KReg=0 LamReg=0.20, got %+v err=%v", rank1Set, err)
+	}
+
+	// All 9 default abstain keys (case-insensitive and whitespace-trimmed) escalate when AbstainKeys is nil,
+	// while explicit empty non-nil AbstainKeys: []string{} opts out cleanly.
+	nineKeys := []string{
+		"0",
+		"abstain",
+		"insufficient_evidence",
+		"none",
+		"none_of_the_above",
+		"none_visible",
+		"oos",
+		"uncertain",
+		"unknown",
+		" OOS ",
+		"ABSTAIN",
+		" Uncertain ",
+	}
+	for _, ak := range nineKeys {
+		probs := map[string]float64{ak: 0.96, "valid_sku": 0.04}
+		resNil, err := ConformalPredictionSet(probs, 0.20, ConformalConfig{Method: "lac"})
+		if err != nil || !resNil.Singleton || !resNil.ContainsAbstain || !resNil.ShouldEscalate {
+			t.Fatalf("expected default abstain escalation for %q, got res=%+v err=%v", ak, resNil, err)
+		}
+		resOptOut, err := ConformalPredictionSet(probs, 0.20, ConformalConfig{Method: "lac", AbstainKeys: []string{}})
+		if err != nil || !resOptOut.Singleton || resOptOut.ContainsAbstain || resOptOut.ShouldEscalate {
+			t.Fatalf("expected empty AbstainKeys slice to opt out for %q, got res=%+v err=%v", ak, resOptOut, err)
 		}
 	}
 }

@@ -31,6 +31,7 @@ import base64
 import binascii
 import json
 import math
+import re
 import sys
 from typing import Any, BinaryIO, Mapping, Sequence
 
@@ -41,6 +42,7 @@ from .conformal import (
     conformal_prediction_set,
 )
 from .context_pruner import ContextBlock, prune_agent_context_blocks
+from .contracts import DecisionContractError
 from .embedding_index import MultimodalEmbeddingIndex
 from .visual_compiler import (
     ImageBuffer,
@@ -53,7 +55,10 @@ MCP_SERVER_NAME = "dgem-catalog"
 MCP_SERVER_VERSION = "0.4.0"
 DEFAULT_MCP_PROTOCOL_VERSION: str = "2024-11-05"
 MAX_FRAME_BYTES: int = 16 * 1024 * 1024
+MAX_CONTENT_LENGTH_BYTES: int = MAX_FRAME_BYTES
 MAX_HEADER_LINES: int = 64
+_MAX_DRAIN_HEADER_LINES: int = 1024
+_MIME_HEADER_LINE_RE = re.compile(rb"^([A-Za-z][A-Za-z0-9_-]*)[ \t]*:(.*)$")
 
 
 class _InvalidParamsError(ValueError):
@@ -721,7 +726,7 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
                 "id": req_id,
                 "error": {"code": -32602, "message": f"Invalid params: {exc}"},
             }
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        except (DecisionContractError, ValueError, KeyError, TypeError, AttributeError) as exc:
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -735,6 +740,49 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _drain_mime_headers(stream: BinaryIO, max_lines: int = _MAX_DRAIN_HEADER_LINES) -> None:
+    """Consume remaining lines of an oversized or malformed MIME header block up to the blank separator."""
+    for _ in range(max_lines):
+        hdr_line = stream.readline()
+        if not hdr_line or hdr_line in (b"\r\n", b"\n"):
+            break
+
+
+def _read_exact_bytes(stream: BinaryIO, n: int) -> bytes | None:
+    """Read exactly `n` bytes from `stream`, looping across partial pipe reads; return `None` on premature EOF."""
+    if n == 0:
+        return b""
+    chunks: list[bytes] = []
+    remaining = n
+    while remaining > 0:
+        piece = stream.read(remaining)
+        if not piece:
+            return None
+        chunks.append(piece)
+        remaining -= len(piece)
+    return b"".join(chunks)
+
+
+def _parse_content_length_value(raw_len_text: bytes | None) -> int:
+    """Validate and parse `Content-Length` header value within `[0, MAX_CONTENT_LENGTH_BYTES]`."""
+    if raw_len_text is None or not raw_len_text:
+        raise _FramingInvalidRequestError("missing Content-Length header in MIME block")
+    if raw_len_text.startswith(b"-") and len(raw_len_text) > 1 and raw_len_text[1:].isdigit():
+        neg_val = -int(raw_len_text[1:])
+        raise _FramingInvalidRequestError(
+            f"Content-Length {neg_val} out of bounds [0, {MAX_CONTENT_LENGTH_BYTES}]"
+        )
+    if not raw_len_text.isdigit():
+        bad_txt = raw_len_text.decode("latin-1", errors="replace")
+        raise _FramingInvalidRequestError(f"invalid Content-Length header value {bad_txt!r}")
+    content_len = int(raw_len_text)
+    if content_len > MAX_CONTENT_LENGTH_BYTES:
+        raise _FramingInvalidRequestError(
+            f"Content-Length {content_len} out of bounds [0, {MAX_CONTENT_LENGTH_BYTES}]"
+        )
+    return content_len
+
+
 def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
     """Read next JSON-RPC payload from binary stream, returning `(raw_json_bytes, is_content_length_framed)`."""
     while True:
@@ -744,28 +792,46 @@ def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.lower().startswith(b"content-length:"):
-            parts = stripped.split(b":", 1)
-            raw_len_text = parts[1].strip()
-            hdr_count = 0
-            while hdr_count < MAX_HEADER_LINES:
+
+        line_no_crlf = line.rstrip(b"\r\n")
+        first_hdr = _MIME_HEADER_LINE_RE.match(line_no_crlf)
+        if first_hdr is not None:
+            raw_len_text: bytes | None = None
+            framing_err: str | None = None
+            first_name = first_hdr.group(1).lower()
+            if first_name == b"content-length":
+                raw_len_text = first_hdr.group(2).strip()
+
+            header_lines_seen = 1
+            while True:
                 hdr_line = stream.readline()
                 if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                     break
-                hdr_count += 1
-            else:
-                raise _FramingInvalidRequestError(
-                    f"exceeded MAX_HEADER_LINES ({MAX_HEADER_LINES})"
-                )
-            content_len = int(raw_len_text)
-            if content_len < 0 or content_len > MAX_FRAME_BYTES:
-                raise _FramingInvalidRequestError(
-                    f"Content-Length {content_len} out of bounds [0, {MAX_FRAME_BYTES}]"
-                )
-            body = stream.read(content_len)
-            if len(body) < content_len:
+                header_lines_seen += 1
+                if header_lines_seen > MAX_HEADER_LINES:
+                    _drain_mime_headers(stream)
+                    raise _FramingInvalidRequestError(
+                        f"exceeded MAX_HEADER_LINES ({MAX_HEADER_LINES})"
+                    )
+                hdr_match = _MIME_HEADER_LINE_RE.match(hdr_line.rstrip(b"\r\n"))
+                if hdr_match is None:
+                    _drain_mime_headers(stream)
+                    raise _FramingInvalidRequestError("malformed MIME header line")
+                hdr_name = hdr_match.group(1).lower()
+                if hdr_name == b"content-length":
+                    if raw_len_text is not None:
+                        framing_err = "duplicate Content-Length header"
+                    else:
+                        raw_len_text = hdr_match.group(2).strip()
+
+            if framing_err is not None:
+                raise _FramingInvalidRequestError(framing_err)
+            content_len = _parse_content_length_value(raw_len_text)
+            body = _read_exact_bytes(stream, content_len)
+            if body is None:
                 return None, True
             return body, True
+
         return stripped, False
 
 

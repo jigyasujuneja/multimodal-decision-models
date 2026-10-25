@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
+import math
 import re
 import threading
 from pathlib import Path
@@ -77,7 +79,7 @@ class LogprobAlignmentError(DecisionContractError):
         )
 
 
-class SchemaContractViolationError(DecisionContractError):
+class SchemaContractViolationError(DecisionContractError, ValueError):
     """Raised when an input schema or upstream payload violates structural slot invariants."""
 
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
@@ -103,8 +105,8 @@ class UpstreamTransientError(DecisionContractError):
 
 def sanitize_untrusted_text(text: str, max_chars: int = 16384) -> str:
     """Strip control characters, XML tag breakouts, and line-leading prompt-override directives."""
-    if max_chars <= 0:
-        raise ValueError(f"max_chars must be > 0, got {max_chars}")
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars <= 0:
+        raise SchemaContractViolationError(f"max_chars must be > 0, got {max_chars!r}")
     cleaned = _CONTROL_CHAR_RE.sub("", text)
     cleaned = _TAG_BREAKOUT_RE.sub("[escaped_untrusted_tag]", cleaned)
     cleaned = _INJECTION_DIRECTIVE_RE.sub("[neutralized_directive]", cleaned)
@@ -113,14 +115,53 @@ def sanitize_untrusted_text(text: str, max_chars: int = 16384) -> str:
     return cleaned
 
 
-def _sanitize_value(val: Any, max_chars: int = 16384) -> Any:
+def _sanitize_value(
+    val: Any,
+    max_chars: int = 16384,
+    _seen: set[int] | None = None,
+) -> Any:
+    if val is None or isinstance(val, bool) or isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        if not math.isfinite(val):
+            raise SchemaContractViolationError(f"non-finite float in decision state: {val!r}")
+        return 0.0 if val == 0.0 else float(val)
     if isinstance(val, str):
         return sanitize_untrusted_text(val, max_chars=max_chars)
-    if isinstance(val, Mapping):
-        return {str(k): _sanitize_value(v, max_chars=max_chars) for k, v in val.items()}
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        decoded = bytes(val).decode("utf-8", errors="replace")
+        return sanitize_untrusted_text(decoded, max_chars=max_chars)
+
+    active_seen = set() if _seen is None else _seen
+    obj_id = id(val)
+    if obj_id in active_seen:
+        raise SchemaContractViolationError("cyclic container detected in decision state")
+    next_seen = active_seen | {obj_id}
+
     if isinstance(val, (list, tuple)):
-        return [_sanitize_value(v, max_chars=max_chars) for v in val]
-    return val
+        return [_sanitize_value(v, max_chars=max_chars, _seen=next_seen) for v in val]
+    if isinstance(val, (set, frozenset)):
+        items = [_sanitize_value(v, max_chars=max_chars, _seen=next_seen) for v in val]
+        return sorted(
+            items,
+            key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False, allow_nan=False),
+        )
+    if isinstance(val, Mapping):
+        str_keys = [sanitize_untrusted_text(str(k), max_chars=max_chars) for k in val.keys()]
+        has_collision = len(set(str_keys)) != len(str_keys)
+        out_map: dict[str, Any] = {}
+        for raw_k, clean_k in zip(val.keys(), str_keys):
+            final_k = f"{type(raw_k).__qualname__}:{clean_k}" if has_collision else clean_k
+            out_map[final_k] = _sanitize_value(val[raw_k], max_chars=max_chars, _seen=next_seen)
+        return out_map
+    if dataclasses.is_dataclass(val) and not isinstance(val, type):
+        return {
+            f.name: _sanitize_value(getattr(val, f.name), max_chars=max_chars, _seen=next_seen)
+            for f in dataclasses.fields(val)
+        }
+    raise SchemaContractViolationError(
+        f"unsupported non-serializable value in decision state: {type(val).__qualname__}"
+    )
 
 
 def wrap_untrusted_state(state: Any, max_chars: int = 16384) -> str:
@@ -129,7 +170,7 @@ def wrap_untrusted_state(state: Any, max_chars: int = 16384) -> str:
     rendered = (
         sanitized
         if isinstance(sanitized, str)
-        else json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+        else json.dumps(sanitized, ensure_ascii=False, sort_keys=True, allow_nan=False)
     )
     return f"<untrusted_data>\n{rendered}\n</untrusted_data>"
 
@@ -146,6 +187,101 @@ def verify_slot_domain_closure(readout: SlotReadout, question: DecisionQuestion)
     return readout.predicted in allowed
 
 
+def _canonicalize_cache_value(
+    val: Any,
+    *,
+    allow_pos_inf: bool = False,
+    _seen: set[int] | None = None,
+) -> Any:
+    """Recursively convert arbitrary decision inputs into an injective, JSON-sortable canonical form."""
+    if val is None or isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return int(val)
+    if isinstance(val, float):
+        if math.isnan(val):
+            raise SchemaContractViolationError("NaN float is not permitted in decision cache input")
+        if math.isinf(val):
+            if allow_pos_inf and val > 0.0:
+                return {"__mdm_type__": "pos_inf"}
+            raise SchemaContractViolationError(
+                f"infinite float {val!r} is not permitted in decision cache input"
+            )
+        return 0.0 if val == 0.0 else float(val)
+    if isinstance(val, str):
+        return val
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        return {
+            "__mdm_type__": "bytes",
+            "sha256": hashlib.sha256(bytes(val)).hexdigest(),
+        }
+
+    active_seen = set() if _seen is None else _seen
+    obj_id = id(val)
+    if obj_id in active_seen:
+        raise SchemaContractViolationError("cyclic container detected in decision cache input")
+    next_seen = active_seen | {obj_id}
+
+    if isinstance(val, tuple):
+        return {
+            "__mdm_type__": "tuple",
+            "items": [
+                _canonicalize_cache_value(x, allow_pos_inf=allow_pos_inf, _seen=next_seen)
+                for x in val
+            ],
+        }
+    if isinstance(val, list):
+        return [
+            _canonicalize_cache_value(x, allow_pos_inf=allow_pos_inf, _seen=next_seen)
+            for x in val
+        ]
+    if isinstance(val, (set, frozenset)):
+        canon_items = [
+            _canonicalize_cache_value(x, allow_pos_inf=allow_pos_inf, _seen=next_seen)
+            for x in val
+        ]
+        sorted_items = sorted(
+            canon_items,
+            key=lambda x: json.dumps(
+                x, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ),
+        )
+        return {"__mdm_type__": "set", "items": sorted_items}
+    if isinstance(val, Mapping):
+        if all(type(k) is str for k in val.keys()) and "__mdm_type__" not in val:
+            return {
+                k: _canonicalize_cache_value(val[k], allow_pos_inf=allow_pos_inf, _seen=next_seen)
+                for k in sorted(val.keys())
+            }
+        entries = [
+            [
+                type(k).__qualname__,
+                _canonicalize_cache_value(k, allow_pos_inf=allow_pos_inf, _seen=next_seen),
+                _canonicalize_cache_value(v, allow_pos_inf=allow_pos_inf, _seen=next_seen),
+            ]
+            for k, v in val.items()
+        ]
+        entries.sort(
+            key=lambda item: json.dumps(
+                item[:2], sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            )
+        )
+        return {"__mdm_type__": "mapping", "entries": entries}
+    if dataclasses.is_dataclass(val) and not isinstance(val, type):
+        return {
+            "__mdm_type__": f"dataclass:{type(val).__qualname__}",
+            "fields": {
+                f.name: _canonicalize_cache_value(
+                    getattr(val, f.name), allow_pos_inf=allow_pos_inf, _seen=next_seen
+                )
+                for f in dataclasses.fields(val)
+            },
+        }
+    raise SchemaContractViolationError(
+        f"unsupported non-serializable type in decision cache input: {type(val).__qualname__}"
+    )
+
+
 def compute_decision_cache_key(
     backend_name: str,
     state: Any,
@@ -154,28 +290,73 @@ def compute_decision_cache_key(
     extra_config: Mapping[str, Any] | None = None,
 ) -> str:
     """Compute a deterministic SHA-256 content-addressed digest for a multimodal decision query."""
+    if not isinstance(backend_name, str) or not backend_name.strip():
+        raise SchemaContractViolationError("backend_name must be a non-empty string")
+    if not isinstance(questions, Mapping):
+        raise SchemaContractViolationError("questions must be a mapping of slot_id to DecisionQuestion")
+    if images is not None:
+        if isinstance(images, (str, bytes, bytearray)) or not isinstance(images, Sequence):
+            raise SchemaContractViolationError("images must be a sequence of string URIs or base64 payloads")
+        for img in images:
+            if not isinstance(img, str):
+                raise SchemaContractViolationError(
+                    f"image entry must be str, got {type(img).__qualname__}"
+                )
+    if extra_config is not None and not isinstance(extra_config, Mapping):
+        raise SchemaContractViolationError("extra_config must be a mapping when provided")
+
     img_digests = [hashlib.sha256(img.encode("utf-8")).hexdigest() for img in (images or ())]
-    q_canonical = {
-        qid: {
+    q_canonical: dict[str, Any] = {}
+    for raw_qid, q in questions.items():
+        if not isinstance(raw_qid, str) or not raw_qid:
+            raise SchemaContractViolationError(f"question slot_id must be a non-empty string, got {raw_qid!r}")
+        if not isinstance(q, DecisionQuestion):
+            raise SchemaContractViolationError(
+                f"question {raw_qid!r} must be a DecisionQuestion, got {type(q).__qualname__}"
+            )
+        if not isinstance(q.prior_logits, Mapping):
+            raise SchemaContractViolationError(f"question {raw_qid!r} prior_logits must be a mapping")
+        clean_q_priors: dict[str, float] = {}
+        for pk, pv in sorted(q.prior_logits.items(), key=lambda kv: str(kv[0])):
+            if not isinstance(pk, str):
+                raise SchemaContractViolationError(f"question {raw_qid!r} prior_logits keys must be strings")
+            if isinstance(pv, bool) or not isinstance(pv, (int, float)) or not math.isfinite(float(pv)):
+                raise SchemaContractViolationError(
+                    f"question {raw_qid!r} prior_logit for {pk!r} must be a finite number, got {pv!r}"
+                )
+            fv = round(float(pv), 9)
+            clean_q_priors[pk] = 0.0 if fv == 0.0 else fv
+
+        q_canonical[raw_qid] = {
             "type": q.type,
             "instructions": q.instructions,
-            "criteria": q.criteria,
-            "levels": q.levels,
+            "criteria": _canonicalize_cache_value(q.criteria),
+            "levels": _canonicalize_cache_value(q.levels),
             "order": q.option_keys(),
-            "prior_logits": {k: round(float(v), 9) for k, v in sorted(q.prior_logits.items())},
+            "prior_logits": clean_q_priors,
             "evidence_prompt": q.evidence_prompt,
-            "evidence_criteria": q.evidence_criteria,
+            "evidence_criteria": _canonicalize_cache_value(q.evidence_criteria),
         }
-        for qid, q in sorted(questions.items())
-    }
+
+    q_sorted = {qid: q_canonical[qid] for qid in sorted(q_canonical.keys())}
+    cfg_canonical: Any = {}
+    if extra_config is not None:
+        if all(type(k) is str for k in extra_config.keys()) and "__mdm_type__" not in extra_config:
+            cfg_canonical = {
+                k: _canonicalize_cache_value(extra_config[k], allow_pos_inf=(k == "conformal_q_hat"))
+                for k in sorted(extra_config.keys())
+            }
+        else:
+            cfg_canonical = _canonicalize_cache_value(extra_config, allow_pos_inf=False)
+
     envelope = {
         "backend": backend_name,
-        "state": state,
+        "state": _canonicalize_cache_value(state),
         "images_sha256": img_digests,
-        "questions": q_canonical,
-        "config": dict(sorted((extra_config or {}).items())),
+        "questions": q_sorted,
+        "config": cfg_canonical,
     }
-    raw_bytes = json.dumps(envelope, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    raw_bytes = json.dumps(envelope, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     return hashlib.sha256(raw_bytes).hexdigest()
 
 

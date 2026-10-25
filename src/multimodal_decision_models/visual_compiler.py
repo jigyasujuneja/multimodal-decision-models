@@ -36,6 +36,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from .contracts import SchemaContractViolationError
 from .shortlist import split_identifier_tokens
 
 try:
@@ -538,6 +539,21 @@ def mean_inner_crop_cie_lab(buf: ImageBuffer, crop_fraction: float = 0.80) -> tu
     return sum_l / n_px, sum_a / n_px, sum_b / n_px
 
 
+def _is_non_str_seq(val: Any) -> bool:
+    return isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray))
+
+
+def _require_finite_num(val: Any, label: str) -> float:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise SchemaContractViolationError(
+            f"{label} must be a finite int or float, got {type(val).__name__}"
+        )
+    out = float(val)
+    if not math.isfinite(out):
+        raise SchemaContractViolationError(f"{label} must be finite, got {val!r}")
+    return out
+
+
 def inner_crop_cie_lab_similarity(
     buf_a: ImageBuffer,
     buf_b: ImageBuffer,
@@ -545,12 +561,13 @@ def inner_crop_cie_lab_similarity(
     scale: float = 25.0,
 ) -> tuple[float, float]:
     """Compute `(exp(-delta_e / scale), delta_e)` between inner-80% CIE L*a*b* means of two buffers."""
-    if not math.isfinite(scale) or scale <= 0.0:
-        raise ValueError(f"scale must be finite and > 0, got {scale!r}")
+    f_scale = _require_finite_num(scale, "scale")
+    if f_scale <= 0.0:
+        raise SchemaContractViolationError(f"scale must be finite and > 0, got {scale!r}")
     la, aa, ba = mean_inner_crop_cie_lab(buf_a, crop_fraction=crop_fraction)
     lb, ab, bb = mean_inner_crop_cie_lab(buf_b, crop_fraction=crop_fraction)
-    delta_e = math.sqrt(((la - lb) ** 2) + ((aa - ab) ** 2) + ((ba - bb) ** 2))
-    return math.exp(-delta_e / scale), delta_e
+    delta_e = math.hypot(la - lb, aa - ab, ba - bb)
+    return math.exp(-delta_e / f_scale), delta_e
 
 
 def _gelu_exact(x: float) -> float:
@@ -564,46 +581,46 @@ def apply_residual_mlp_adapter(
     alpha: float = 0.35,
 ) -> list[float]:
     """Project embedding via `norm(q + alpha * W2 * GELU(W1 * q))` to separate sibling variants."""
-    if not query_vec:
-        raise ValueError("query_vec must be non-empty")
-    if not math.isfinite(alpha):
-        raise ValueError(f"alpha must be finite, got {alpha!r}")
+    if not _is_non_str_seq(query_vec) or not query_vec:
+        raise SchemaContractViolationError("query_vec must be a non-empty numeric sequence")
+    f_alpha = _require_finite_num(alpha, "alpha")
 
-    q = [float(v) for v in query_vec]
-    if any(not math.isfinite(v) for v in q):
-        raise ValueError("query_vec contains non-finite entries")
+    q = [_require_finite_num(v, "query_vec") for v in query_vec]
     dim = len(q)
 
-    if not w1 or any(len(row) != dim for row in w1):
-        raise ValueError(f"w1 must be a non-empty (H x {dim}) matrix")
+    if not _is_non_str_seq(w1) or not w1 or any(not _is_non_str_seq(row) or len(row) != dim for row in w1):
+        raise SchemaContractViolationError(f"w1 must be a non-empty (H x {dim}) numeric matrix")
     hidden_dim = len(w1)
-    if len(w2) != dim or any(len(row) != hidden_dim for row in w2):
-        raise ValueError(f"w2 must be a ({dim} x {hidden_dim}) matrix")
+    if not _is_non_str_seq(w2) or len(w2) != dim or any(not _is_non_str_seq(row) or len(row) != hidden_dim for row in w2):
+        raise SchemaContractViolationError(f"w2 must be a ({dim} x {hidden_dim}) numeric matrix")
 
-    hidden: list[float] = []
-    for row in w1:
-        acc = 0.0
-        for w_val, q_val in zip(row, q):
-            fw = float(w_val)
-            if not math.isfinite(fw):
-                raise ValueError("w1 contains non-finite weight")
-            acc += fw * q_val
-        hidden.append(_gelu_exact(acc))
+    w1_clean = [[_require_finite_num(w_val, "w1") for w_val in row] for row in w1]
+    w2_clean = [[_require_finite_num(w_val, "w2") for w_val in row2] for row2 in w2]
 
-    combined: list[float] = []
-    for i, row2 in enumerate(w2):
-        proj = 0.0
-        for w_val, h_val in zip(row2, hidden):
-            fw = float(w_val)
-            if not math.isfinite(fw):
-                raise ValueError("w2 contains non-finite weight")
-            proj += fw * h_val
-        combined.append(q[i] + alpha * proj)
+    if f_alpha == 0.0:
+        combined = list(q)
+    else:
+        hidden: list[float] = []
+        for row_f in w1_clean:
+            acc = sum(fw * q_val for fw, q_val in zip(row_f, q))
+            if not math.isfinite(acc):
+                raise SchemaContractViolationError("residual MLP w1 projection overflowed float64")
+            hidden.append(_gelu_exact(acc))
 
-    norm = math.sqrt(sum(v * v for v in combined))
-    if norm <= 1e-12:
+        combined = []
+        for i, row2_f in enumerate(w2_clean):
+            proj = sum(fw * h_val for fw, h_val in zip(row2_f, hidden))
+            val = q[i] + f_alpha * proj
+            if not math.isfinite(val):
+                raise SchemaContractViolationError("residual MLP combined vector overflowed float64")
+            combined.append(val)
+
+    max_abs = max(abs(v) for v in combined)
+    if max_abs <= 0.0:
         return [0.0] * dim
-    return [v / norm for v in combined]
+    scaled = [v / max_abs for v in combined]
+    unit_hypot = math.hypot(*scaled)
+    return [s / unit_hypot for s in scaled]
 
 
 def extract_inter_candidate_saliency_band(
