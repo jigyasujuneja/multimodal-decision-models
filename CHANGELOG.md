@@ -2,6 +2,14 @@
 
 All notable changes to `multimodal-decision-models` are documented in this file.
 
+## [0.5.0] - 2026-10-25
+
+### Added
+- **Non-Exchangeable, Mondrian, and Multi-Slot Joint Conformal Prediction (`conformal.py`, `pkg/mdm/conformal.go`)**: Class- and group-conditional Mondrian conformal quantiles (`calibrate_mondrian_conformal_quantiles`, `mondrian_conformal_prediction_set`), Tibshirani likelihood-ratio weighted conformal prediction under covariate shift (`weighted_conformal_prediction_set`), and simultaneous $S$-slot family-wise joint conformal calibration (`calibrate_multislot_joint_conformal`, `multislot_joint_conformal_sets`).
+- **Cyclic Permutation Debiasing (`PriDe`) and Learn-then-Test (`LTT`) Funnel Calibration (`calibration.py`, `eval_suite.py`)**: Cyclic option-shift positional bias decomposition (`debiased_cyclic_permutation_probs`), option-order permutation flip-rate and Jensen-Shannon stability metrics (`option_permutation_stability`), and finite-sample Hoeffding-Bentkus risk-controlling joint gate calibration (`calibrate_ltt_funnel_gates`).
+- **Submodular Redundancy-Penalized Context Pruning and Exact Transitive Polytope Projection (`context_pruner.py`, `consistency.py`)**: Facility-location word-shingle Jaccard redundancy discount (`redundancy_penalty_weight` in `prune_agent_context_blocks`) and exact branch-and-bound log-odds correlation clustering (`project_triangles_to_transitive_consistency`) eliminating 3-cycle equivalence contradictions.
+- **`MDM-Bench` 8-Track Practical Benchmark (`N = 400`) and "How I AI" Workflows Cookbook (`benchmarks/run_mdm_bench.py`, `examples/how_i_ai_workflows.py`, `docs/practical_use_cases.md`)**: Reproducible 400-item benchmark across 8 practical multimodal, agentic, coding, relational, judge, and safety tracks plus 8 runnable end-to-end recipes.
+
 ## [0.4.0] - 2026-10-25
 
 ### Added

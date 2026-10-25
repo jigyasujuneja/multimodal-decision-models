@@ -415,3 +415,130 @@ func TestDefaultConformalConfigRapsZeroBoundariesAndNineKeyAbstainUnion(t *testi
 		}
 	}
 }
+
+func TestMondrianWeightedAndMultiSlotJointConformal(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261026))
+	// 1. Mondrian class-conditional conformal guarantees rare-class coverage under 90/10 imbalance
+	calibProbs := make([]map[string]float64, 300)
+	calibLabels := make([]string, 300)
+	for i := 0; i < 300; i++ {
+		if i < 260 {
+			calibLabels[i] = "head_sku"
+			calibProbs[i] = map[string]float64{"head_sku": 0.90, "rare_sku": 0.10}
+		} else {
+			calibLabels[i] = "rare_sku"
+			// Model underpredicts rare_sku
+			calibProbs[i] = map[string]float64{"head_sku": 0.68, "rare_sku": 0.32}
+		}
+	}
+	mondRes, err := CalibrateMondrianConformalQuantiles(calibProbs, calibLabels, 0.10, nil, 10, DefaultConformalConfig())
+	if err != nil {
+		t.Fatalf("CalibrateMondrianConformalQuantiles failed: %v", err)
+	}
+	if mondRes.GroupQuantiles["rare_sku"] <= mondRes.GroupQuantiles["head_sku"] {
+		t.Fatalf("expected rare_sku quantile > head_sku quantile, got %+v", mondRes.GroupQuantiles)
+	}
+	// Label-conditional Mondrian includes rare_sku even when rare_sku has probability 0.35
+	csetMond, err := MondrianConformalPredictionSet(
+		map[string]float64{"head_sku": 0.65, "rare_sku": 0.35},
+		mondRes,
+		"",
+		DefaultConformalConfig(),
+	)
+	if err != nil {
+		t.Fatalf("MondrianConformalPredictionSet failed: %v", err)
+	}
+	hasRare := false
+	for _, k := range csetMond.PredictionSet {
+		if k == "rare_sku" {
+			hasRare = true
+		}
+	}
+	if !hasRare {
+		t.Fatalf("expected rare_sku in label-conditional Mondrian set, got %v", csetMond.PredictionSet)
+	}
+
+	// 2. Weighted conformal prediction under covariate shift
+	weights := make([]float64, 300)
+	for i := 0; i < 300; i++ {
+		if i < 260 {
+			weights[i] = 0.2
+		} else {
+			weights[i] = 4.5
+		}
+	}
+	wSet, err := WeightedConformalPredictionSet(
+		calibProbs,
+		calibLabels,
+		weights,
+		map[string]float64{"head_sku": 0.65, "rare_sku": 0.35},
+		2.0,
+		0.10,
+		DefaultConformalConfig(),
+	)
+	if err != nil {
+		t.Fatalf("WeightedConformalPredictionSet failed: %v", err)
+	}
+	if len(wSet.PredictionSet) != 2 {
+		t.Fatalf("expected weighted conformal under rare-shifted weights to cover both classes, got %v", wSet.PredictionSet)
+	}
+
+	// 3. Multi-slot joint conformal family-wise coverage across 4 simultaneous slots
+	slotNames := []string{"slot_1", "slot_2", "slot_3", "slot_4"}
+	nCal := 250
+	nTest := 400
+	drawMultiSlot := func() (map[string]map[string]float64, map[string]string) {
+		pMap := make(map[string]map[string]float64, 4)
+		lMap := make(map[string]string, 4)
+		for _, s := range slotNames {
+			u := rng.Float64()
+			if u < 0.78 {
+				lMap[s] = "A"
+			} else if u < 0.94 {
+				lMap[s] = "B"
+			} else {
+				lMap[s] = "C"
+			}
+			pMap[s] = map[string]float64{"A": 0.75, "B": 0.18, "C": 0.07}
+		}
+		return pMap, lMap
+	}
+	calSlots := make([]map[string]map[string]float64, nCal)
+	calGolds := make([]map[string]string, nCal)
+	for i := 0; i < nCal; i++ {
+		calSlots[i], calGolds[i] = drawMultiSlot()
+	}
+	jointCal, err := CalibrateMultiSlotJointConformal(calSlots, calGolds, 0.10, DefaultConformalConfig())
+	if err != nil {
+		t.Fatalf("CalibrateMultiSlotJointConformal failed: %v", err)
+	}
+	jointHits := 0
+	for i := 0; i < nTest; i++ {
+		tp, tg := drawMultiSlot()
+		sets, _, sErr := MultiSlotJointConformalSets(tp, jointCal, false, DefaultConformalConfig())
+		if sErr != nil {
+			t.Fatalf("MultiSlotJointConformalSets failed: %v", sErr)
+		}
+		allCovered := true
+		for _, s := range slotNames {
+			found := false
+			for _, k := range sets[s].PredictionSet {
+				if k == tg[s] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allCovered = false
+				break
+			}
+		}
+		if allCovered {
+			jointHits++
+		}
+	}
+	jointCov := float64(jointHits) / float64(nTest)
+	if jointCov < 0.86 {
+		t.Fatalf("expected simultaneous 4-slot joint coverage >= 0.86 at familyAlpha=0.10, got %.4f", jointCov)
+	}
+}

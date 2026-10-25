@@ -100,6 +100,25 @@ type ContextPruneResult struct {
 	ExpectedUtility     float64
 }
 
+// MondrianCalibrationResult stores group/class-conditional conformal quantiles and marginal fallback.
+type MondrianCalibrationResult struct {
+	Alpha          float64
+	GroupQuantiles map[string]float64
+	GroupCounts    map[string]int
+	FallbackQHat   float64
+	Method         string
+}
+
+// MultiSlotJointConformalResult stores simultaneous multi-slot joint conformal calibration quantiles.
+type MultiSlotJointConformalResult struct {
+	FamilyAlpha   float64
+	SlotNames     []string
+	GlobalMaxQHat float64
+	BonferroniQs  map[string]float64
+	Method        string
+	NCalibration  int
+}
+
 func storeSeededConformalRNG(seed int64, r *rand.Rand) {
 	conformalRNGMu.Lock()
 	defer conformalRNGMu.Unlock()
@@ -636,4 +655,328 @@ func PruneAgentContextBlocks(
 		TokenReductionRatio: reduction,
 		ExpectedUtility:     best.utility,
 	}, nil
+}
+
+// CalibrateMondrianConformalQuantiles computes class- or group-conditional conformal quantiles
+// qHat_g so each group g with >= minGroupSize samples achieves >= 1 - alpha conditional coverage.
+func CalibrateMondrianConformalQuantiles(
+	calibProbs []map[string]float64,
+	calibLabels []string,
+	alpha float64,
+	calibGroups []string,
+	minGroupSize int,
+	cfg ConformalConfig,
+) (MondrianCalibrationResult, error) {
+	if minGroupSize < 1 {
+		return MondrianCalibrationResult{}, fmt.Errorf("mdm: minGroupSize must be >= 1, got %d", minGroupSize)
+	}
+	fallbackQ, err := CalibrateConformalQuantile(calibProbs, calibLabels, alpha, cfg)
+	if err != nil {
+		return MondrianCalibrationResult{}, err
+	}
+	resolved, err := resolveConformalConfig(cfg)
+	if err != nil {
+		return MondrianCalibrationResult{}, err
+	}
+
+	groups := calibLabels
+	if len(calibGroups) > 0 {
+		if len(calibGroups) != len(calibLabels) {
+			return MondrianCalibrationResult{}, errors.New("mdm: calibGroups length must equal calibLabels length")
+		}
+		groups = calibGroups
+	}
+
+	byGrpProbs := make(map[string][]map[string]float64)
+	byGrpLabels := make(map[string][]string)
+	for i, g := range groups {
+		byGrpProbs[g] = append(byGrpProbs[g], calibProbs[i])
+		byGrpLabels[g] = append(byGrpLabels[g], calibLabels[i])
+	}
+
+	grpQuantiles := make(map[string]float64, len(byGrpProbs))
+	grpCounts := make(map[string]int, len(byGrpProbs))
+	for g, gProbs := range byGrpProbs {
+		cnt := len(gProbs)
+		grpCounts[g] = cnt
+		if cnt >= minGroupSize {
+			qg, gErr := CalibrateConformalQuantile(gProbs, byGrpLabels[g], alpha, resolved)
+			if gErr != nil {
+				return MondrianCalibrationResult{}, gErr
+			}
+			grpQuantiles[g] = qg
+		} else {
+			grpQuantiles[g] = fallbackQ
+		}
+	}
+
+	return MondrianCalibrationResult{
+		Alpha:          alpha,
+		GroupQuantiles: grpQuantiles,
+		GroupCounts:    grpCounts,
+		FallbackQHat:   fallbackQ,
+		Method:         resolved.Method,
+	}, nil
+}
+
+// MondrianConformalPredictionSet constructs a group- or class-conditional Mondrian prediction set.
+// When testGroup is non-empty, uses GroupQuantiles[testGroup]; when empty, evaluates each candidate
+// label y against its own class-conditional quantile GroupQuantiles[y] (Vovk 2005 label-conditional Mondrian).
+func MondrianConformalPredictionSet(
+	probs map[string]float64,
+	mondrian MondrianCalibrationResult,
+	testGroup string,
+	cfg ConformalConfig,
+) (ConformalSet, error) {
+	if strings.TrimSpace(testGroup) != "" {
+		qUse, ok := mondrian.GroupQuantiles[testGroup]
+		if !ok {
+			qUse = mondrian.FallbackQHat
+		}
+		return ConformalPredictionSet(probs, qUse, cfg)
+	}
+	resolved, err := resolveConformalConfig(cfg)
+	if err != nil {
+		return ConformalSet{}, err
+	}
+	ranked, norm, err := normalizeAndRankConformalProbs(probs)
+	if err != nil {
+		return ConformalSet{}, err
+	}
+	groups := partitionConformalTieGroups(ranked, norm)
+	var scores map[string]float64
+	if !resolved.Randomized {
+		scores = computeDeterministicConformalScores(groups, norm, resolved)
+	} else {
+		uVal, ordered := drawRandomizedOrderAndU(groups, resolved)
+		scores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
+	}
+
+	predSet := make([]string, 0, len(ranked))
+	maxQ := 0.0
+	for _, k := range ranked {
+		qk, ok := mondrian.GroupQuantiles[k]
+		if !ok {
+			qk = mondrian.FallbackQHat
+		}
+		if qk > maxQ {
+			maxQ = qk
+		}
+		if math.IsInf(qk, 1) || scores[k] <= qk+1e-12 {
+			predSet = append(predSet, k)
+		}
+	}
+
+	abstainLookup := make(map[string]bool, len(resolved.AbstainKeys))
+	for _, ak := range resolved.AbstainKeys {
+		trimmed := strings.ToLower(strings.TrimSpace(ak))
+		if trimmed != "" {
+			abstainLookup[trimmed] = true
+		}
+	}
+	containsAbstain := false
+	for _, k := range predSet {
+		if abstainLookup[strings.ToLower(strings.TrimSpace(k))] {
+			containsAbstain = true
+			break
+		}
+	}
+	singleton := len(predSet) == 1
+	return ConformalSet{
+		PredictionSet:   predSet,
+		QHat:            maxQ,
+		Singleton:       singleton,
+		ContainsAbstain: containsAbstain,
+		ShouldEscalate:  (!singleton) || containsAbstain,
+		Method:          resolved.Method,
+	}, nil
+}
+
+// WeightedConformalPredictionSet constructs a Tibshirani et al. (NeurIPS 2019) likelihood-ratio
+// weighted conformal prediction set under covariate or base-rate shift.
+func WeightedConformalPredictionSet(
+	calibProbs []map[string]float64,
+	calibLabels []string,
+	calibWeights []float64,
+	testProbs map[string]float64,
+	testWeight float64,
+	alpha float64,
+	cfg ConformalConfig,
+) (ConformalSet, error) {
+	if math.IsNaN(alpha) || math.IsInf(alpha, 0) || alpha <= 0 || alpha >= 1 {
+		return ConformalSet{}, fmt.Errorf("mdm: alpha must lie strictly in (0, 1), got %v", alpha)
+	}
+	n := len(calibLabels)
+	if n == 0 || len(calibProbs) != n || len(calibWeights) != n {
+		return ConformalSet{}, errors.New("mdm: calibProbs, calibLabels, and calibWeights must be non-empty slices of equal length")
+	}
+	if math.IsNaN(testWeight) || math.IsInf(testWeight, 0) || testWeight <= 0 {
+		return ConformalSet{}, fmt.Errorf("mdm: testWeight must be finite and > 0, got %v", testWeight)
+	}
+	resolved, err := resolveConformalConfig(cfg)
+	if err != nil {
+		return ConformalSet{}, err
+	}
+
+	type weightedPair struct {
+		score  float64
+		weight float64
+	}
+	pairs := make([]weightedPair, n)
+	sumW := testWeight
+	for i := 0; i < n; i++ {
+		wi := calibWeights[i]
+		if math.IsNaN(wi) || math.IsInf(wi, 0) || wi < 0 {
+			return ConformalSet{}, fmt.Errorf("mdm: calibWeights[%d] must be finite and >= 0, got %v", i, wi)
+		}
+		ranked, norm, nErr := normalizeAndRankConformalProbs(calibProbs[i])
+		if nErr != nil {
+			return ConformalSet{}, nErr
+		}
+		gold := calibLabels[i]
+		if _, ok := norm[gold]; !ok {
+			return ConformalSet{}, fmt.Errorf("mdm: calibration label %q at index %d missing from probabilities", gold, i)
+		}
+		groups := partitionConformalTieGroups(ranked, norm)
+		itemScores := computeDeterministicConformalScores(groups, norm, resolved)
+		pairs[i] = weightedPair{score: itemScores[gold], weight: wi}
+		sumW += wi
+	}
+
+	pTest := testWeight / sumW
+	if pTest > alpha+1e-12 {
+		return ConformalPredictionSet(testProbs, math.Inf(1), resolved)
+	}
+
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].score < pairs[j].score })
+	target := 1.0 - alpha
+	cum := 0.0
+	qWeighted := math.Inf(1)
+	for _, pr := range pairs {
+		cum += pr.weight / sumW
+		if cum >= target-1e-12 {
+			qWeighted = pr.score
+			break
+		}
+	}
+	return ConformalPredictionSet(testProbs, qWeighted, resolved)
+}
+
+// CalibrateMultiSlotJointConformal computes simultaneous family-wise conformal thresholds across S slots
+// so P(forall s in 1..S: Y_{n+1,s} in C_s(X_{n+1})) >= 1 - familyAlpha.
+func CalibrateMultiSlotJointConformal(
+	calibSlotProbs []map[string]map[string]float64,
+	calibSlotLabels []map[string]string,
+	familyAlpha float64,
+	cfg ConformalConfig,
+) (MultiSlotJointConformalResult, error) {
+	if math.IsNaN(familyAlpha) || math.IsInf(familyAlpha, 0) || familyAlpha <= 0 || familyAlpha >= 1 {
+		return MultiSlotJointConformalResult{}, fmt.Errorf("mdm: familyAlpha must lie in (0, 1), got %v", familyAlpha)
+	}
+	n := len(calibSlotLabels)
+	if n == 0 || len(calibSlotProbs) != n {
+		return MultiSlotJointConformalResult{}, errors.New("mdm: calibSlotProbs and calibSlotLabels must be non-empty slices of equal length")
+	}
+	resolved, err := resolveConformalConfig(cfg)
+	if err != nil {
+		return MultiSlotJointConformalResult{}, err
+	}
+
+	slotNames := make([]string, 0, len(calibSlotLabels[0]))
+	for s := range calibSlotLabels[0] {
+		slotNames = append(slotNames, s)
+	}
+	sort.Strings(slotNames)
+	if len(slotNames) == 0 {
+		return MultiSlotJointConformalResult{}, errors.New("mdm: calibration slot maps must contain at least one slot")
+	}
+
+	maxScores := make([]float64, n)
+	perSlotProbs := make(map[string][]map[string]float64, len(slotNames))
+	perSlotLabels := make(map[string][]string, len(slotNames))
+
+	for i := 0; i < n; i++ {
+		maxS := 0.0
+		for _, sName := range slotNames {
+			dist, okP := calibSlotProbs[i][sName]
+			gold, okL := calibSlotLabels[i][sName]
+			if !okP || !okL {
+				return MultiSlotJointConformalResult{}, fmt.Errorf("mdm: missing slot %q at item %d", sName, i)
+			}
+			ranked, norm, nErr := normalizeAndRankConformalProbs(dist)
+			if nErr != nil {
+				return MultiSlotJointConformalResult{}, nErr
+			}
+			if _, okG := norm[gold]; !okG {
+				return MultiSlotJointConformalResult{}, fmt.Errorf("mdm: gold label %q missing in slot %q item %d", gold, sName, i)
+			}
+			groups := partitionConformalTieGroups(ranked, norm)
+			sc := computeDeterministicConformalScores(groups, norm, resolved)[gold]
+			if sc > maxS {
+				maxS = sc
+			}
+			perSlotProbs[sName] = append(perSlotProbs[sName], dist)
+			perSlotLabels[sName] = append(perSlotLabels[sName], gold)
+		}
+		maxScores[i] = maxS
+	}
+
+	sort.Float64s(maxScores)
+	orderIdx := int(math.Ceil(float64(n+1)*(1.0-familyAlpha) - 1e-12))
+	globalMaxQ := math.Inf(1)
+	if orderIdx <= n {
+		if orderIdx < 1 {
+			orderIdx = 1
+		}
+		globalMaxQ = maxScores[orderIdx-1]
+	}
+
+	bonfAlpha := familyAlpha / float64(len(slotNames))
+	bonfQs := make(map[string]float64, len(slotNames))
+	for _, sName := range slotNames {
+		qs, bErr := CalibrateConformalQuantile(perSlotProbs[sName], perSlotLabels[sName], bonfAlpha, resolved)
+		if bErr != nil {
+			return MultiSlotJointConformalResult{}, bErr
+		}
+		bonfQs[sName] = qs
+	}
+
+	return MultiSlotJointConformalResult{
+		FamilyAlpha:   familyAlpha,
+		SlotNames:     slotNames,
+		GlobalMaxQHat: globalMaxQ,
+		BonferroniQs:  bonfQs,
+		Method:        resolved.Method,
+		NCalibration:  n,
+	}, nil
+}
+
+// MultiSlotJointConformalSets constructs simultaneous prediction sets across all calibrated slots.
+func MultiSlotJointConformalSets(
+	slotProbs map[string]map[string]float64,
+	jointCal MultiSlotJointConformalResult,
+	useBonferroni bool,
+	cfg ConformalConfig,
+) (map[string]ConformalSet, bool, error) {
+	out := make(map[string]ConformalSet, len(jointCal.SlotNames))
+	anyEscalate := false
+	for _, sName := range jointCal.SlotNames {
+		dist, ok := slotProbs[sName]
+		if !ok {
+			return nil, false, fmt.Errorf("mdm: missing slot %q in slotProbs", sName)
+		}
+		qUse := jointCal.GlobalMaxQHat
+		if useBonferroni {
+			qUse = jointCal.BonferroniQs[sName]
+		}
+		cset, err := ConformalPredictionSet(dist, qUse, cfg)
+		if err != nil {
+			return nil, false, err
+		}
+		if cset.ShouldEscalate {
+			anyEscalate = true
+		}
+		out[sName] = cset
+	}
+	return out, anyEscalate, nil
 }

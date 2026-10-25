@@ -174,7 +174,24 @@ Wrapping untrusted retrieval chunks via `sanitize_untrusted_context` (neutralizi
 
 When using 5-level Likert rubrics (`A..E` mapped to grades $g_k \in \{1.0, 0.75, 0.5, 0.25, 0.0\}$), argmax decoding collapses all items with the same modal token to identical ties. Computing continuous expected grade $\mathbb{E}[g \mid p] = \sum_{k=1}^5 p_k g_k$ resolves 5 discrete levels into 100 unique continuous scores across a 100-item pairwise tie-breaking benchmark, lifting pairwise ranking concordance from $0.540$ to $0.960$. Cross-validated threshold calibration on toxicity autorater cascades (`j4_vs_j1_toxicity_prompt`, $N = 76$) achieves statistical parity with the frontier verifier (exact McNemar $p = 0.1250 > 0.10$) while escalating only $3.95\%$ ($3/76$) of items.
 
-## 6. Six-Tier Verification and Reproducibility
+## 6. Addressing L8 Research Critiques: Non-Exchangeable & Multi-Slot Conformal, `PriDe`, Submodular MCKP, Polytope Projection, and `MDM-Bench`
+
+A principal research review of single-token and multi-slot decision models identifies six structural limitations in standard split-conformal and heuristic cascade pipelines. In `v0.5.0`, we formalize and resolve all six limitations and evaluate them on **`MDM-Bench`** (`benchmarks/run_mdm_bench.py`, $N = 400$ items across 8 practical multimodal, agentic, coding, relational, judge, and safety tracks):
+
+1. **Non-Exchangeable Covariate Shift & Rare-Class Under-Coverage (`calibrate_mondrian_conformal_quantiles`, `weighted_conformal_prediction_set`)**:
+   Marginal split conformal prediction guarantees $\mathbb{P}(Y \in \mathcal{C}_\alpha(X)) \ge 1 - \alpha$ only on average across the calibration distribution, allowing high coverage on frequent head classes (`97.81%`) to mask severe under-coverage on rare tail classes (`62.50%` at $\alpha = 0.10$ on `MDM-Bench`). Partitioning calibration quantiles by class or rarity group (`MondrianCalibrationResult`) restores rare-tail coverage to `92.50%` (overall `95.25%`, mean set size `1.242`), while Tibshirani et al. (2019) likelihood-ratio weighted conformal prediction (`weighted_conformal_prediction_set`) restores rare-tail coverage under covariate shift to `90.00%`.
+2. **Simultaneous Multi-Slot Family-Wise Error Rate Control (`calibrate_multislot_joint_conformal`, `multislot_joint_conformal_sets`)**:
+   When a `/v1/systemone` or structured verifier pass scores $S = 4$ slots simultaneously, independent per-slot conformal calibration at $\alpha = 0.10$ compounds miscoverage across slots, dropping simultaneous 4-slot coverage to `66.25%`. Calibrating the joint max-score nonconformity statistic $M_i = \max_{s \in \{1..S\}} s(X_{i,s}, Y_{i,s})$ at order index $\lceil(n+1)(1-\alpha_{\text{family}})\rceil$ restores simultaneous 4-slot coverage to `90.50%` (`90.75%` under Bonferroni $\alpha / S$).
+3. **Cyclic Option-Permutation Debiasing (`debiased_cyclic_permutation_probs`, `option_permutation_stability`)**:
+   Single-token `[A-Z]` readouts exhibit positional bias toward early option letters (`[A]` mean prior `0.54` under shift), causing a `16.25%` top-1 decision flip rate when option order is shifted. Factoring out positional priors across cyclic option shifts (`PriDe`, Zheng et al., 2024) cuts option-order flip rate to `6.00%` (mean Jensen-Shannon divergence from `0.0362` bits to `0.0037` bits), lifts accuracy from `81.00%` to `92.00%`, and reduces multiclass Brier from `0.2834` to `0.1868`.
+4. **Learn-then-Test (`LTT`) Joint Funnel Gate Calibration (`calibrate_ltt_funnel_gates`)**:
+   Replacing heuristic cascade thresholds with Angelopoulos et al. (2021) Learn-then-Test Hoeffding-Bentkus upper confidence bounds over $\lambda = (\tau_H, w, T)$ guarantees finite-sample selective risk $\text{UCB}(\hat{\lambda}) = 0.1284 \le r_{\max} = 0.14$ at $\delta = 0.05$ (`0.0300` held-out selective risk) while fast-exiting `67.8%` of traffic at `14.7 ms` p50 latency. Across `MDM-Bench` ($N = 400$), the `LTT + RAPS Cascade (DecisionGemma-2B -> Gemini-3.8-Flash)` reaches `90.00%` accuracy and `0.1469` Brier score (`0.0309` ECE), outperforming every standalone model while cutting p50 latency by $6.4\times$ vs standalone `Gemini-3.8-Flash`.
+5. **Submodular Facility-Location Redundancy-Penalized Context Pruning (`prune_agent_context_blocks(..., redundancy_penalty_weight=0.70)`)**:
+   Discounting candidate block utilities by pairwise word-shingle Jaccard overlap against already-retained trajectory blocks prevents duplicate stack traces from crowding out orthogonal git-blame and config evidence, raising multi-facet root-cause recall on Track 5 (`coding_context_compaction`) from `66.7%` (additive MCKP) to `100.0%` at `43.4%` token reduction.
+6. **Exact Transitive Equivalence Polytope Projection (`project_triangles_to_transitive_consistency`)**:
+   Projecting noisy pairwise equivalence probabilities onto the transitive partition polytope $E_{uv} + E_{vw} - E_{uw} \le 1$ via exact branch-and-bound log-odds correlation clustering eliminates all `50 -> 0` violated 3-cycles across 50 entity-resolution graphs and lifts pairwise accuracy from `71.43%` to `100.00%`.
+
+## 7. Six-Tier Verification and Reproducibility
 
 Every module in `multimodal-decision-models` is verified across six testing tiers:
 - **Tier 0 (Static AST and Hygiene Gates)**: 100% parameter and return type annotations verified via Python `ast` parsing (`tests/test_tier0_to_tier5_production_gates.py`), zero external runtime dependencies, and `gofmt`/`go vet` checks.
@@ -197,6 +214,10 @@ go test -fuzz=FuzzNormalizeCosinePriorAndFusion -fuzztime=2s ./pkg/mdm
 
 # Reproduce the 10-model calibration and conformal benchmark report
 PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
+
+# Reproduce the 400-item 8-track MDM-Bench report and 8 practical workflow recipes
+PYTHONPATH=src python3 benchmarks/run_mdm_bench.py
+PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 ```
 
 ## References
@@ -209,3 +230,7 @@ PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
 6. Murphy, A. H. (1973). A New Vector Partition of the Probability Score. *Journal of Applied Meteorology*, 12(4), 595-600.
 7. Finlayson, G. D., and Trezzi, E. (2004). Shades of Gray and Colour Constancy. *IS&T/SID Twelfth Color Imaging Conference*, 37-41.
 8. Kellerer, H., Pferschy, U., and Pisinger, D. (2004). *Knapsack Problems* (Chapter 11: The Multiple-Choice Knapsack Problem). Springer.
+9. Tibshirani, R. J., Foygel Barber, R., Candes, E. J., and Ramdas, A. (2019). Conformal Prediction Under Covariate Shift. *Advances in Neural Information Processing Systems (NeurIPS)*, 32.
+10. Angelopoulos, A. N., Bates, S., Candes, E. J., Jordan, M. I., and Lei, L. (2021). Learn then Test: Calibrating Predictive Algorithms to Achieve Risk Control. *arXiv:2110.01052*.
+11. Zheng, C., Zhou, H., Meng, F., Zhou, J., and Huang, M. (2024). Large Language Models Are Not Robust Multiple Choice Selectors. *International Conference on Learning Representations (ICLR)*.
+12. Bansal, N., Blum, A., and Chawla, S. (2004). Correlation Clustering. *Machine Learning*, 56, 89-113.

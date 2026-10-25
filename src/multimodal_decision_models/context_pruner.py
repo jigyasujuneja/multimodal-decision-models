@@ -22,12 +22,14 @@ system or instruction blocks (minimum action = "stub").
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 from .types import MAX_SLOTS_PER_PASS, DecisionQuestion
 
 _PRUNE_ACTIONS: tuple[str, str, str] = ("full", "stub", "drop")
+_RE_WORD_SHINGLE = re.compile(r"[a-z0-9_]{2,}", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -100,20 +102,59 @@ def _pareto_prune_states(
     return [buckets[k] for k in sorted(buckets.keys())]
 
 
+def _block_shingle_set(blk: ContextBlock) -> frozenset[str]:
+    text = (blk.full_text or blk.stub_text or blk.id).lower()
+    tokens = _RE_WORD_SHINGLE.findall(text)
+    if not tokens:
+        return frozenset()
+    shingles = set(tokens)
+    for i in range(len(tokens) - 1):
+        shingles.add(f"{tokens[i]}_{tokens[i + 1]}")
+    return frozenset(shingles)
+
+
+def _jaccard_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter == 0:
+        return 0.0
+    union = len(a | b)
+    return float(inter) / float(union)
+
+
 def prune_agent_context_blocks(
     blocks: Sequence[ContextBlock],
     slot_probabilities: Mapping[str, Mapping[str, float]],
     token_budget: int,
+    *,
+    redundancy_penalty_weight: float = 0.0,
 ) -> ContextPruneResult:
-    """Select exact utility-maximizing {"full", "stub", "drop"} actions under `token_budget`.
+    """Select utility-maximizing {"full", "stub", "drop"} actions under `token_budget`.
 
     Action utilities given normalized (p_full, p_stub, p_drop):
       - u("full") = 1.0 * p_full + 0.5 * p_stub, cost = full_tokens
       - u("stub") = 0.6 * p_full + 1.0 * p_stub, cost = stub_tokens
       - u("drop") = 0.0, cost = 0 (disallowed when block.pinned is True)
+
+    When `redundancy_penalty_weight > 0.0`, applies a submodular facility-location redundancy
+    discount `1.0 - redundancy_penalty_weight * max_{j in retained} Jaccard(shingles_i, shingles_j)`
+    so near-duplicate logs or stack traces do not crowd out orthogonal trajectory evidence.
+    When `redundancy_penalty_weight == 0.0` (default), solves the exact additive MCKP DP.
     """
     if token_budget < 0:
         raise ValueError(f"token_budget must be >= 0, got {token_budget}")
+    if (
+        isinstance(redundancy_penalty_weight, bool)
+        or not isinstance(redundancy_penalty_weight, (int, float))
+        or not math.isfinite(float(redundancy_penalty_weight))
+        or float(redundancy_penalty_weight) < 0.0
+        or float(redundancy_penalty_weight) > 1.0
+    ):
+        raise ValueError(
+            f"redundancy_penalty_weight must lie in [0.0, 1.0], got {redundancy_penalty_weight!r}"
+        )
+    red_weight = float(redundancy_penalty_weight)
     if not blocks:
         return ContextPruneResult(
             decisions={},
@@ -147,9 +188,21 @@ def prune_agent_context_blocks(
             f"token_budget ({token_budget}) is below minimum pinned stub token sum ({min_pinned_tokens})"
         )
 
+    n_blocks = len(blocks)
+    shingles = [_block_shingle_set(b) for b in blocks] if red_weight > 0.0 else []
+    sim_matrix: list[list[float]] = []
+    if red_weight > 0.0:
+        sim_matrix = [
+            [
+                _jaccard_similarity(shingles[i], shingles[j]) if i != j else 1.0
+                for j in range(n_blocks)
+            ]
+            for i in range(n_blocks)
+        ]
+
     frontier: list[tuple[int, float, tuple[str, ...]]] = [(0, 0.0, ())]
 
-    for blk in blocks:
+    for blk_idx, blk in enumerate(blocks):
         p_full, p_stub, _ = _normalize_prune_probs(blk.id, slot_probabilities[blk.id])
         u_full = 1.0 * p_full + 0.5 * p_stub
         u_stub = 0.6 * p_full + 1.0 * p_stub
@@ -163,10 +216,19 @@ def prune_agent_context_blocks(
 
         expanded: list[tuple[int, float, tuple[str, ...]]] = []
         for cur_tok, cur_u, cur_choices in frontier:
+            max_sim = 0.0
+            if red_weight > 0.0 and cur_choices:
+                for prev_idx, prev_act in enumerate(cur_choices):
+                    if prev_act == "full":
+                        max_sim = max(max_sim, sim_matrix[blk_idx][prev_idx])
+                    elif prev_act == "stub":
+                        max_sim = max(max_sim, 0.5 * sim_matrix[blk_idx][prev_idx])
+            discount = max(0.0, 1.0 - red_weight * max_sim)
             for act_name, act_cost, act_u in options:
                 next_tok = cur_tok + act_cost
                 if next_tok <= token_budget:
-                    expanded.append((next_tok, cur_u + act_u, cur_choices + (act_name,)))
+                    eff_u = (act_u * discount) if act_name != "drop" else 0.0
+                    expanded.append((next_tok, cur_u + eff_u, cur_choices + (act_name,)))
 
         if not expanded:
             raise ValueError(f"no feasible pruning assignment found within token_budget={token_budget}")

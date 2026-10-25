@@ -358,3 +358,330 @@ def conformal_prediction_set(
         should_escalate=should_escalate,
         method=clean_method,
     )
+
+
+@dataclass(frozen=True)
+class MondrianCalibrationResult:
+    """Class-conditional or group-conditional (Mondrian) conformal quantile map."""
+
+    group_q_hats: dict[str, float]
+    group_counts: dict[str, int]
+    global_q_hat: float
+    alpha: float
+    method: str
+    class_conditional: bool = True
+    lam_reg: float = 0.01
+    k_reg: int = 1
+
+
+@dataclass(frozen=True)
+class MultiSlotJointConformalResult:
+    """Simultaneous multi-slot family-wise conformal calibration across S coupled slots."""
+
+    joint_max_q_hat: float
+    bonferroni_slot_q_hats: dict[str, float]
+    slot_names: tuple[str, ...]
+    alpha: float
+    n_calib: int
+    empirical_joint_coverage: float
+    method: str = "raps"
+    lam_reg: float = 0.01
+    k_reg: int = 1
+
+
+def calibrate_mondrian_conformal_quantiles(
+    calib_probs: Sequence[Mapping[str, float]],
+    calib_labels: Sequence[str],
+    calib_groups: Sequence[str] | None = None,
+    alpha: float = 0.10,
+    *,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+) -> MondrianCalibrationResult:
+    """Calibrate per-class (when calib_groups is None) or per-group Mondrian conformal quantiles.
+
+    Guarantees group-conditional or class-conditional coverage P(Y in C_alpha(X) | G = g) >= 1 - alpha
+    via order index ceil((n_g + 1) * (1 - alpha)) within each stratum g, falling back to global_q_hat
+    for unseen strata.
+    """
+    global_cal = calibrate_conformal_quantile(
+        calib_probs=calib_probs,
+        calib_labels=calib_labels,
+        alpha=alpha,
+        method=method,
+        lam_reg=lam_reg,
+        k_reg=k_reg,
+        randomized=False,
+    )
+    if calib_groups is not None and len(calib_groups) != len(calib_labels):
+        raise ValueError("calib_groups must have the same length as calib_labels")
+
+    class_cond = calib_groups is None
+    grouped_probs: dict[str, list[Mapping[str, float]]] = {}
+    grouped_labels: dict[str, list[str]] = {}
+
+    for idx, (dist, lbl_raw) in enumerate(zip(calib_probs, calib_labels)):
+        lbl = str(lbl_raw)
+        grp = lbl if calib_groups is None else str(calib_groups[idx])
+        grouped_probs.setdefault(grp, []).append(dist)
+        grouped_labels.setdefault(grp, []).append(lbl)
+
+    group_q_hats: dict[str, float] = {}
+    group_counts: dict[str, int] = {}
+    for grp in sorted(grouped_probs.keys()):
+        sub_cal = calibrate_conformal_quantile(
+            calib_probs=grouped_probs[grp],
+            calib_labels=grouped_labels[grp],
+            alpha=alpha,
+            method=global_cal.method,
+            lam_reg=lam_reg,
+            k_reg=k_reg,
+            randomized=False,
+        )
+        group_q_hats[grp] = sub_cal.q_hat
+        group_counts[grp] = sub_cal.n_calib
+
+    return MondrianCalibrationResult(
+        group_q_hats=group_q_hats,
+        group_counts=group_counts,
+        global_q_hat=global_cal.q_hat,
+        alpha=alpha,
+        method=global_cal.method,
+        class_conditional=class_cond,
+        lam_reg=lam_reg,
+        k_reg=k_reg,
+    )
+
+
+def mondrian_conformal_prediction_set(
+    probs: Mapping[str, float],
+    mondrian_cal: MondrianCalibrationResult,
+    *,
+    group: str | None = None,
+    abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+) -> ConformalSetResult:
+    """Construct a Mondrian prediction set using per-class thresholds (when group is None) or a stratum threshold."""
+    clean_method = _validate_conformal_hyperparams(
+        mondrian_cal.method, mondrian_cal.lam_reg, mondrian_cal.k_reg
+    )
+    ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
+    scores = _compute_all_nonconformity_scores(
+        ranked_keys,
+        norm_probs,
+        clean_method,
+        mondrian_cal.lam_reg,
+        mondrian_cal.k_reg,
+        randomized=False,
+    )
+
+    if group is not None:
+        q_use = mondrian_cal.group_q_hats.get(str(group), mondrian_cal.global_q_hat)
+        return conformal_prediction_set(
+            probs=probs,
+            q_hat=q_use,
+            method=clean_method,
+            lam_reg=mondrian_cal.lam_reg,
+            k_reg=mondrian_cal.k_reg,
+            randomized=False,
+            abstain_keys=abstain_keys,
+        )
+
+    pred_set: list[str] = []
+    max_q_used = 0.0
+    for k in ranked_keys:
+        q_k = mondrian_cal.group_q_hats.get(k, mondrian_cal.global_q_hat)
+        max_q_used = max(max_q_used, q_k)
+        if math.isinf(q_k) or scores[k] <= q_k + 1e-12:
+            pred_set.append(k)
+
+    effective_abstain = DEFAULT_CONFORMAL_ABSTAIN_KEYS if abstain_keys is None else abstain_keys
+    abstain_lookup = {str(k).strip().lower() for k in effective_abstain if str(k).strip()}
+    singleton = len(pred_set) == 1
+    contains_abstain = any(str(k).strip().lower() in abstain_lookup for k in pred_set)
+    should_escalate = (not singleton) or contains_abstain
+    return ConformalSetResult(
+        prediction_set=pred_set,
+        q_hat=max_q_used,
+        singleton=singleton,
+        contains_abstain=contains_abstain,
+        should_escalate=should_escalate,
+        method=clean_method,
+    )
+
+
+def weighted_conformal_prediction_set(
+    calib_probs: Sequence[Mapping[str, float]],
+    calib_labels: Sequence[str],
+    calib_weights: Sequence[float],
+    test_probs: Mapping[str, float],
+    test_weight: float = 1.0,
+    alpha: float = 0.10,
+    *,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+    abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+) -> ConformalSetResult:
+    """Construct a likelihood-ratio weighted split conformal prediction set (Tibshirani et al., 2019).
+
+    Guarantees valid coverage under covariate shift where w(x) = dP_test(x) / dP_calib(x) > 0.
+    """
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or float(alpha) <= 0.0 or float(alpha) >= 1.0:
+        raise ValueError(f"alpha must be finite and strictly in (0, 1), got {alpha!r}")
+    if not calib_probs or len(calib_probs) != len(calib_labels) or len(calib_probs) != len(calib_weights):
+        raise ValueError("calib_probs, calib_labels, and calib_weights must be non-empty sequences of equal length")
+    if isinstance(test_weight, bool) or not isinstance(test_weight, (int, float)) or not math.isfinite(float(test_weight)) or float(test_weight) <= 0.0:
+        raise ValueError(f"test_weight must be finite and > 0, got {test_weight!r}")
+    clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+
+    pairs: list[tuple[float, float]] = []
+    w_sum = float(test_weight)
+    for idx, (dist, gold_raw, w_raw) in enumerate(zip(calib_probs, calib_labels, calib_weights)):
+        if isinstance(w_raw, bool) or not isinstance(w_raw, (int, float)) or not math.isfinite(float(w_raw)) or float(w_raw) <= 0.0:
+            raise ValueError(f"calib_weights[{idx}] must be finite and > 0, got {w_raw!r}")
+        w_val = float(w_raw)
+        gold = str(gold_raw)
+        ranked_keys, norm_probs, _ = _normalize_and_rank_probs(dist)
+        if gold not in norm_probs:
+            raise ValueError(f"calibration label {gold!r} at index {idx} not present in option probabilities")
+        item_scores = _compute_all_nonconformity_scores(
+            ranked_keys, norm_probs, clean_method, lam_reg, k_reg, randomized=False
+        )
+        pairs.append((item_scores[gold], w_val))
+        w_sum += w_val
+
+    pairs.sort(key=lambda item: item[0])
+    target_mass = 1.0 - float(alpha)
+    cum_mass = 0.0
+    q_hat_w = float("inf")
+    for score_i, w_i in pairs:
+        cum_mass += w_i / w_sum
+        if cum_mass >= target_mass - 1e-12:
+            q_hat_w = score_i
+            break
+
+    return conformal_prediction_set(
+        probs=test_probs,
+        q_hat=q_hat_w,
+        method=clean_method,
+        lam_reg=lam_reg,
+        k_reg=k_reg,
+        randomized=False,
+        abstain_keys=abstain_keys,
+    )
+
+
+def calibrate_multislot_joint_conformal(
+    calib_slot_probs: Sequence[Mapping[str, Mapping[str, float]]],
+    calib_slot_labels: Sequence[Mapping[str, str]],
+    alpha: float = 0.10,
+    *,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+) -> MultiSlotJointConformalResult:
+    """Calibrate simultaneous family-wise conformal prediction across S coupled decision slots.
+
+    Computes both the exact max-score quantile M_i = max_{s in S} s(X_{i,s}, Y_{i,s}) at order
+    index ceil((n + 1) * (1 - alpha)) and Bonferroni per-slot quantiles at level alpha / S.
+    Guarantees P(forall s in S: Y_{n+1,s} in C_alpha^{(s)}(X_{n+1})) >= 1 - alpha.
+    """
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or float(alpha) <= 0.0 or float(alpha) >= 1.0:
+        raise ValueError(f"alpha must be finite and strictly in (0, 1), got {alpha!r}")
+    if not calib_slot_probs or len(calib_slot_probs) != len(calib_slot_labels):
+        raise ValueError("calib_slot_probs and calib_slot_labels must be non-empty sequences of equal length")
+    clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+
+    first_slots = sorted(str(k) for k in calib_slot_probs[0].keys())
+    if not first_slots:
+        raise ValueError("calib_slot_probs items must contain at least one slot")
+    slot_tuple = tuple(first_slots)
+    s_count = len(slot_tuple)
+
+    max_scores: list[float] = []
+    per_slot_probs: dict[str, list[Mapping[str, float]]] = {s: [] for s in slot_tuple}
+    per_slot_labels: dict[str, list[str]] = {s: [] for s in slot_tuple}
+
+    for idx, (slot_dist_map, slot_lbl_map) in enumerate(zip(calib_slot_probs, calib_slot_labels)):
+        row_max = 0.0
+        for s_name in slot_tuple:
+            if s_name not in slot_dist_map or s_name not in slot_lbl_map:
+                raise ValueError(f"missing slot {s_name!r} at calibration index {idx}")
+            dist = slot_dist_map[s_name]
+            gold = str(slot_lbl_map[s_name])
+            ranked_keys, norm_probs, _ = _normalize_and_rank_probs(dist)
+            if gold not in norm_probs:
+                raise ValueError(f"label {gold!r} missing from slot {s_name!r} at index {idx}")
+            s_scores = _compute_all_nonconformity_scores(
+                ranked_keys, norm_probs, clean_method, lam_reg, k_reg, randomized=False
+            )
+            row_max = max(row_max, s_scores[gold])
+            per_slot_probs[s_name].append(dist)
+            per_slot_labels[s_name].append(gold)
+        max_scores.append(row_max)
+
+    n = len(max_scores)
+    sorted_max = sorted(max_scores)
+    order_idx = int(math.ceil(float(n + 1) * (1.0 - alpha) - 1e-12))
+    if order_idx > n:
+        joint_q = float("inf")
+        emp_joint = 1.0
+    else:
+        joint_q = sorted_max[max(0, order_idx - 1)]
+        emp_joint = float(sum(1 for ms in max_scores if ms <= joint_q + 1e-12)) / float(n)
+
+    bonf_alpha = float(alpha) / float(s_count)
+    bonf_q_hats: dict[str, float] = {}
+    for s_name in slot_tuple:
+        s_cal = calibrate_conformal_quantile(
+            calib_probs=per_slot_probs[s_name],
+            calib_labels=per_slot_labels[s_name],
+            alpha=bonf_alpha,
+            method=clean_method,
+            lam_reg=lam_reg,
+            k_reg=k_reg,
+            randomized=False,
+        )
+        bonf_q_hats[s_name] = s_cal.q_hat
+
+    return MultiSlotJointConformalResult(
+        joint_max_q_hat=joint_q,
+        bonferroni_slot_q_hats=bonf_q_hats,
+        slot_names=slot_tuple,
+        alpha=alpha,
+        n_calib=n,
+        empirical_joint_coverage=emp_joint,
+        method=clean_method,
+        lam_reg=lam_reg,
+        k_reg=k_reg,
+    )
+
+
+def multislot_joint_conformal_sets(
+    slot_probs: Mapping[str, Mapping[str, float]],
+    joint_cal: MultiSlotJointConformalResult,
+    *,
+    use_bonferroni: bool = False,
+    abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+) -> dict[str, ConformalSetResult]:
+    """Construct simultaneous family-wise conformal prediction sets across all S slots."""
+    out: dict[str, ConformalSetResult] = {}
+    for s_name in joint_cal.slot_names:
+        if s_name not in slot_probs:
+            raise ValueError(f"missing slot {s_name!r} in slot_probs")
+        q_s = (
+            joint_cal.bonferroni_slot_q_hats[s_name]
+            if use_bonferroni
+            else joint_cal.joint_max_q_hat
+        )
+        out[s_name] = conformal_prediction_set(
+            probs=slot_probs[s_name],
+            q_hat=q_s,
+            method=joint_cal.method,
+            lam_reg=joint_cal.lam_reg,
+            k_reg=joint_cal.k_reg,
+            randomized=False,
+            abstain_keys=abstain_keys,
+        )
+    return out

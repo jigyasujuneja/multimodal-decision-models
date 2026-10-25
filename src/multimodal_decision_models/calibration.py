@@ -734,3 +734,252 @@ def fit_vector_scaling(
         temperature_init=t0,
         l2_reg=l2_reg,
     )
+
+
+@dataclass(frozen=True)
+class LTTGateConfig:
+    """Candidate joint funnel gate configuration lambda = (hesitation_threshold, prior_weight, temperature)."""
+
+    hesitation_threshold: float
+    prior_weight: float
+    temperature: float
+
+
+@dataclass(frozen=True)
+class LTTFunnelCalibrationResult:
+    """Learn-then-Test (LTT, Angelopoulos et al. 2021) finite-sample risk-controlling funnel calibration."""
+
+    selected_config: LTTGateConfig
+    empirical_risk: float
+    ucb_risk: float
+    target_risk_bound: float
+    delta: float
+    non_escalated_coverage: float
+    brier_score: float
+    num_grid_candidates: int
+    num_valid_candidates: int
+    satisfied_bound: bool
+
+
+def debiased_cyclic_permutation_probs(
+    cyclic_probs: Sequence[Mapping[str, float]],
+    option_order: Sequence[str] | None = None,
+) -> tuple[dict[str, float], dict[int, float]]:
+    """Estimate and remove positional token bias via cyclic option permutations (PriDe, Zheng et al. ICLR 2024).
+
+    Given M >= 1 probability dicts evaluated under cyclic left-shifts of `option_order` (where shift m
+    places option `option_order[(j + m) % K]` at slot position `j`), decomposes raw probabilities into
+    an estimated positional prior `b_j` for each slot index `j in 0..K-1` and a position-debiased
+    posterior distribution over the semantic option keys.
+
+    Returns:
+      (debiased_option_probs, estimated_position_prior_by_slot_index)
+    """
+    if not cyclic_probs:
+        raise ValueError("cyclic_probs must be a non-empty sequence of probability mappings")
+
+    first = cyclic_probs[0]
+    if not first:
+        raise ValueError("cyclic_probs[0] must be non-empty")
+
+    keys = list(option_order) if option_order is not None else list(first.keys())
+    k_len = len(keys)
+    if k_len == 0:
+        raise ValueError("option_order must contain at least one option key")
+    if len(set(keys)) != k_len:
+        raise ValueError("option_order must not contain duplicate option keys")
+
+    eps = 1e-12
+    norm_shifts: list[dict[str, float]] = []
+    for s_idx, raw_map in enumerate(cyclic_probs):
+        tot = 0.0
+        clean: dict[str, float] = {}
+        for k in keys:
+            if k not in raw_map:
+                raise ValueError(f"option {k!r} missing from cyclic_probs[{s_idx}]")
+            fv = float(raw_map[k])
+            if not math.isfinite(fv) or fv < 0.0:
+                raise ValueError(f"invalid probability for {k!r} at shift {s_idx}: {raw_map[k]!r}")
+            clean[k] = fv
+            tot += fv
+        if tot <= 0.0:
+            raise ValueError(f"cyclic_probs[{s_idx}] sums to zero")
+        norm_shifts.append({k: max(eps, v / tot) for k, v in clean.items()})
+
+    m_shifts = len(norm_shifts)
+    # Estimate semantic log-affinity per option across shifts to isolate positional bias
+    mean_log_opt: dict[str, float] = {}
+    for k in keys:
+        mean_log_opt[k] = sum(math.log(shift_p[k]) for shift_p in norm_shifts) / float(m_shifts)
+
+    # Under cyclic shift m, option keys[(j + m) % K] occupies slot position j.
+    # Residual log(P^{(m)}(opt)) - mean_log_opt[opt] estimates log positional bias at position j.
+    pos_log_sums = [0.0] * k_len
+    pos_counts = [0] * k_len
+    for m_idx, shift_p in enumerate(norm_shifts):
+        for j_pos in range(k_len):
+            opt_at_j = keys[(j_pos + m_idx) % k_len]
+            pos_log_sums[j_pos] += math.log(shift_p[opt_at_j]) - mean_log_opt[opt_at_j]
+            pos_counts[j_pos] += 1
+
+    raw_pos_log = [
+        (pos_log_sums[j] / float(pos_counts[j])) if pos_counts[j] > 0 else 0.0
+        for j in range(k_len)
+    ]
+    max_pl = max(raw_pos_log)
+    pos_exps = [math.exp(v - max_pl) for v in raw_pos_log]
+    pos_denom = sum(pos_exps)
+    pos_prior: dict[int, float] = {j: pos_exps[j] / pos_denom for j in range(k_len)}
+
+    # Debias each shift m by dividing out the positional prior of the slot occupied by each option k
+    key_to_base_idx = {k: idx for idx, k in enumerate(keys)}
+    debiased_log_sums: dict[str, float] = {k: 0.0 for k in keys}
+    for m_idx, shift_p in enumerate(norm_shifts):
+        for k in keys:
+            base_idx = key_to_base_idx[k]
+            j_pos = (base_idx - m_idx) % k_len
+            debiased_log_sums[k] += math.log(shift_p[k]) - math.log(max(eps, pos_prior[j_pos]))
+
+    avg_debiased_log = {k: v / float(m_shifts) for k, v in debiased_log_sums.items()}
+    return _softmax_dict(avg_debiased_log), pos_prior
+
+
+def calibrate_ltt_funnel_gates(
+    calib_raw_probs: Sequence[Mapping[str, float]],
+    calib_prior_logits: Sequence[Mapping[str, float]],
+    calib_labels: Sequence[str],
+    *,
+    target_risk_bound: float = 0.15,
+    delta: float = 0.05,
+    hesitation_grid: Sequence[float] = (0.15, 0.22, 0.30, 0.36, 0.45, 0.55),
+    prior_weight_grid: Sequence[float] = (0.0, 0.25, 0.50, 0.75, 1.0),
+    temperature_grid: Sequence[float] = (0.75, 1.0, 1.25),
+    gate_mode: str = "confident",
+) -> LTTFunnelCalibrationResult:
+    """Calibrate funnel thresholds (tau_H, prior_weight, temperature) via Learn-then-Test (LTT).
+
+    Controls finite-sample selective risk (fraction of items that are NOT escalated yet predicted
+    incorrectly) at level <= `target_risk_bound` with family-wise confidence `1 - delta` across
+    the entire hyperparameter grid `|Lambda|` via the Hoeffding-Bentkus upper confidence bound.
+    Among all risk-controlling configurations, selects the tuple maximizing non-escalated fast-exit
+    coverage (with ties broken by lowest multiclass Brier score).
+    """
+    n_items = len(calib_labels)
+    if (
+        n_items == 0
+        or len(calib_raw_probs) != n_items
+        or len(calib_prior_logits) != n_items
+    ):
+        raise ValueError(
+            "calib_raw_probs, calib_prior_logits, and calib_labels must be non-empty sequences of equal length"
+        )
+    if not math.isfinite(target_risk_bound) or target_risk_bound <= 0.0 or target_risk_bound >= 1.0:
+        raise ValueError(f"target_risk_bound must lie in (0, 1), got {target_risk_bound!r}")
+    if not math.isfinite(delta) or delta <= 0.0 or delta >= 1.0:
+        raise ValueError(f"delta must lie in (0, 1), got {delta!r}")
+    if not hesitation_grid or not prior_weight_grid or not temperature_grid:
+        raise ValueError("hesitation_grid, prior_weight_grid, and temperature_grid must be non-empty")
+
+    candidates: list[LTTGateConfig] = [
+        LTTGateConfig(
+            hesitation_threshold=float(th),
+            prior_weight=float(pw),
+            temperature=float(temp),
+        )
+        for th in hesitation_grid
+        for pw in prior_weight_grid
+        for temp in temperature_grid
+    ]
+    m_grid = len(candidates)
+    hoeffding_radius = math.sqrt(math.log(float(m_grid) / float(delta)) / (2.0 * float(n_items)))
+
+    valid_results: list[LTTFunnelCalibrationResult] = []
+    all_results: list[LTTFunnelCalibrationResult] = []
+
+    for cfg in candidates:
+        un_esc_errors = 0
+        un_esc_count = 0
+        brier_sum = 0.0
+
+        for raw_p, prior_l, gold_raw in zip(calib_raw_probs, calib_prior_logits, calib_labels):
+            gold = str(gold_raw)
+            fused, _, esc = pre_gated_bayesian_poe_fusion(
+                raw_probs=raw_p,
+                prior_logits=prior_l,
+                prior_weight=cfg.prior_weight,
+                temperature=cfg.temperature,
+                hesitation_threshold=cfg.hesitation_threshold,
+                gate_mode=gate_mode,
+            )
+            pred_key = max(fused.items(), key=lambda kv: (kv[1], kv[0]))[0]
+            if not esc:
+                un_esc_count += 1
+                if pred_key != gold:
+                    un_esc_errors += 1
+            keys = set(fused.keys()) | {gold}
+            brier_sum += sum(
+                (fused.get(k, 0.0) - (1.0 if k == gold else 0.0)) ** 2 for k in keys
+            )
+
+        emp_risk = float(un_esc_errors) / float(n_items)
+        # Bentkus / empirical-Bernstein tightens Hoeffding when empirical risk is near zero
+        emp_var = max(emp_risk * (1.0 - emp_risk), 1.0 / float(n_items))
+        bernstein_ucb = (
+            emp_risk
+            + math.sqrt(2.0 * emp_var * math.log(2.0 * float(m_grid) / float(delta)) / float(n_items))
+            + (7.0 * math.log(2.0 * float(m_grid) / float(delta))) / (3.0 * float(max(1, n_items - 1)))
+        )
+        ucb = min(1.0, emp_risk + hoeffding_radius, bernstein_ucb)
+        cov = float(un_esc_count) / float(n_items)
+        brier = brier_sum / float(n_items)
+        satisfied = ucb <= target_risk_bound + 1e-12
+
+        res = LTTFunnelCalibrationResult(
+            selected_config=cfg,
+            empirical_risk=emp_risk,
+            ucb_risk=ucb,
+            target_risk_bound=target_risk_bound,
+            delta=delta,
+            non_escalated_coverage=cov,
+            brier_score=brier,
+            num_grid_candidates=m_grid,
+            num_valid_candidates=0,
+            satisfied_bound=satisfied,
+        )
+        all_results.append(res)
+        if satisfied:
+            valid_results.append(res)
+
+    num_valid = len(valid_results)
+    if valid_results:
+        best = max(
+            valid_results,
+            key=lambda r: (
+                round(r.non_escalated_coverage, 12),
+                -round(r.brier_score, 12),
+                -round(r.ucb_risk, 12),
+            ),
+        )
+    else:
+        best = min(
+            all_results,
+            key=lambda r: (
+                round(r.ucb_risk, 12),
+                round(r.brier_score, 12),
+                -round(r.non_escalated_coverage, 12),
+            ),
+        )
+
+    return LTTFunnelCalibrationResult(
+        selected_config=best.selected_config,
+        empirical_risk=best.empirical_risk,
+        ucb_risk=best.ucb_risk,
+        target_risk_bound=best.target_risk_bound,
+        delta=best.delta,
+        non_escalated_coverage=best.non_escalated_coverage,
+        brier_score=best.brier_score,
+        num_grid_candidates=m_grid,
+        num_valid_candidates=num_valid,
+        satisfied_bound=best.satisfied_bound,
+    )
+

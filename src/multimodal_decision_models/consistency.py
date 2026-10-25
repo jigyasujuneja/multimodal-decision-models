@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Sequence
 
 from .types import (
@@ -186,6 +188,237 @@ def score_probabilistic_triangles(
 
     scored.sort(key=lambda s: (-s.contradiction_score, s.nodes))
     return scored
+
+
+@dataclass(frozen=True)
+class TransitiveProjectionResult:
+    """Maximum-log-odds / minimum-disagreement projection onto the transitive equivalence polytope."""
+
+    projected_edges: list[PairwiseEdge]
+    clusters: list[tuple[str, ...]]
+    num_violated_triangles_before: int
+    num_violated_triangles_after: int
+    num_edges_flipped: int
+    objective_score: float
+
+
+def _solve_component_partition(
+    comp_nodes: Sequence[str],
+    pair_weights: dict[tuple[int, int], float],
+) -> tuple[list[int], float]:
+    """Find partition assignment maximizing sum_{i<j, same_cluster} w_{ij} on a connected component."""
+    m = len(comp_nodes)
+    if m <= 1:
+        return [0] * m, 0.0
+
+    # Branch-and-bound exact set-partition solver for components of size <= 11
+    if m <= 11:
+        upper_rem = [0.0] * (m + 1)
+        for i in range(m - 1, -1, -1):
+            pos_i = sum(max(0.0, pair_weights.get((u, i), 0.0)) for u in range(i))
+            upper_rem[i] = upper_rem[i + 1] + pos_i
+
+        # Initialize with greedy agglomerative clustering for a strong initial lower bound
+        init_assign = list(range(m))
+        init_score = 0.0
+        best_assign = list(init_assign)
+        best_score = init_score
+
+        cur_assign = [0] * m
+
+        def _dfs(idx: int, num_clusters: int, cur_score: float) -> None:
+            nonlocal best_score, best_assign
+            if idx == m:
+                if cur_score > best_score + 1e-12:
+                    best_score = cur_score
+                    best_assign = list(cur_assign)
+                return
+            if cur_score + upper_rem[idx] <= best_score + 1e-12:
+                return
+
+            # Try joining existing clusters in descending order of marginal gain
+            gains: list[tuple[float, int]] = []
+            for c_id in range(num_clusters):
+                g = sum(
+                    pair_weights.get((u, idx), 0.0)
+                    for u in range(idx)
+                    if cur_assign[u] == c_id
+                )
+                gains.append((g, c_id))
+            gains.sort(key=lambda item: (-item[0], item[1]))
+
+            for g_val, c_id in gains:
+                cur_assign[idx] = c_id
+                _dfs(idx + 1, num_clusters, cur_score + g_val)
+
+            # Try opening a new singleton cluster
+            cur_assign[idx] = num_clusters
+            _dfs(idx + 1, num_clusters + 1, cur_score)
+
+        _dfs(1, 1, 0.0)
+        return best_assign, best_score
+
+    # Average-linkage agglomerative correlation clustering + local move refinement for larger graphs
+    clusters_map: dict[int, list[int]] = {i: [i] for i in range(m)}
+    while len(clusters_map) > 1:
+        best_gain = 0.0
+        best_pair: tuple[int, int] | None = None
+        c_ids = sorted(clusters_map.keys())
+        for idx_a in range(len(c_ids)):
+            ca = c_ids[idx_a]
+            nodes_a = clusters_map[ca]
+            for idx_b in range(idx_a + 1, len(c_ids)):
+                cb = c_ids[idx_b]
+                nodes_b = clusters_map[cb]
+                gain = sum(
+                    pair_weights.get((min(u, v), max(u, v)), 0.0)
+                    for u in nodes_a
+                    for v in nodes_b
+                )
+                if gain > best_gain + 1e-12:
+                    best_gain = gain
+                    best_pair = (ca, cb)
+        if best_pair is None:
+            break
+        ca, cb = best_pair
+        clusters_map[ca].extend(clusters_map.pop(cb))
+
+    assign = [0] * m
+    for new_cid, (_, members) in enumerate(sorted(clusters_map.items())):
+        for u in members:
+            assign[u] = new_cid
+
+    total_score = sum(
+        w for (u, v), w in pair_weights.items() if assign[u] == assign[v]
+    )
+    return assign, total_score
+
+
+def project_triangles_to_transitive_consistency(
+    edges: Sequence[PairwiseEdge],
+    threshold: float = 0.50,
+    high_thresh: float = 0.80,
+    low_thresh: float = 0.25,
+) -> TransitiveProjectionResult:
+    """Project pairwise equivalence probabilities onto the transitive equivalence polytope.
+
+    Solves weighted correlation clustering with log-odds edge weights
+    `w_{uv} = logit(p_{uv}) - logit(threshold)` so that the resulting equivalence partition
+    satisfies all triangle inequalities `E_{uv} + E_{vw} - E_{uw} <= 1` with zero 3-cycle
+    contradictions. Exact branch-and-bound is used on connected components of size <= 11
+    and agglomerative correlation clustering on larger components.
+    """
+    if not math.isfinite(threshold) or threshold <= 0.0 or threshold >= 1.0:
+        raise ValueError(f"threshold must lie strictly in (0, 1), got {threshold!r}")
+
+    before_violations = len(
+        check_transitive_triangles(edges, high_thresh=high_thresh, low_thresh=low_thresh)
+    )
+
+    pair_sums: dict[tuple[str, str], list[float]] = defaultdict(list)
+    node_set: set[str] = set()
+    for e in edges:
+        u, v = e.node_a.strip(), e.node_b.strip()
+        if not u or not v or u == v:
+            continue
+        if u > v:
+            u, v = v, u
+        node_set.add(u)
+        node_set.add(v)
+        pair_sums[(u, v)].append(min(1.0 - 1e-6, max(1e-6, float(e.equiv_prob))))
+
+    if not pair_sums:
+        return TransitiveProjectionResult(
+            projected_edges=[],
+            clusters=[],
+            num_violated_triangles_before=0,
+            num_violated_triangles_after=0,
+            num_edges_flipped=0,
+            objective_score=0.0,
+        )
+
+    prob_of = {k: sum(vals) / len(vals) for k, vals in pair_sums.items()}
+    thresh_clamped = min(1.0 - 1e-6, max(1e-6, float(threshold)))
+    thresh_logit = math.log(thresh_clamped / (1.0 - thresh_clamped))
+
+    # Build positive-edge connected components so disconnected subgraphs are solved independently
+    pos_adj: dict[str, set[str]] = defaultdict(set)
+    for (u, v), p in prob_of.items():
+        if p >= thresh_clamped:
+            pos_adj[u].add(v)
+            pos_adj[v].add(u)
+
+    visited: set[str] = set()
+    all_clusters: list[tuple[str, ...]] = []
+    node_to_cluster: dict[str, int] = {}
+    total_obj = 0.0
+
+    for root in sorted(node_set):
+        if root in visited:
+            continue
+        comp: list[str] = []
+        queue = [root]
+        visited.add(root)
+        while queue:
+            cur = queue.pop(0)
+            comp.append(cur)
+            for nb in sorted(pos_adj[cur]):
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        comp.sort()
+        node_idx = {name: i for i, name in enumerate(comp)}
+        pair_weights: dict[tuple[int, int], float] = {}
+        for i in range(len(comp)):
+            for j in range(i + 1, len(comp)):
+                key = (comp[i], comp[j])
+                if key in prob_of:
+                    p_val = prob_of[key]
+                    w_val = math.log(p_val / (1.0 - p_val)) - thresh_logit
+                else:
+                    # Missing edge defaults to slight non-equivalence prior below threshold
+                    w_val = -abs(thresh_logit) - 0.5
+                pair_weights[(i, j)] = w_val
+
+        assign, comp_obj = _solve_component_partition(comp, pair_weights)
+        total_obj += comp_obj
+
+        grouped: dict[int, list[str]] = defaultdict(list)
+        for idx_n, c_id in enumerate(assign):
+            grouped[c_id].append(comp[idx_n])
+        for members in grouped.values():
+            members_tup = tuple(sorted(members))
+            cid_global = len(all_clusters)
+            all_clusters.append(members_tup)
+            for m_name in members_tup:
+                node_to_cluster[m_name] = cid_global
+
+    all_clusters.sort()
+    projected_edges: list[PairwiseEdge] = []
+    flipped = 0
+
+    for (u, v), orig_p in sorted(prob_of.items()):
+        same_cluster = node_to_cluster[u] == node_to_cluster[v]
+        was_positive = orig_p >= thresh_clamped
+        if same_cluster != was_positive:
+            flipped += 1
+        if same_cluster:
+            proj_p = max(orig_p, max(high_thresh, thresh_clamped + 0.5 * (1.0 - thresh_clamped)))
+        else:
+            proj_p = min(orig_p, min(low_thresh * 0.5, 0.5 * thresh_clamped))
+        projected_edges.append(PairwiseEdge(node_a=u, node_b=v, equiv_prob=round(proj_p, 6)))
+
+    after_violations = len(
+        check_transitive_triangles(projected_edges, high_thresh=high_thresh, low_thresh=low_thresh)
+    )
+    return TransitiveProjectionResult(
+        projected_edges=projected_edges,
+        clusters=all_clusters,
+        num_violated_triangles_before=before_violations,
+        num_violated_triangles_after=after_violations,
+        num_edges_flipped=flipped,
+        objective_score=round(total_obj, 6),
+    )
 
 
 def parse_pack_multiplier(title: str) -> int:

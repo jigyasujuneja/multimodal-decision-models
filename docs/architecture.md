@@ -61,3 +61,16 @@ Applying local contrast stretching before dense retrieval distorts brand packagi
 - **Relational and Pack Guards**: Scores probabilistic 3-cycles (`score_probabilistic_triangles`), verifies canonical metric/imperial unit volumes (`validate_pack_quantity_consistency`), and arbitrates concurrent multi-agent locks.
 - **Total Contracts and Proper Scoring**: Enforces closed terminal states (`STAGE1_RESOLVED`, `STAGE2_VERIFIED`, `STAGE2A_FAST_EXIT`, `GUARD_OVERRIDDEN`, `ABSTAIN_OOS`, `RETRY_PENDING`, `REJECTED_CONTRACT_VIOLATION`), `<untrusted_data>` isolation, SHA-256 JSONL caching, and evaluation metrics (`brier_murphy_decomposition` into `REL` / `RES` / `UNC`, `ECE`, quantile-binned `ACE`, Macro-F1, `nDCG@k`, `AURC`, exact paired McNemar, Rogan-Gladen prevalence, and cluster bootstrap CIs).
 - **MCP `stdio` Server (`dgem-catalog`)**: Exposes `shortlist_candidates`, `evaluate_conformal_decision`, `prune_context_blocks`, and `compile_contact_sheet` over JSON-RPC 2.0 `stdio` without external SDK dependencies.
+
+## 7. Non-Exchangeable & Multi-Slot Conformal, `PriDe`, `LTT`, Submodular MCKP, and Polytope Projection (`v0.5.0`)
+
+- **Mondrian, Weighted, & Simultaneous Multi-Slot Conformal (`conformal.py`, `pkg/mdm/conformal.go`)**:
+  - `calibrate_mondrian_conformal_quantiles` and `mondrian_conformal_prediction_set`: Partition calibration scores by class or rarity stratum $g$ so rare tail classes receive stratum-valid finite-sample coverage $\mathbb{P}(Y \in \mathcal{C}_\alpha(X) \mid G = g) \ge 1 - \alpha$.
+  - `weighted_conformal_prediction_set`: Implements Tibshirani et al. (2019) likelihood-ratio weighted split conformal prediction under covariate shift $w(x) = dP_{\text{test}}(x)/dP_{\text{calib}}(x)$.
+  - `calibrate_multislot_joint_conformal` and `multislot_joint_conformal_sets`: Calibrate the joint max-score statistic $M_i = \max_{s \in \{1..S\}} s(X_{i,s}, Y_{i,s})$ and Bonferroni $\alpha/S$ thresholds across $S$ simultaneous slots so $\mathbb{P}(\forall s: Y_{n+1,s} \in \mathcal{C}_s(X_{n+1})) \ge 1 - \alpha_{\text{family}}$.
+- **Cyclic Permutation Debiasing (`PriDe`) & Learn-then-Test (`LTT`) Gates (`calibration.py`, `eval_suite.py`)**:
+  - `debiased_cyclic_permutation_probs` and `option_permutation_stability`: Factor out slot-index positional bias across cyclic option shifts and quantify top-1 flip rate and Jensen-Shannon divergence.
+  - `calibrate_ltt_funnel_gates`: Jointly selects $(\tau_H, w, T)$ on a calibration fold subject to the finite-sample Hoeffding-Bentkus upper confidence bound $\text{UCB}(\lambda) \le r_{\max}$ at family-wise confidence $1 - \delta$.
+- **Submodular Context Pruning & Transitive Polytope Projection (`context_pruner.py`, `consistency.py`)**:
+  - `prune_agent_context_blocks(..., redundancy_penalty_weight)`: Discounts marginal block utility by $1 - \gamma \max_{j \in \text{retained}} \operatorname{Jaccard}(S_i, S_j)$ over word-shingle sets so duplicate stack traces do not displace orthogonal root-cause blocks.
+  - `project_triangles_to_transitive_consistency`: Solves exact branch-and-bound log-odds correlation clustering on connected components ($\le 11$ nodes, agglomerative refinement for larger components) so projected equivalence graphs satisfy $E_{uv} + E_{vw} - E_{uw} \le 1$ with zero 3-cycle violations.

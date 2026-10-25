@@ -461,3 +461,65 @@ def ndcg_at_k(
         if rel > 0.0:
             dcg += rel / math.log2(float(idx + 2))
     return min(1.0, max(0.0, dcg / idcg))
+
+
+@dataclass(frozen=True)
+class PermutationStabilityResult:
+    """Sensitivity of decision distributions across option-order permutations (Zheng et al. ICLR 2024)."""
+
+    n_items: int
+    top1_flip_rate: float
+    mean_js_divergence: float
+    mean_tv_distance: float
+
+
+def option_permutation_stability(
+    canonical_predictions: Sequence[Mapping[str, float]],
+    permuted_predictions: Sequence[Mapping[str, float]],
+) -> PermutationStabilityResult:
+    """Measure top-1 decision flip rate, Jensen-Shannon divergence (bits), and TV distance under option reordering."""
+    if (
+        not canonical_predictions
+        or len(canonical_predictions) != len(permuted_predictions)
+    ):
+        raise ValueError(
+            "canonical_predictions and permuted_predictions must be non-empty sequences of equal length"
+        )
+
+    flips = 0
+    js_sum = 0.0
+    tv_sum = 0.0
+    eps = 1e-12
+
+    for p_raw, q_raw in zip(canonical_predictions, permuted_predictions):
+        p = _normalize_dist(p_raw)
+        q = _normalize_dist(q_raw)
+        keys = sorted(set(p.keys()) | set(q.keys()))
+        top_p = max(keys, key=lambda k: (p.get(k, 0.0), k))
+        top_q = max(keys, key=lambda k: (q.get(k, 0.0), k))
+        if top_p != top_q:
+            flips += 1
+
+        tv_item = 0.0
+        js_item = 0.0
+        for k in keys:
+            pk = p.get(k, 0.0)
+            qk = q.get(k, 0.0)
+            mk = 0.5 * (pk + qk)
+            tv_item += 0.5 * abs(pk - qk)
+            if pk > eps and mk > eps:
+                js_item += 0.5 * pk * math.log2(pk / mk)
+            if qk > eps and mk > eps:
+                js_item += 0.5 * qk * math.log2(qk / mk)
+
+        tv_sum += min(1.0, max(0.0, tv_item))
+        js_sum += min(1.0, max(0.0, js_item))
+
+    n = len(canonical_predictions)
+    return PermutationStabilityResult(
+        n_items=n,
+        top1_flip_rate=float(flips) / float(n),
+        mean_js_divergence=js_sum / float(n),
+        mean_tv_distance=tv_sum / float(n),
+    )
+

@@ -1,0 +1,471 @@
+{
+  "arms": {
+    "Claude-3.7-Sonnet-Dirichlet-M5": {
+      "accuracy": 0.88,
+      "ace": 0.1105,
+      "aurc": 0.0231,
+      "brier": 0.1838,
+      "brier_ci95": [
+        0.1201,
+        0.2544
+      ],
+      "ece": 0.1466,
+      "macro_f1": 0.8849,
+      "murphy_reliability": 0.1374,
+      "murphy_resolution": 0.7319,
+      "n_items": 400,
+      "nll": 0.3859,
+      "p50_latency_ms": 214.11,
+      "p95_latency_ms": 230.27,
+      "paradigm": "blackbox_dirichlet_m5",
+      "per_track": {
+        "agent_tool_trie_routing": {
+          "accuracy": 0.9,
+          "brier": 0.1777,
+          "ece": 0.1569
+        },
+        "coding_context_compaction": {
+          "accuracy": 0.9,
+          "brier": 0.1737,
+          "ece": 0.1611
+        },
+        "gui_som_and_visual_blink": {
+          "accuracy": 0.84,
+          "brier": 0.2099,
+          "ece": 0.1553
+        },
+        "judge_rubric_calibration": {
+          "accuracy": 0.9,
+          "brier": 0.177,
+          "ece": 0.154
+        },
+        "rag_rerank_and_ipi_firewall": {
+          "accuracy": 0.9,
+          "brier": 0.17,
+          "ece": 0.1616
+        },
+        "relational_entity_and_swarm_locks": {
+          "accuracy": 0.88,
+          "brier": 0.181,
+          "ece": 0.1608
+        },
+        "safety_and_policy_guardrail": {
+          "accuracy": 0.8,
+          "brier": 0.2354,
+          "ece": 0.1888
+        },
+        "visual_catalog_sku_audit": {
+          "accuracy": 0.92,
+          "brier": 0.1459,
+          "ece": 0.1852
+        }
+      }
+    },
+    "DecisionGemma-2B": {
+      "accuracy": 0.845,
+      "ace": 0.0893,
+      "aurc": 0.0466,
+      "brier": 0.2257,
+      "brier_ci95": [
+        0.1511,
+        0.2999
+      ],
+      "ece": 0.0753,
+      "macro_f1": 0.8452,
+      "murphy_reliability": 0.1031,
+      "murphy_resolution": 0.6558,
+      "n_items": 400,
+      "nll": 0.4192,
+      "p50_latency_ms": 14.18,
+      "p95_latency_ms": 15.23,
+      "paradigm": "system1_diffusion_2b",
+      "per_track": {
+        "agent_tool_trie_routing": {
+          "accuracy": 0.84,
+          "brier": 0.2078,
+          "ece": 0.1271
+        },
+        "coding_context_compaction": {
+          "accuracy": 0.82,
+          "brier": 0.2814,
+          "ece": 0.073
+        },
+        "gui_som_and_visual_blink": {
+          "accuracy": 0.9,
+          "brier": 0.2237,
+          "ece": 0.1369
+        },
+        "judge_rubric_calibration": {
+          "accuracy": 0.84,
+          "brier": 0.2504,
+          "ece": 0.1194
+        },
+        "rag_rerank_and_ipi_firewall": {
+          "accuracy": 0.84,
+          "brier": 0.1921,
+          "ece": 0.1436
+        },
+        "relational_entity_and_swarm_locks": {
+          "accuracy": 0.86,
+          "brier": 0.2081,
+          "ece": 0.1291
+        },
+        "safety_and_policy_guardrail": {
+          "accuracy": 0.84,
+          "brier": 0.2096,
+          "ece": 0.0826
+        },
+        "visual_catalog_sku_audit": {
+          "accuracy": 0.82,
+          "brier": 0.2322,
+          "ece": 0.1262
+        }
+      }
+    },
+    "GPT-4o-Mini-Logprob-20Cap": {
+      "accuracy": 0.85,
+      "ace": 0.0918,
+      "aurc": 0.0399,
+      "brier": 0.2048,
+      "brier_ci95": [
+        0.1175,
+        0.2992
+      ],
+      "ece": 0.0589,
+      "macro_f1": 0.8547,
+      "murphy_reliability": 0.1136,
+      "murphy_resolution": 0.6871,
+      "n_items": 400,
+      "nll": 0.379,
+      "p50_latency_ms": 82.24,
+      "p95_latency_ms": 87.87,
+      "paradigm": "frontier_logprob_20cap",
+      "per_track": {
+        "agent_tool_trie_routing": {
+          "accuracy": 0.86,
+          "brier": 0.1862,
+          "ece": 0.0837
+        },
+        "coding_context_compaction": {
+          "accuracy": 0.88,
+          "brier": 0.1669,
+          "ece": 0.1423
+        },
+        "gui_som_and_visual_blink": {
+          "accuracy": 0.84,
+          "brier": 0.2171,
+          "ece": 0.0876
+        },
+        "judge_rubric_calibration": {
+          "accuracy": 0.8,
+          "brier": 0.2834,
+          "ece": 0.0792
+        },
+        "rag_rerank_and_ipi_firewall": {
+          "accuracy": 0.82,
+          "brier": 0.2152,
+          "ece": 0.122
+        },
+        "relational_entity_and_swarm_locks": {
+          "accuracy": 0.86,
+          "brier": 0.204,
+          "ece": 0.1077
+        },
+        "safety_and_policy_guardrail": {
+          "accuracy": 0.84,
+          "brier": 0.2144,
+          "ece": 0.1277
+        },
+        "visual_catalog_sku_audit": {
+          "accuracy": 0.9,
+          "brier": 0.1514,
+          "ece": 0.1338
+        }
+      }
+    },
+    "Gemini-3.8-Flash-Logprob": {
+      "accuracy": 0.89,
+      "ace": 0.0801,
+      "aurc": 0.0187,
+      "brier": 0.149,
+      "brier_ci95": [
+        0.0824,
+        0.2306
+      ],
+      "ece": 0.0784,
+      "macro_f1": 0.9007,
+      "murphy_reliability": 0.1056,
+      "murphy_resolution": 0.7349,
+      "n_items": 400,
+      "nll": 0.2874,
+      "p50_latency_ms": 94.12,
+      "p95_latency_ms": 100.53,
+      "paradigm": "frontier_multimodal_logprob",
+      "per_track": {
+        "agent_tool_trie_routing": {
+          "accuracy": 0.88,
+          "brier": 0.1616,
+          "ece": 0.0938
+        },
+        "coding_context_compaction": {
+          "accuracy": 0.9,
+          "brier": 0.1496,
+          "ece": 0.1189
+        },
+        "gui_som_and_visual_blink": {
+          "accuracy": 0.88,
+          "brier": 0.1624,
+          "ece": 0.075
+        },
+        "judge_rubric_calibration": {
+          "accuracy": 0.92,
+          "brier": 0.1213,
+          "ece": 0.1144
+        },
+        "rag_rerank_and_ipi_firewall": {
+          "accuracy": 0.86,
+          "brier": 0.1677,
+          "ece": 0.1475
+        },
+        "relational_entity_and_swarm_locks": {
+          "accuracy": 0.86,
+          "brier": 0.1741,
+          "ece": 0.1158
+        },
+        "safety_and_policy_guardrail": {
+          "accuracy": 0.88,
+          "brier": 0.1573,
+          "ece": 0.1367
+        },
+        "visual_catalog_sku_audit": {
+          "accuracy": 0.94,
+          "brier": 0.098,
+          "ece": 0.0953
+        }
+      }
+    },
+    "LTT + RAPS Cascade (DecisionGemma-2B -> Gemini-3.8-Flash)": {
+      "accuracy": 0.9,
+      "ace": 0.0594,
+      "aurc": 0.02,
+      "brier": 0.1469,
+      "brier_ci95": [
+        0.0682,
+        0.2309
+      ],
+      "ece": 0.0309,
+      "macro_f1": 0.908,
+      "murphy_reliability": 0.0895,
+      "murphy_resolution": 0.7209,
+      "n_items": 400,
+      "nll": 0.2567,
+      "p50_latency_ms": 14.7,
+      "p95_latency_ms": 112.89,
+      "paradigm": "ltt_conformal_cascade",
+      "per_track": {
+        "agent_tool_trie_routing": {
+          "accuracy": 0.9,
+          "brier": 0.1651,
+          "ece": 0.0857
+        },
+        "coding_context_compaction": {
+          "accuracy": 0.92,
+          "brier": 0.1506,
+          "ece": 0.0773
+        },
+        "gui_som_and_visual_blink": {
+          "accuracy": 0.88,
+          "brier": 0.1807,
+          "ece": 0.0543
+        },
+        "judge_rubric_calibration": {
+          "accuracy": 0.92,
+          "brier": 0.1,
+          "ece": 0.0892
+        },
+        "rag_rerank_and_ipi_firewall": {
+          "accuracy": 0.88,
+          "brier": 0.173,
+          "ece": 0.1124
+        },
+        "relational_entity_and_swarm_locks": {
+          "accuracy": 0.88,
+          "brier": 0.1517,
+          "ece": 0.0586
+        },
+        "safety_and_policy_guardrail": {
+          "accuracy": 0.9,
+          "brier": 0.1324,
+          "ece": 0.0704
+        },
+        "visual_catalog_sku_audit": {
+          "accuracy": 0.92,
+          "brier": 0.1217,
+          "ece": 0.0422
+        }
+      }
+    },
+    "Microsoft-Decision-1-Style-9B": {
+      "accuracy": 0.8475,
+      "ace": 0.0878,
+      "aurc": 0.0463,
+      "brier": 0.2121,
+      "brier_ci95": [
+        0.1302,
+        0.3082
+      ],
+      "ece": 0.0397,
+      "macro_f1": 0.8543,
+      "murphy_reliability": 0.1202,
+      "murphy_resolution": 0.6865,
+      "n_items": 400,
+      "nll": 0.3789,
+      "p50_latency_ms": 28.68,
+      "p95_latency_ms": 30.61,
+      "paradigm": "system1_autoregressive_9b",
+      "per_track": {
+        "agent_tool_trie_routing": {
+          "accuracy": 0.86,
+          "brier": 0.1633,
+          "ece": 0.0973
+        },
+        "coding_context_compaction": {
+          "accuracy": 0.9,
+          "brier": 0.187,
+          "ece": 0.1018
+        },
+        "gui_som_and_visual_blink": {
+          "accuracy": 0.84,
+          "brier": 0.2362,
+          "ece": 0.0781
+        },
+        "judge_rubric_calibration": {
+          "accuracy": 0.76,
+          "brier": 0.2953,
+          "ece": 0.0944
+        },
+        "rag_rerank_and_ipi_firewall": {
+          "accuracy": 0.84,
+          "brier": 0.2286,
+          "ece": 0.1075
+        },
+        "relational_entity_and_swarm_locks": {
+          "accuracy": 0.8,
+          "brier": 0.2483,
+          "ece": 0.073
+        },
+        "safety_and_policy_guardrail": {
+          "accuracy": 0.92,
+          "brier": 0.1419,
+          "ece": 0.1046
+        },
+        "visual_catalog_sku_audit": {
+          "accuracy": 0.86,
+          "brier": 0.1958,
+          "ece": 0.0938
+        }
+      }
+    }
+  },
+  "cascade_vs_fast_mcnemar": {
+    "chi2_cc": 10.5,
+    "n01_cascade_wins": 32,
+    "n10_fast_wins": 10,
+    "n_pairs": 400,
+    "p_two_sided": 0.000940674
+  },
+  "gdm_upgrades": {
+    "upgrade1_mondrian_and_weighted_conformal": {
+      "alpha": 0.1,
+      "marginal_raps": {
+        "head_coverage": 0.9781,
+        "mean_set_size": 1.147,
+        "overall_coverage": 0.9075,
+        "tail_coverage": 0.625
+      },
+      "mondrian_raps": {
+        "head_coverage": 0.9594,
+        "mean_set_size": 1.242,
+        "overall_coverage": 0.9525,
+        "tail_coverage": 0.925
+      },
+      "n_head": 320,
+      "n_tail": 80,
+      "target_coverage": 0.9,
+      "weighted_conformal_raps": {
+        "head_coverage": 1.0,
+        "mean_set_size": 1.502,
+        "overall_coverage": 0.98,
+        "tail_coverage": 0.9
+      }
+    },
+    "upgrade2_multislot_joint_conformal": {
+      "family_alpha": 0.1,
+      "independent_uncorrected_raps": {
+        "mean_slot_set_size": 1.016,
+        "simultaneous_coverage": 0.6625
+      },
+      "joint_bonferroni_conformal": {
+        "mean_slot_set_size": 1.404,
+        "simultaneous_coverage": 0.9075
+      },
+      "joint_max_score_conformal": {
+        "mean_slot_set_size": 1.386,
+        "simultaneous_coverage": 0.905
+      },
+      "num_slots": 4,
+      "target_simultaneous_coverage": 0.9
+    },
+    "upgrade3_pride_cyclic_debiasing": {
+      "mean_estimated_slot0_prior": 0.3866,
+      "pride_cyclic_debiased": {
+        "accuracy": 0.92,
+        "brier": 0.1868,
+        "mean_js_divergence_bits": 0.0037,
+        "top1_flip_rate_under_shift": 0.06
+      },
+      "raw_canonical_shift0": {
+        "accuracy": 0.81,
+        "brier": 0.2834,
+        "mean_js_divergence_bits": 0.0362,
+        "top1_flip_rate_under_shift": 0.1625
+      }
+    },
+    "upgrade4_ltt_funnel_calibration": {
+      "delta": 0.05,
+      "escalation_rate": 0.3225,
+      "fast_exit_rate": 0.6775,
+      "heldout_selective_risk": 0.03,
+      "mean_calib_empirical_risk": 0.03,
+      "mean_calib_ucb_risk": 0.1284,
+      "target_risk_bound": 0.14
+    },
+    "upgrade5_submodular_context_pruning": {
+      "additive_mckp_facet_recall": 0.6667,
+      "mean_token_reduction_ratio": 0.4335,
+      "n_trajectories": 50,
+      "submodular_mckp_facet_recall": 1.0
+    },
+    "upgrade6_transitive_polytope_projection": {
+      "n_entity_graphs": 50,
+      "projected_polytope_accuracy": 1.0,
+      "raw_pairwise_accuracy": 0.7143,
+      "total_pairwise_edges": 350,
+      "violated_triangles_after": 0,
+      "violated_triangles_before": 50
+    }
+  },
+  "n_total_items": 400,
+  "n_tracks": 8,
+  "schema_version": "multimodal_decision_models.mdm_bench.v0.5.0",
+  "tracks": [
+    "agent_tool_trie_routing",
+    "rag_rerank_and_ipi_firewall",
+    "gui_som_and_visual_blink",
+    "visual_catalog_sku_audit",
+    "coding_context_compaction",
+    "relational_entity_and_swarm_locks",
+    "judge_rubric_calibration",
+    "safety_and_policy_guardrail"
+  ]
+}
