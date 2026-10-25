@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "Calibrated Multimodal Decision Models at Catalog Scale: Model-Agnostic Readouts, Dual-Buffer Visual Contact Sheets, and Split Conformal Cascades"
+message: "If you use multimodal-decision-models in your research or production systems, please cite this software and accompanying paper."
+type: software
+authors:
+  - family-names: Juneja
+    given-names: Jigyasu
+repository-code: "https://github.com/jigyasujuneja/multimodal-decision-models"
+url: "https://github.com/jigyasujuneja/multimodal-decision-models"
+license: Apache-2.0
+version: 0.4.0
+date-released: "2026-10-25"
+keywords:
+  - multimodal-decision-models
+  - split-conformal-prediction
+  - probability-calibration
+  - masked-diffusion
+  - visual-contact-sheets
+  - context-pruning
+  - model-context-protocol

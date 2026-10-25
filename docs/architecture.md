@@ -1,6 +1,6 @@
 # Architecture and Mathematical Design
 
-Single-pass logprob engines, masked diffusion deciders, and black-box sampled models expose incompatible output surfaces and miscalibrated confidence scales. This document specifies the calibration, set-valued abstention, dual-buffer photometry, retrieval, context-pruning, and contract primitives in `multimodal-decision-models` (`v0.4.0`).
+Single-pass logprob engines, masked diffusion deciders, and black-box sampled models expose incompatible output surfaces and miscalibrated confidence scales. This document specifies the calibration, set-valued abstention, dual-buffer photometry, retrieval, context-pruning, and contract primitives in `multimodal-decision-models` (`v0.4.0`). For the full research paper manuscript and empirical evaluations, see [`docs/research_paper.md`](research_paper.md) and [`docs/research_summary.md`](research_summary.md).
 
 ## 1. Four-Paradigm Backends and Dirichlet Smoothing (`backends.py`)
 

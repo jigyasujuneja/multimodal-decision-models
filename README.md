@@ -1,6 +1,6 @@
 # Multimodal Decision Models (`multimodal-decision-models`)
 
-Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v0.4.0`, zero external runtime dependencies) separates decision geometry and uncertainty quantification from the inference backend.
+Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v0.4.0`, zero external runtime dependencies in Python and Go) separates decision geometry and uncertainty quantification from the inference backend.
 
 One declarative policy definition runs across four inference paradigms:
 
@@ -8,6 +8,14 @@ One declarative policy definition runs across four inference paradigms:
 2. **Autoregressive Token Logprobs (`/v1/chat/completions`)**: Extracts restricted-vocabulary `top_logprobs` from `vLLM`, `SGLang`, `TGI`, `Gemma 4`, `Qwen-VL`, `Llama-Vision`, and OpenAI endpoints via `OpenAILogprobBackend`.
 3. **Frontier Multimodal Verifiers (`VertexGeminiBackend`)**: Evaluates `gemini-3.8-flash` with single-token `[A-Z]` enum bijections and causal Evidence-First JSON schemas (`evidence_read` emitted ahead of slot choices).
 4. **Logprob-Free Sampled Models (`BlackBoxSampledBackend`)**: Aggregates $M$ discrete draws or verbalized vote maps under a symmetric Dirichlet prior ($\alpha_0 = 0.5$) to preserve finite negative log-likelihood, non-zero Shannon entropy, and analytic epistemic variance.
+
+## Documentation and Research Index
+
+- **[Research Paper Manuscript (`docs/research_paper.md`)](docs/research_paper.md)**: Full mathematical formulation, propositions, dual-buffer visual photometry derivations, 8-slot MCKP context pruning, `<untrusted_data>` RAG quarantine, and 10-model empirical benchmark analysis.
+- **[Executive Research Summary (`docs/research_summary.md`)](docs/research_summary.md)**: Condensed overview of all workstreams, hypotheses, Pareto-optimal operating regimes, and verified metrics.
+- **[Architecture and Mathematical Design (`docs/architecture.md`)](docs/architecture.md)**: Module-by-module equations and API specifications.
+- **[10-Model Calibration & Conformal Benchmark Report (`benchmarks/results/multimodel_benchmark_report.md`)](benchmarks/results/multimodel_benchmark_report.md)**: Full 20-arm leaderboard across Multi-Task Calibration ($N = 50$) and XSTest Safety Refusal Boundaries ($N = 360$).
+- **[Changelog (`CHANGELOG.md`)](CHANGELOG.md)**, **[Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)**, **[Citation Metadata (`CITATION.cff`)](CITATION.cff)**, and **[Apache-2.0 License (`LICENSE`)](LICENSE)**.
 
 ## Funnel Architecture
 
@@ -24,9 +32,21 @@ flowchart LR
     CS --> OUT
 ```
 
-## Module Overview
+## Empirical Benchmark Highlights
 
-See [`docs/architecture.md`](docs/architecture.md) for mathematical derivations.
+Full results and 95% cluster bootstrap confidence intervals are available in [`benchmarks/results/multimodel_benchmark_report.md`](benchmarks/results/multimodel_benchmark_report.md) and [`docs/research_paper.md`](docs/research_paper.md):
+
+| Benchmark Suite | Top / Highlighted Arm | Accuracy / Metric | Brier Score | Selective AURC | Conformal Cov@0.10 (Mean Set) | Latency / Efficiency |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Multi-Task Calibration ($N = 50$, $K = 2..26$)** | `Gemini 3.8 Flash (Verbalized + TempScaled OOF)` | `0.920` Acc | `0.1419` | `0.0177` | `0.920` (`1.00`) | `4247.8 ms` (Pareto) |
+| **Multi-Task Calibration ($N = 50$, $K = 2..26$)** | `DecisionGemma` (`/v1/systemone`) | `0.920` Acc | `0.1796` | `0.0204` | `0.920` (`1.04`) | `278.3 ms` ($15.3\times$ faster, Pareto) |
+| **Multi-Task RAPS Cascade ($N = 50$)** | `dgem v0.3.7 -> Gemini 3.8 Flash (M=3)` | `0.880` Acc (`+2.0%`) | `0.2340` | `0.0963` | `0.920` (`2.30`) | Escalates only `14.0%` of items |
+| **XSTest Safety Boundary ($N = 360$, $K = 2$)** | `DecisionGemma` (`/v1/systemone`) | `0.9694` Acc (`0.9692` F1) | `0.0465` | `0.0020` | `0.9694` (`1.00`) | `175.8 ms` (Pareto) |
+| **XSTest RAPS Cascade ($N = 360$, $K = 2$)** | `Classier v0.2.0 -> DecisionGemma` | `0.8917` Acc (`+10.28%`) | `0.1720` | `0.0326` | `0.9083` (`1.05`) | `31.1%` escalation ($p = 7.84 \times 10^{-10}$) |
+| **8-Slot Trajectory Pruning ($8$ Models)** | `mckp_hesitation_stub` (Exact MCKP DP) | `100.00%` Required Recall | `0.9412` Util | `100%` DP Match |Pinned Invariant Held | `58.85%` token reduction ($p \le 7.45 \times 10^{-9}$) |
+| **Adversarial RAG Quarantine ($N = 220$)** | `<untrusted_data>` XML Fence (`Gemini 3.8 Flash`) | `0.9295` Adv `nDCG@3` | `0.9727` F1 | `0.00%` `ASR@1` | `36/36` Cells Balanced | Cuts `ASR@1` from `28.18%` to `0.00%` |
+
+## Module Overview
 
 | Module | Mechanism |
 | :--- | :--- |
@@ -42,10 +62,16 @@ See [`docs/architecture.md`](docs/architecture.md) for mathematical derivations.
 | **[`som_navigator.py`](src/multimodal_decision_models/som_navigator.py)** | **Set-of-Marks UI Navigation:** $3 \times 3$ and $4 \times 4$ grid helpers, unimodal-safe expected mark centers (`safe_expected_mark_center`), and nested smallest-area containment (`select_containing_or_nearest_mark`). |
 | **[`consistency.py`](src/multimodal_decision_models/consistency.py)** | **Triangle Consistency & Unit Guards:** Continuous 3-cycle contradiction scoring (`score_probabilistic_triangles`), canonical metric/imperial pack-volume verification (`validate_pack_quantity_consistency`), and multi-slot swarm lock arbitration. |
 | **[`backends.py`](src/multimodal_decision_models/backends.py)** | **Four-Paradigm Backends & Orchestrator:** `DgemSystemOneBackend`, `OpenAILogprobBackend`, `VertexGeminiBackend`, `BlackBoxSampledBackend`, and `CascadeDecisionOrchestrator` with pre-fusion conformal set gating and SLA quarantine. |
-| **[`eval_suite.py`](src/multimodal_decision_models/eval_suite.py)** | **Scoring & Statistical Suite:** Multiclass Brier score, Murphy (`REL`, `RES`, `UNC`) decomposition, NLL, `ECE`, quantile-binned `ACE`, Macro-F1, `nDCG@k`, `AUROC`, selective `AURC`, exact paired McNemar test, Rogan-Gladen prevalence, Cohen's $\kappa$, and cluster bootstrap CIs. |
+| **[`eval_suite.py`](src/multimodal_decision_models/eval_suite.py)** | **Scoring & Statistical Suite:** Multiclass Brier score, exact four-term Murphy (`REL`, `RES`, `UNC`, `WBV`) decomposition, NLL, `ECE`, quantile-binned `ACE`, Macro-F1, `nDCG@k`, `AUROC`, selective `AURC`, exact paired McNemar test, Rogan-Gladen prevalence, Cohen's $\kappa$, and cluster bootstrap CIs. |
 | **[`pkg/mdm/`](pkg/mdm/)** | **Go Reference Package (`package mdm`):** Zero-dependency Go 1.22 implementation covering `CalibrateConformalQuantile`, `ConformalPredictionSet`, `PruneAgentContextBlocks`, pre-gated prior fusion, shortlisting, taxonomy tries, Set-of-Marks geometry, triangle scoring, and pack-quantity guards. |
 
-## Quickstart
+## Installation and Quickstart
+
+Install the package in editable or standard mode (requires Python $\ge 3.10$, zero external runtime dependencies):
+
+```bash
+pip install -e .
+```
 
 ```python
 from multimodal_decision_models import (
@@ -96,7 +122,7 @@ orchestrator = CascadeDecisionOrchestrator(
 )
 ```
 
-## MCP Server and Tests
+## MCP Server, Tests, and Benchmarks
 
 Launch the zero-dependency `dgem-catalog` MCP server over `stdio`:
 
@@ -104,18 +130,25 @@ Launch the zero-dependency `dgem-catalog` MCP server over `stdio`:
 PYTHONPATH=src python3 -m multimodal_decision_models.mcp_server
 ```
 
-Run the Python and Go test suites:
+Run the Python 6-tier verification suite, Go race-detector tests, and 10-model benchmark:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 go test -race ./pkg/mdm/...
-```
-
-## Multi-Model Benchmark
-
-Reproduce the 10-model calibration, post-hoc scaling, and Split Conformal RAPS cascade benchmark (`N = 50` multi-task calibration items and `N = 360` XSTest refusal-boundary items; see [`benchmarks/results/multimodel_benchmark_report.md`](benchmarks/results/multimodel_benchmark_report.md)):
-
-```bash
 PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
 ```
 
+## Citation
+
+If you use `multimodal-decision-models` in your research or engineering systems, please cite:
+
+```bibtex
+@software{juneja2026multimodal,
+  author       = {Juneja, Jigyasu},
+  title        = {Calibrated Multimodal Decision Models at Catalog Scale: Model-Agnostic Readouts, Dual-Buffer Visual Contact Sheets, and Split Conformal Cascades},
+  year         = {2026},
+  version      = {0.4.0},
+  url          = {https://github.com/jigyasujuneja/multimodal-decision-models},
+  license      = {Apache-2.0}
+}
+```
