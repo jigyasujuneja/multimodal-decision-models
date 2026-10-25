@@ -12,16 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core data structures for backend-agnostic Multimodal Decision Models."""
+"""Core data structures and closed contract enums for Multimodal Decision Models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 MAX_OPTIONS_PER_SLOT = 26
 MAX_SLOTS_PER_PASS = 8
 DEFAULT_HESITATION_THRESHOLD = 0.16
+
+
+class DecisionTerminalState(str, Enum):
+    """Closed Level-4 Total-Contract terminal states for a slot or decision request."""
+
+    STAGE2A_FAST_EXIT = "STAGE2A_FAST_EXIT"
+    STAGE1_RESOLVED = "STAGE1_RESOLVED"
+    STAGE2_VERIFIED = "STAGE2_VERIFIED"
+    GUARD_OVERRIDDEN = "GUARD_OVERRIDDEN"
+    ABSTAIN_OOS = "ABSTAIN_OOS"
+    INVALID_TRIE_PATH = "INVALID_TRIE_PATH"
+    RETRY_PENDING = "RETRY_PENDING"
+    REJECTED_CONTRACT_VIOLATION = "REJECTED_CONTRACT_VIOLATION"
+
+
+class FailureCategory(str, Enum):
+    """Structured failure taxonomy distinguishing transient upstream faults from contract errors."""
+
+    NONE = "NONE"
+    UPSTREAM_TIMEOUT_OR_THROTTLE = "UPSTREAM_TIMEOUT_OR_THROTTLE"
+    UNALIGNED_LOGPROBS = "UNALIGNED_LOGPROBS"
+    SCHEMA_CONTRACT_VIOLATION = "SCHEMA_CONTRACT_VIOLATION"
+    INVALID_UNCONSTRAINED_TUPLE = "INVALID_UNCONSTRAINED_TUPLE"
+    ABSTAINED_OOS = "ABSTAINED_OOS"
+
+
+@dataclass(frozen=True)
+class UnitMeasure:
+    """Normalized physical unit volume or mass extracted from a catalog item title."""
+
+    value: float
+    unit: str  # canonical base unit: "ml", "g", "fl_oz", "oz"
 
 
 @dataclass
@@ -47,7 +80,7 @@ class DecisionQuestion:
 
 @dataclass
 class SlotReadout:
-    """Calibrated probability distribution and hesitation metrics for a single decision slot."""
+    """Calibrated probability distribution, hesitation metrics, and contract state for a slot."""
 
     slot_id: str
     predicted: str
@@ -60,6 +93,9 @@ class SlotReadout:
     backend_name: str = ""
     evidence: str = ""
     passes_used: int = 1
+    terminal_state: DecisionTerminalState = DecisionTerminalState.STAGE1_RESOLVED
+    failure_category: FailureCategory = FailureCategory.NONE
+    invalid_coordinates: tuple[str, str] | None = None
 
 
 @dataclass
@@ -73,6 +109,10 @@ class DecisionResult:
     latency_ms: float = 0.0
     backend_name: str = ""
     raw_metadata: dict[str, Any] = field(default_factory=dict)
+    terminal_state: DecisionTerminalState = DecisionTerminalState.STAGE1_RESOLVED
+    failure_category: FailureCategory = FailureCategory.NONE
+    cache_hit: bool = False
+    cache_key: str = ""
 
 
 @dataclass(frozen=True)

@@ -27,12 +27,17 @@ from .types import (
     SwarmAgentProposal,
     SwarmLockDecision,
     TriangleContradiction,
+    UnitMeasure,
 )
 
 _RE_MULTIPACK_PREFIX = re.compile(r"\b(\d+)\s*[x×]\s*\d+", re.IGNORECASE)
 _RE_PACK_OF = re.compile(r"\b(?:pack\s+of|case\s+of|box\s+of)\s+(\d+)\b", re.IGNORECASE)
 _RE_HYPHEN_PACK = re.compile(
     r"\b(\d+)\s*(?:-|\s)?\s*(?:pack|pk|count|ct|cans|bottles|bars|pods|pouches)\b",
+    re.IGNORECASE,
+)
+_RE_UNIT_MEASURE = re.compile(
+    r"(?:\b\d+\s*[x×]\s*)?(\d+(?:\.\d+)?)\s*(ml|milliliters?|l|liters?|litres?|cl|g|grams?|kg|kilograms?|fl\s*oz|oz)\b",
     re.IGNORECASE,
 )
 
@@ -194,17 +199,59 @@ def parse_pack_multiplier(title: str) -> int:
     return 1
 
 
+def parse_unit_measure(title: str) -> UnitMeasure | None:
+    """Extract and normalize per-unit volume or mass from a catalog title (`0.33L -> 330ml`, `1kg -> 1000g`)."""
+    m = _RE_UNIT_MEASURE.search(title)
+    if not m:
+        return None
+    raw_val = float(m.group(1))
+    if raw_val <= 0.0:
+        return None
+    raw_unit = re.sub(r"\s+", " ", m.group(2).strip().lower())
+    if raw_unit in ("ml", "milliliter", "milliliters"):
+        return UnitMeasure(round(raw_val, 3), "ml")
+    if raw_unit in ("cl",):
+        return UnitMeasure(round(raw_val * 10.0, 3), "ml")
+    if raw_unit in ("l", "liter", "liters", "litre", "litres"):
+        return UnitMeasure(round(raw_val * 1000.0, 3), "ml")
+    if raw_unit in ("g", "gram", "grams"):
+        return UnitMeasure(round(raw_val, 3), "g")
+    if raw_unit in ("kg", "kilogram", "kilograms"):
+        return UnitMeasure(round(raw_val * 1000.0, 3), "g")
+    if raw_unit == "fl oz" or raw_unit == "floz":
+        return UnitMeasure(round(raw_val, 3), "fl_oz")
+    if raw_unit == "oz":
+        return UnitMeasure(round(raw_val, 3), "oz")
+    return None
+
+
 def validate_pack_quantity_consistency(
     title_a: str,
     title_b: str,
     predicted_relation: str,
     predicted_pack_match: str,
+    rel_tol: float = 0.02,
 ) -> bool:
-    """Return False if parsed multipack multipliers differ while the model predicts an exact duplicate."""
+    """Return False if multipack count OR normalized per-unit volume/mass differs on an exact match."""
+    is_exact_claim = (
+        predicted_relation == "exact_duplicate"
+        or predicted_pack_match == "identical_pack_and_volume"
+    )
+    if not is_exact_claim:
+        return True
+
     mult_a = parse_pack_multiplier(title_a)
     mult_b = parse_pack_multiplier(title_b)
     if mult_a != mult_b:
-        if predicted_relation == "exact_duplicate" or predicted_pack_match == "identical_pack_and_volume":
+        return False
+
+    unit_a = parse_unit_measure(title_a)
+    unit_b = parse_unit_measure(title_b)
+    if unit_a is not None and unit_b is not None:
+        if unit_a.unit != unit_b.unit:
+            return False
+        denom = max(unit_a.value, unit_b.value, 1e-9)
+        if abs(unit_a.value - unit_b.value) / denom > rel_tol:
             return False
     return True
 

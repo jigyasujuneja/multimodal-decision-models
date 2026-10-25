@@ -40,6 +40,8 @@ from .types import (
     MAX_OPTIONS_PER_SLOT,
     MAX_SLOTS_PER_PASS,
     DecisionQuestion,
+    DecisionTerminalState,
+    FailureCategory,
     SlotReadout,
 )
 
@@ -457,24 +459,40 @@ class HierarchicalDecisionRouter:
         if self.mode == "mtp_naive":
             best_c = max(coarse_dist.items(), key=lambda kv: kv[1])[0] if coarse_dist else ""
             best_f = max(fine_dist.items(), key=lambda kv: kv[1])[0] if fine_dist else ""
-            joint_probs, trie_winner = trie_constrained_joint_decode(coarse_dist, fine_dist, active_trie)
+            joint_probs, _ = trie_constrained_joint_decode(coarse_dist, fine_dist, active_trie)
             exact_match = ""
             for lk, leaf in active_trie.leaves.items():
                 if leaf.coarse_key == best_c and leaf.fine_key == best_f:
                     exact_match = lk
                     break
-            # Unrestricted MTP emits invalid (c1, c2) when no leaf exists; record fallback marker or valid leaf
-            pred = exact_match if exact_match else f"__invalid_tuple__:{best_c}/{best_f}"
+            # Enforce Level-4 Total-Contract domain closure: never pollute predicted with out-of-catalog string sentinels.
+            if exact_match:
+                return SlotReadout(
+                    slot_id=slot_id,
+                    predicted=exact_match,
+                    probabilities=joint_probs,
+                    raw_probabilities=coarse_dist,
+                    h_raw=h_coarse,
+                    confidence=1.0 - h_coarse,
+                    guard_applied="none",
+                    backend_name=self.backend.name,
+                    passes_used=1,
+                    terminal_state=DecisionTerminalState.STAGE1_RESOLVED,
+                    failure_category=FailureCategory.NONE,
+                )
             return SlotReadout(
                 slot_id=slot_id,
-                predicted=pred,
+                predicted="",
                 probabilities=joint_probs,
                 raw_probabilities=coarse_dist,
                 h_raw=h_coarse,
                 confidence=1.0 - h_coarse,
-                guard_applied="mtp_naive_unconstrained" if not exact_match else "none",
+                guard_applied="mtp_naive_unconstrained",
                 backend_name=self.backend.name,
                 passes_used=1,
+                terminal_state=DecisionTerminalState.INVALID_TRIE_PATH,
+                failure_category=FailureCategory.INVALID_UNCONSTRAINED_TUPLE,
+                invalid_coordinates=(best_c, best_f),
             )
 
         joint_probs, trie_winner = trie_constrained_joint_decode(coarse_dist, fine_dist, active_trie)
@@ -526,13 +544,50 @@ class HierarchicalDecisionRouter:
         candidate_leaves: list[str] = []
         domain_log_priors: dict[str, float] = {}
 
-        for dom in ranked_doms[: self.beam_width]:
-            p_dom = max(1e-9, float(coarse_dist.get(dom, 1e-9)))
-            for leaf in trie.domain_members(dom):
-                if len(candidate_leaves) >= max_leaf_budget:
+        active_doms = [d for d in ranked_doms[: self.beam_width] if trie.domain_members(d)]
+        dom_members = {d: trie.domain_members(d) for d in active_doms}
+        total_avail = sum(len(dom_members[d]) for d in active_doms)
+
+        if total_avail <= max_leaf_budget:
+            for dom in active_doms:
+                p_dom = max(1e-9, float(coarse_dist.get(dom, 1e-9)))
+                for leaf in dom_members[dom]:
+                    candidate_leaves.append(leaf.leaf_key)
+                    domain_log_priors[leaf.leaf_key] = math.log(p_dom)
+        elif active_doms:
+            # Probability-proportional per-domain leaf quota with a guaranteed floor so a 25-leaf rank-1
+            # domain never starves rank-2..b domains in Pass 2.
+            prob_mass = sum(max(1e-6, float(coarse_dist.get(d, 1e-6))) for d in active_doms)
+            min_floor = max(2, max_leaf_budget // (2 * len(active_doms)))
+            if min_floor * len(active_doms) > max_leaf_budget:
+                min_floor = max(1, max_leaf_budget // len(active_doms))
+
+            taken: dict[str, int] = {}
+            remaining = max_leaf_budget
+            for dom in active_doms:
+                raw_share = round(max_leaf_budget * (max(1e-6, float(coarse_dist.get(dom, 1e-6))) / prob_mass))
+                share = max(min_floor, int(raw_share))
+                share = min(share, len(dom_members[dom]), remaining)
+                taken[dom] = share
+                remaining -= share
+
+            while remaining > 0:
+                progressed = False
+                for dom in active_doms:
+                    if remaining == 0:
+                        break
+                    if taken[dom] < len(dom_members[dom]):
+                        taken[dom] += 1
+                        remaining -= 1
+                        progressed = True
+                if not progressed:
                     break
-                candidate_leaves.append(leaf.leaf_key)
-                domain_log_priors[leaf.leaf_key] = math.log(p_dom)
+
+            for dom in active_doms:
+                p_dom = max(1e-9, float(coarse_dist.get(dom, 1e-9)))
+                for leaf in dom_members[dom][: taken[dom]]:
+                    candidate_leaves.append(leaf.leaf_key)
+                    domain_log_priors[leaf.leaf_key] = math.log(p_dom)
 
         if trie.catch_all_key and trie.catch_all_key in question.criteria:
             candidate_leaves.append(trie.catch_all_key)

@@ -34,11 +34,21 @@ For wide taxonomies ($K > 26$ up to $10,000+$ SKUs or intents):
 Continuous coordinate regression degrades on compact UI icons. `som_navigator.py` converts spatial UI grounding into a discrete 4-slot single-pass policy over numbered accessibility or detector candidate boxes (`M1..Mn` + `none_visible`):
 
 - `assign_box_to_grid_cell`, `assign_box_to_grid_4x4`, and `grid_4x4_cell_bounds` map `[y_min, x_min, y_max, x_max]` boxes onto $3 \times 3$ and $4 \times 4$ spatial grids.
-- `expected_mark_center_from_probabilities` computes the probability-weighted expected click center across candidate boxes (excluding `none_visible` mass).
+- `safe_expected_mark_center` computes the probability-weighted centroid when dispersion stays unimodal and inside a candidate box, snapping deterministically to the highest-probability mark when bimodal splits or non-convex layouts place the centroid in dead space.
 - `select_containing_or_nearest_mark` resolves nested containers by selecting the smallest-area mark containing a target point before falling back to Euclidean center distance.
 
 ## 4. Continuous Triangle Consistency and Multi-Slot Arbiters (`consistency.py`)
 
 - **Continuous Triangle Contradiction (`score_probabilistic_triangles`)**: Scores 3-cycles $(A, B, C)$ by $\max\bigl(p_{ab}p_{bc}(1-p_{ac}),\; p_{ab}p_{ac}(1-p_{bc}),\; p_{bc}p_{ac}(1-p_{ab})\bigr) \in [0, 1]$, catching soft relational contradictions below hard threshold cutoffs (`check_transitive_triangles`).
-- **Pack-Quantity Guard (`validate_pack_quantity_consistency`)**: Extracts multipack multipliers (`6x330ml`, `Pack of 12`, `4-pack`) to block false `exact_duplicate` merges across single-unit and multipack siblings.
+- **Pack-Quantity and Unit-Measure Guard (`parse_unit_measure`, `validate_pack_quantity_consistency`)**: Normalizes multipack counts (`6x330ml`, `Pack of 12`) and canonical metric volumes or weights (`0.5L` vs `500ml`, `1kg` vs `1000g`, `16 fl oz` vs `473ml`) to block false `exact_duplicate` merges across distinct sizes.
 - **Swarm Lock Arbiter (`arbitrate_swarm_locks`)**: Grants, serializes, or escalates concurrent multi-agent file-lock requests in a single pass.
+
+## 5. Total Contracts and Six-Tier Evaluation (`contracts.py`, `eval_suite.py`)
+
+Production inference pipelines fail closed rather than substituting fabricated `0.98` or uniform `1/K` probabilities when logprobs are missing or misaligned:
+
+- **Terminal State Machine (`DecisionTerminalState`)**: Every `SlotReadout` and `DecisionResult` ends in `RESOLVED`, `ABSTAINED`, `RETRY_PENDING` (transient HTTP `429`/`503` or socket timeout), or `REJECTED_CONTRACT_VIOLATION` (unaligned `top_logprobs`, non-finite logits, or malformed schema payloads).
+- **Single-Token Enum Bijection**: `VertexGeminiBackend` and `OpenAILogprobBackend` bind multi-token option keys to single-token uppercase letters (`A..Z`) at the wire boundary so token logprobs map 1:1 back to domain choices.
+- **Untrusted Input Isolation**: `sanitize_untrusted_text` and `wrap_untrusted_state` strip control characters, neutralize fake closing tags, and fence OCR or user text inside `<untrusted_data>` blocks.
+- **Content-Addressed Caching (`ContentAddressedDecisionCache`)**: Hashes canonical policy specifications, sanitized state, image payload digests, and calibration options with SHA-256 while excluding `RETRY_PENDING` and `REJECTED_CONTRACT_VIOLATION` outcomes from persistence.
+- **Proper-Scoring and Statistical Metrics (`eval_suite.py`)**: Computes multiclass Brier score, NLL, `ECE`, `AUROC`, selective `AURC`, exact paired McNemar $p$-values, Rogan-Gladen prevalence adjustment, Cohen's $\kappa$, and cluster-level paired bootstrap intervals.

@@ -109,6 +109,48 @@ def expected_mark_center_from_probabilities(
     return sum_y / mass, sum_x / mass, True
 
 
+def safe_expected_mark_center(
+    probs: Mapping[str, float],
+    marks: Sequence[CandidateMark],
+    catch_all_key: str = "none_visible",
+    max_dispersion: float = 18.0,
+) -> tuple[float, float, CandidateMark | None, bool]:
+    """Unimodal-safe expected Set-of-Marks center with automatic argmax snapping on bimodal/non-convex splits.
+
+    When probability mass splits across spatially distant marks (spatial std dev > max_dispersion) or
+    the weighted centroid lands in dead space outside every candidate mark box, snaps deterministically
+    to the highest-probability candidate mark's center so clicks never land between buttons.
+    """
+    weighted: list[tuple[float, float, float, CandidateMark]] = []
+    mass = 0.0
+    for m in marks:
+        mid = m.id.strip()
+        if not mid or mid == catch_all_key:
+            continue
+        p = float(probs.get(mid, 0.0))
+        if math.isfinite(p) and p > 0.0:
+            mcy, mcx = box_center(m.box)
+            weighted.append((p, mcy, mcx, m))
+            mass += p
+
+    if mass <= 1e-12 or not weighted:
+        return 0.0, 0.0, None, False
+
+    ey = sum(p * y for p, y, _, _ in weighted) / mass
+    ex = sum(p * x for p, _, x, _ in weighted) / mass
+    variance = sum((p / mass) * ((y - ey) ** 2 + (x - ex) ** 2) for p, y, x, _ in weighted)
+    dispersion = math.sqrt(max(0.0, variance))
+
+    containing, dist = select_containing_or_nearest_mark(ey, ex, [m for _, _, _, m in weighted])
+    if dispersion <= max_dispersion and dist == 0.0 and containing is not None:
+        return ey, ex, containing, True
+
+    # Bimodal split or non-convex gap: snap to highest-probability candidate mark
+    best_p, best_y, best_x, best_mark = max(weighted, key=lambda t: (t[0], -box_area(t[3].box)))
+    _ = best_p
+    return best_y, best_x, best_mark, True
+
+
 def _cell_rc(cell: str) -> tuple[int, int] | None:
     parts = cell.split("_")
     if len(parts) != 2 or parts[0] not in GRID_ROWS or parts[1] not in GRID_COLS:

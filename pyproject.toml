@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multimodal-decision-models"
-version = "0.2.1"
+version = "0.3.0"
 description = "Backend-agnostic calibrated multimodal decision models: pre-gated Bayesian PoE prior fusion, co-denoised and causal evidence slots, catalog-scale shortlist routing, Set-of-Marks UI navigation, transitive triangle-consistency entity resolution, and multi-slot lock arbiters across masked diffusion and autoregressive logprob backends."
 readme = "README.md"
 requires-python = ">=3.10"
