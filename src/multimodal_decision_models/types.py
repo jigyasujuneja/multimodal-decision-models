@@ -105,6 +105,17 @@ class TriangleContradiction:
 
 
 @dataclass(frozen=True)
+class ProbabilisticTriangleScore:
+    """Continuous transitive contradiction score p_ij * p_jk * (1 - p_ik) in [0, 1] for a 3-cycle."""
+
+    nodes: tuple[str, str, str]
+    edge_probs: tuple[float, float, float]
+    weak_edge: tuple[str, str]
+    weak_prob: float
+    contradiction_score: float
+
+
+@dataclass(frozen=True)
 class SwarmAgentProposal:
     """Proposed file/resource lock acquisition by a concurrent worker agent."""
 

@@ -34,9 +34,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .calibration import normalized_entropy, pre_gated_bayesian_poe_fusion
+from .shortlist import split_identifier_tokens
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     MAX_OPTIONS_PER_SLOT,
+    MAX_SLOTS_PER_PASS,
     DecisionQuestion,
     SlotReadout,
 )
@@ -45,6 +47,26 @@ if TYPE_CHECKING:
     from .backends import DecisionBackend
 
 _SPLIT_PREFIX_RE = re.compile(r"[._:/-]+")
+_OPAQUE_KEY_RE = re.compile(r"^(?:option|opt|choice|item|label|class|idx|id)_?\d+$", re.IGNORECASE)
+
+
+def packed_bracket_pass_count(
+    num_options: int,
+    bracket_size: int = 20,
+    max_slots_per_pass: int = MAX_SLOTS_PER_PASS,
+) -> int:
+    """Compute exact forward passes for packed tournament brackets.
+
+    Packs up to max_slots_per_pass Round-1 brackets onto a single multi-slot canvas pass,
+    followed by 1 finals pass: 1 + ceil(ceil(K / bracket_size) / max_slots_per_pass).
+    Yields 2 passes on K=59 and K=151, and 3 passes on K=202.
+    """
+    if num_options <= MAX_OPTIONS_PER_SLOT:
+        return 1
+    b_size = max(2, bracket_size)
+    s_cap = max(1, max_slots_per_pass)
+    round1_brackets = math.ceil(num_options / b_size)
+    return 1 + math.ceil(round1_brackets / s_cap)
 
 
 @dataclass(frozen=True)
@@ -90,18 +112,55 @@ class TaxonomyTrie:
         ]
 
 
+def _build_lexical_coarse_groups(
+    items: Sequence[tuple[str, str]],
+    cap_coarse: int,
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str]]:
+    """Bucket opaque keys (e.g., option_0 .. option_150) by informative description stems."""
+    tok_lists: dict[str, list[str]] = {}
+    doc_freq: dict[str, int] = {}
+    for k, desc in items:
+        toks = split_identifier_tokens(desc)
+        tok_lists[k] = toks
+        for t in toks:
+            doc_freq[t] = doc_freq.get(t, 0) + 1
+
+    upper_df = max(2, len(items) // 3)
+    raw_groups: dict[str, list[tuple[str, str]]] = {}
+    raw_suffixes: dict[str, str] = {}
+    for k, desc in items:
+        toks = tok_lists[k]
+        candidates = [t for t in toks if 2 <= doc_freq.get(t, 0) <= upper_df]
+        if candidates:
+            # Prefer moderately shared topic nouns (highest doc_freq below upper_df)
+            candidates.sort(key=lambda t: (-doc_freq[t], toks.index(t)))
+            dom = f"topic_{candidates[0]}"
+            rem = [t for t in toks if t != candidates[0]]
+            suf = rem[0] if rem else k
+        elif toks:
+            dom = f"topic_{toks[0]}"
+            suf = toks[1] if len(toks) > 1 else k
+        else:
+            dom = "topic_misc"
+            suf = k
+        raw_groups.setdefault(dom, []).append((k, desc))
+        raw_suffixes[k] = suf
+    return raw_groups, raw_suffixes
+
+
 def build_prefix_taxonomy_trie(
     criteria: Mapping[str, str],
     domain_map: Mapping[str, str] | None = None,
     catch_all_key: str = "",
     max_coarse: int = 25,
 ) -> TaxonomyTrie:
-    """Construct a valid <=26 x <=26 TaxonomyTrie from domain prefixes or an explicit domain_map.
+    """Construct a valid <=26 x <=26 TaxonomyTrie from domain prefixes, lexical stems, or domain_map.
 
-    For schemas like MASSIVE (`iot_hue_lightdim`, `calendar_set`), CLINC150 (10 domains x 15 intents + `oos`),
-    or `workspace-tools-202` (`drive.files_list`), groups leaves by coarse domain and assigns each member
-    either a shared functional action role (when <= 25 distinct suffixes exist) or compact slot indices
-    (`slot_01`..`slot_M`) with aggregated per-slot semantic summaries.
+    1. Groups leaves by explicit domain_map, prefix tokens (`iot_hue_lightdim`, `drive.files_list`),
+       or natural-language description stems when keys are opaque (`option_0 .. option_150`).
+    2. Aligns unique cross-domain action suffixes (`query`, `set`, `list`) into shared fine roles
+       while packing any remaining domain-specific intents into compact residual slots (`member_01..M`),
+       preserving 100% lossless root-to-leaf decoding within <= 26 options per slot.
     """
     detected_catch_all = catch_all_key
     if not detected_catch_all:
@@ -110,46 +169,49 @@ def build_prefix_taxonomy_trie(
                 detected_catch_all = cand
                 break
 
-    raw_groups: dict[str, list[tuple[str, str]]] = {}
-    raw_suffixes: dict[str, str] = {}
-
-    for key, desc in criteria.items():
-        if key == detected_catch_all:
-            continue
-        if domain_map and key in domain_map:
-            dom = domain_map[key]
-            parts = _SPLIT_PREFIX_RE.split(key, maxsplit=1)
-            suf = parts[1] if len(parts) > 1 else key
-        else:
-            parts = _SPLIT_PREFIX_RE.split(key, maxsplit=1)
-            dom = parts[0] if len(parts) > 1 else key[:3].lower()
-            suf = parts[1] if len(parts) > 1 else key
-        raw_groups.setdefault(dom, []).append((key, desc))
-        raw_suffixes[key] = suf
-
-    # Merge smallest tail domains if domain count exceeds max_coarse, ensuring every group <= 25 leaves.
+    non_catch_items = [(k, desc) for k, desc in criteria.items() if k != detected_catch_all]
     cap_coarse = min(max_coarse, MAX_OPTIONS_PER_SLOT - (1 if detected_catch_all else 0))
+
+    opaque_count = sum(1 for k, _ in non_catch_items if _OPAQUE_KEY_RE.match(k))
+    if not domain_map and non_catch_items and opaque_count >= max(2, int(0.8 * len(non_catch_items))):
+        raw_groups, raw_suffixes = _build_lexical_coarse_groups(non_catch_items, cap_coarse)
+    else:
+        raw_groups = {}
+        raw_suffixes = {}
+        for key, desc in non_catch_items:
+            if domain_map and key in domain_map:
+                dom = domain_map[key]
+                parts = _SPLIT_PREFIX_RE.split(key, maxsplit=1)
+                suf = parts[1] if len(parts) > 1 else key
+            else:
+                parts = _SPLIT_PREFIX_RE.split(key, maxsplit=1)
+                dom = parts[0] if len(parts) > 1 else key[:3].lower()
+                suf = parts[1] if len(parts) > 1 else key
+            raw_groups.setdefault(dom, []).append((key, desc))
+            raw_suffixes[key] = suf
+
+    # Merge smallest tail domains if domain count exceeds cap_coarse, ensuring each group <= 25 leaves.
     sorted_doms = sorted(raw_groups.keys(), key=lambda d: (-len(raw_groups[d]), d))
     groups: dict[str, list[tuple[str, str]]] = {}
     overflow_idx = 1
+    max_per_group = MAX_OPTIONS_PER_SLOT - (1 if detected_catch_all else 0)
     for dom in sorted_doms:
         members = raw_groups[dom]
-        # Split oversized domains into <=25 chunks if needed
-        for chunk_start in range(0, len(members), MAX_OPTIONS_PER_SLOT - 1):
-            chunk = members[chunk_start : chunk_start + (MAX_OPTIONS_PER_SLOT - 1)]
-            chunk_name = dom if chunk_start == 0 else f"{dom}_{chunk_start // (MAX_OPTIONS_PER_SLOT - 1) + 1}"
+        for chunk_start in range(0, len(members), max_per_group):
+            chunk = members[chunk_start : chunk_start + max_per_group]
+            chunk_name = dom if chunk_start == 0 else f"{dom}_{chunk_start // max_per_group + 1}"
             if len(groups) < cap_coarse - 1 or len(sorted_doms) <= cap_coarse:
-                groups[chunk_name] = chunk
+                groups[chunk_name] = list(chunk)
             else:
                 misc_key = f"other_domain_{overflow_idx}"
-                while misc_key in groups and len(groups[misc_key]) + len(chunk) > MAX_OPTIONS_PER_SLOT - 1:
+                while misc_key in groups and len(groups[misc_key]) + len(chunk) > max_per_group:
                     overflow_idx += 1
                     misc_key = f"other_domain_{overflow_idx}"
                 groups.setdefault(misc_key, []).extend(chunk)
 
     if len(groups) > cap_coarse:
         raise ValueError(
-            f"cannot pack {len(criteria)} options into <= {cap_coarse} domains of <= {MAX_OPTIONS_PER_SLOT - 1} items"
+            f"cannot pack {len(criteria)} options into <= {cap_coarse} domains of <= {max_per_group} items"
         )
 
     coarse_criteria: dict[str, str] = {}
@@ -160,15 +222,21 @@ def build_prefix_taxonomy_trie(
     if detected_catch_all and detected_catch_all in criteria:
         coarse_criteria[detected_catch_all] = criteria[detected_catch_all]
 
-    # Check if natural suffixes are unique within each domain AND fit in <= 25 total fine options
+    fine_budget = MAX_OPTIONS_PER_SLOT - (1 if detected_catch_all else 0)
     distinct_suffixes: list[str] = []
     suffix_collision = False
+    suffix_dom_counts: dict[str, int] = {}
+    suffix_has_dup_in_dom: set[str] = set()
+
     for dom, members in groups.items():
         seen_in_dom: set[str] = set()
         for k, _ in members:
             s = raw_suffixes[k]
             if s in seen_in_dom:
                 suffix_collision = True
+                suffix_has_dup_in_dom.add(s)
+            else:
+                suffix_dom_counts[s] = suffix_dom_counts.get(s, 0) + 1
             seen_in_dom.add(s)
             if s not in distinct_suffixes:
                 distinct_suffixes.append(s)
@@ -176,9 +244,7 @@ def build_prefix_taxonomy_trie(
     fine_criteria: dict[str, str] = {}
     leaves: dict[str, TaxonomyLeaf] = {}
 
-    if not suffix_collision and 2 <= len(distinct_suffixes) <= (
-        MAX_OPTIONS_PER_SLOT - (1 if detected_catch_all else 0)
-    ):
+    if not suffix_collision and 2 <= len(distinct_suffixes) <= fine_budget:
         for s in distinct_suffixes:
             examples = [criteria[k] for k, s_val in raw_suffixes.items() if s_val == s][:3]
             fine_criteria[s] = f"Sub-intent '{s}': " + "; ".join(examples)
@@ -191,14 +257,51 @@ def build_prefix_taxonomy_trie(
                     description=desc,
                 )
     else:
-        max_member_len = max(len(m) for m in groups.values())
-        max_member_len = max(2, max_member_len)
-        for idx in range(max_member_len):
+        # Partial cross-domain role alignment: promote suffixes shared across >= 2 domains
+        # (with no intra-domain collision) when shared roles + max residual per domain <= fine_budget.
+        shared_candidates = sorted(
+            (s for s, cnt in suffix_dom_counts.items() if cnt >= 2 and s not in suffix_has_dup_in_dom),
+            key=lambda s: (-suffix_dom_counts[s], s),
+        )
+        promoted_roles: list[str] = []
+        for s in shared_candidates:
+            trial = set(promoted_roles) | {s}
+            max_rem = max(
+                sum(1 for k, _ in members if raw_suffixes[k] not in trial)
+                for members in groups.values()
+            )
+            if len(trial) + max_rem <= fine_budget:
+                promoted_roles.append(s)
+
+        promoted_set = set(promoted_roles)
+        for s in promoted_roles:
+            role_key = f"role_{s}"
+            examples = [criteria[k] for k, s_val in raw_suffixes.items() if s_val == s][:3]
+            fine_criteria[role_key] = f"Action role '{s}': " + "; ".join(examples)
+            for dom, members in groups.items():
+                for k, desc in members:
+                    if raw_suffixes[k] == s:
+                        leaves[k] = TaxonomyLeaf(
+                            leaf_key=k,
+                            coarse_key=dom,
+                            fine_key=role_key,
+                            description=desc,
+                        )
+
+        residuals_by_dom: dict[str, list[tuple[str, str]]] = {
+            dom: [(k, desc) for k, desc in members if raw_suffixes[k] not in promoted_set]
+            for dom, members in groups.items()
+        }
+        max_res_len = max((len(m) for m in residuals_by_dom.values()), default=0)
+        if not fine_criteria:
+            max_res_len = max(2, max_res_len)
+
+        for idx in range(max_res_len):
             slot_key = f"member_{idx + 1:02d}"
             slot_examples: list[str] = []
-            for dom, members in groups.items():
-                if idx < len(members):
-                    leaf_k, leaf_desc = members[idx]
+            for dom, rem_members in residuals_by_dom.items():
+                if idx < len(rem_members):
+                    leaf_k, leaf_desc = rem_members[idx]
                     short_desc = leaf_desc if len(leaf_desc) <= 48 else leaf_desc[:45] + "..."
                     slot_examples.append(f"[{dom}] {leaf_k} ({short_desc})")
                     leaves[leaf_k] = TaxonomyLeaf(
@@ -207,7 +310,8 @@ def build_prefix_taxonomy_trie(
                         fine_key=slot_key,
                         description=leaf_desc,
                     )
-            fine_criteria[slot_key] = "; ".join(slot_examples)
+            if slot_examples or slot_key not in fine_criteria:
+                fine_criteria[slot_key] = "; ".join(slot_examples) if slot_examples else f"Residual slot {idx + 1}"
 
     if detected_catch_all and detected_catch_all in criteria:
         fine_criteria[detected_catch_all] = criteria[detected_catch_all]

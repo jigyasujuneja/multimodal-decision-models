@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .types import MAX_OPTIONS_PER_SLOT, CandidateMark, DecisionQuestion
 
 GRID_ROWS = ("top", "middle", "bottom")
 GRID_COLS = ("left", "center", "right")
+GRID_4X4_ROWS = ("r0", "r1", "r2", "r3")
+GRID_4X4_COLS = ("c0", "c1", "c2", "c3")
 
 
 def box_center(box: tuple[float, float, float, float]) -> tuple[float, float]:
@@ -54,6 +56,57 @@ def assign_point_to_grid_cell(cy: float, cx: float) -> str:
 def assign_box_to_grid_cell(box: tuple[float, float, float, float]) -> str:
     cy, cx = box_center(box)
     return assign_point_to_grid_cell(cy, cx)
+
+
+def assign_point_to_grid_4x4(cy: float, cx: float) -> str:
+    """Map normalized (cy, cx) in [0, 100] to a 4x4 spatial cell ('r0_c0' .. 'r3_c3')."""
+    r = max(0, min(3, int((cy / 100.0) * 4.0)))
+    c = max(0, min(3, int((cx / 100.0) * 4.0)))
+    return f"{GRID_4X4_ROWS[r]}_{GRID_4X4_COLS[c]}"
+
+
+def assign_box_to_grid_4x4(box: tuple[float, float, float, float]) -> str:
+    """Map a [y_min, x_min, y_max, x_max] box center to its 4x4 spatial cell."""
+    cy, cx = box_center(box)
+    return assign_point_to_grid_4x4(cy, cx)
+
+
+def grid_4x4_cell_bounds(cell: str) -> tuple[float, float, float, float]:
+    """Return [y_min, x_min, y_max, x_max] bounds in [0, 100] for a 4x4 cell."""
+    parts = cell.strip().split("_")
+    if len(parts) != 2 or parts[0] not in GRID_4X4_ROWS or parts[1] not in GRID_4X4_COLS:
+        raise ValueError(f"invalid 4x4 grid cell: {cell!r}")
+    r = GRID_4X4_ROWS.index(parts[0])
+    c = GRID_4X4_COLS.index(parts[1])
+    return (r * 25.0, c * 25.0, (r + 1) * 25.0, (c + 1) * 25.0)
+
+
+def expected_mark_center_from_probabilities(
+    probs: Mapping[str, float],
+    marks: Sequence[CandidateMark],
+    catch_all_key: str = "none_visible",
+) -> tuple[float, float, bool]:
+    """Compute the probability-weighted expected (cy, cx) across candidate Set-of-Marks boxes.
+
+    Excludes catch_all_key mass and renormalizes over valid mark IDs. Returns (0.0, 0.0, False)
+    when no positive probability mass falls on candidate marks.
+    """
+    mass = 0.0
+    sum_y = 0.0
+    sum_x = 0.0
+    for m in marks:
+        mid = m.id.strip()
+        if not mid or mid == catch_all_key:
+            continue
+        p = float(probs.get(mid, 0.0))
+        if math.isfinite(p) and p > 0.0:
+            mcy, mcx = box_center(m.box)
+            mass += p
+            sum_y += p * mcy
+            sum_x += p * mcx
+    if mass <= 1e-12:
+        return 0.0, 0.0, False
+    return sum_y / mass, sum_x / mass, True
 
 
 def _cell_rc(cell: str) -> tuple[int, int] | None:
