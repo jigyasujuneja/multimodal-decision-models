@@ -688,6 +688,7 @@ class MultimodalEmbeddingIndex:
                     "adapter_alpha": self.adapter_alpha,
                 },
                 sort_keys=True,
+                allow_nan=False,
             )
         ]
         for item_id in sorted(self._items.keys()):
@@ -705,6 +706,7 @@ class MultimodalEmbeddingIndex:
                         "metadata": item.metadata,
                     },
                     sort_keys=True,
+                    allow_nan=False,
                 )
             )
         out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

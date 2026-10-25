@@ -222,3 +222,25 @@ func TestNormalizeCosinePriorPackedBracketsGrid4x4AndProbabilisticMonteCarlo(t *
 		t.Fatalf("expected soft triangle contradiction on (x1,x3), got %+v", softTris)
 	}
 }
+
+func TestFusePriorWithGateNeverAndUnknownModes(t *testing.T) {
+	raw := map[string]float64{"a": 0.52, "b": 0.48}
+	prior := map[string]float64{"a": 0.0, "b": 4.0}
+	keys := []string{"a", "b"}
+
+	offProbs, offWin, _, _, offFused := FusePriorWithGate(raw, prior, keys, 1.0, 0.8, 0.16, "off")
+	neverProbs, neverWin, _, _, neverFused := FusePriorWithGate(raw, prior, keys, 1.0, 0.8, 0.16, "never")
+	unkProbs, unkWin, _, _, unkFused := FusePriorWithGate(raw, prior, keys, 1.0, 0.8, 0.16, "unknown_mode")
+
+	if offFused || neverFused || unkFused {
+		t.Fatalf("expected fused=false for off/never/unknown, got off=%v never=%v unk=%v", offFused, neverFused, unkFused)
+	}
+	if offWin != "a" || neverWin != "a" || unkWin != "a" {
+		t.Fatalf("expected winner 'a', got off=%q never=%q unk=%q", offWin, neverWin, unkWin)
+	}
+	for _, k := range keys {
+		if math.Abs(offProbs[k]-neverProbs[k]) > 1e-12 || math.Abs(offProbs[k]-unkProbs[k]) > 1e-12 {
+			t.Fatalf("mismatch across off/never/unknown on key %q", k)
+		}
+	}
+}

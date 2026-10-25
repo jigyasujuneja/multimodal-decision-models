@@ -26,6 +26,7 @@ from .backends import (
 )
 from .calibration import (
     DEFAULT_EVIDENCE_CRITERIA,
+    VALID_PRIOR_GATE_MODES,
     TemperatureScalingModel,
     VectorScalingModel,
     apply_layer5_deterministic_guards,
@@ -176,6 +177,7 @@ __all__ = [
     "MCP_SERVER_NAME",
     "OPENAI_MAX_TOP_LOGPROBS",
     "UNTRUSTED_BOUNDARY_NOTICE",
+    "VALID_PRIOR_GATE_MODES",
     "BlackBoxSampledBackend",
     "CandidateMark",
     "CascadeDecisionOrchestrator",

@@ -47,6 +47,7 @@ import urllib.request
 from typing import Any, Callable, Collection, Mapping, Protocol
 
 from .calibration import (
+    VALID_PRIOR_GATE_MODES,
     apply_layer5_deterministic_guards,
     inject_evidence_slot,
     normalized_entropy,
@@ -84,19 +85,41 @@ _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _INFERRED_EVIDENCE_LABELS = frozenset({"inferred", "occluded_or_unreadable", "unreadable", "absent"})
 _RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _DEFAULT_OOS_KEYS = frozenset({"none_of_the_above", "none_visible", "oos"})
+_EXPLICIT_ABSTAIN_ALIASES = frozenset(
+    {
+        "abstain",
+        "insufficient_evidence",
+        "none",
+        "none_of_the_above",
+        "none_visible",
+        "oos",
+        "out_of_scope",
+        "out_of_stock",
+        "uncertain",
+        "unknown",
+    }
+)
+_ALLOWED_DRAW_META_KEYS = frozenset(
+    {"evidence", "evidence_read", "explanation", "rationale", "reasoning"}
+)
+_CHOICE_ALIAS_KEYS = ("choice", "answer", "selected", "predicted")
 
 
 def _validate_http_url(url: str) -> str:
     """Validate that an endpoint URL uses http or https with a non-empty host (blocks file:// SSRF)."""
+    if not isinstance(url, str):
+        raise SchemaContractViolationError(f"endpoint URL must be a string, got {url!r}")
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(f"endpoint URL must use http:// or https:// with a valid host, got {url!r}")
+        raise SchemaContractViolationError(
+            f"endpoint URL must use http:// or https:// with a valid host, got {url!r}"
+        )
     return url
 
 
 def _validate_resource_segment(label: str, value: str) -> str:
-    if not value or not _SAFE_SEGMENT_RE.match(value):
-        raise ValueError(f"invalid {label} identifier: {value!r}")
+    if not isinstance(value, str) or not value or not _SAFE_SEGMENT_RE.match(value):
+        raise SchemaContractViolationError(f"invalid {label} identifier: {value!r}")
     return value
 
 
@@ -118,12 +141,33 @@ def _require_nonneg_finite_number(val: Any, field: str) -> float:
     return out
 
 
+def _require_positive_finite_number(val: Any, field: str) -> float:
+    out = _require_finite_number(val, field)
+    if out <= 0.0:
+        raise SchemaContractViolationError(f"{field} must be > 0, got {val!r}")
+    return out
+
+
 def _require_strict_int(val: Any, field: str) -> int:
     if isinstance(val, bool) or not isinstance(val, int):
         raise SchemaContractViolationError(
             f"{field} must be a non-boolean integer, got {val!r}"
         )
     return int(val)
+
+
+def _require_nonneg_int(val: Any, field: str) -> int:
+    out = _require_strict_int(val, field)
+    if out < 0:
+        raise SchemaContractViolationError(f"{field} must be >= 0, got {val!r}")
+    return out
+
+
+def _require_positive_int(val: Any, field: str) -> int:
+    out = _require_strict_int(val, field)
+    if out < 1:
+        raise SchemaContractViolationError(f"{field} must be >= 1, got {val!r}")
+    return out
 
 
 def _validate_slot_distribution(dist: Any, label: str) -> dict[str, float]:
@@ -234,6 +278,10 @@ class MockCallableBackend:
         name: str,
         fn: Callable[[Any, Mapping[str, DecisionQuestion], list[str] | None], dict[str, dict[str, float]]],
     ) -> None:
+        if not isinstance(name, str) or not name.strip():
+            raise SchemaContractViolationError("MockCallableBackend name must be a non-empty string")
+        if not callable(fn):
+            raise SchemaContractViolationError("MockCallableBackend fn must be callable")
         self.name = name
         self._fn = fn
         self.last_evidence: dict[str, str] = {}
@@ -259,13 +307,23 @@ class DgemSystemOneBackend:
         base_backoff_sec: float = 0.05,
         name: str = "dgem_systemone",
     ) -> None:
+        if not isinstance(endpoint_url, str):
+            raise SchemaContractViolationError(
+                f"endpoint_url must be a string, got {endpoint_url!r}"
+            )
         clean_url = endpoint_url.rstrip("/")
         _validate_http_url(clean_url)
+        if api_key is not None and not isinstance(api_key, str):
+            raise SchemaContractViolationError(
+                f"api_key must be a string or None, got {api_key!r}"
+            )
+        if not isinstance(name, str) or not name.strip():
+            raise SchemaContractViolationError("DgemSystemOneBackend name must be a non-empty string")
         self.endpoint_url = clean_url
         self.api_key = api_key
-        self.timeout_sec = timeout_sec
-        self.max_retries = max_retries
-        self.base_backoff_sec = base_backoff_sec
+        self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
+        self.max_retries = _require_nonneg_int(max_retries, "max_retries")
+        self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
         self.name = name
         self.last_evidence: dict[str, str] = {}
         self.last_trace: dict[str, Any] = {}
@@ -437,17 +495,46 @@ class OpenAILogprobBackend:
         min_captured_mass: float = 1e-6,
         name: str | None = None,
     ) -> None:
+        if not isinstance(endpoint_url, str):
+            raise SchemaContractViolationError(
+                f"endpoint_url must be a string, got {endpoint_url!r}"
+            )
         clean_url = endpoint_url.rstrip("/")
         _validate_http_url(clean_url)
+        if not isinstance(model, str) or not model.strip():
+            raise SchemaContractViolationError(f"model must be a non-empty string, got {model!r}")
+        if api_key is not None and not isinstance(api_key, str):
+            raise SchemaContractViolationError(f"api_key must be a string or None, got {api_key!r}")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise SchemaContractViolationError(
+                f"OpenAILogprobBackend name must be a non-empty string when provided, got {name!r}"
+            )
+        clean_mass = _require_positive_finite_number(min_captured_mass, "min_captured_mass")
+        if clean_mass > 1.0:
+            raise SchemaContractViolationError(
+                f"min_captured_mass must be in (0, 1], got {min_captured_mass!r}"
+            )
+        clean_token_ids: dict[str, int] | None = None
+        if letter_token_ids is not None:
+            if not isinstance(letter_token_ids, Mapping):
+                raise SchemaContractViolationError("letter_token_ids must be a mapping when provided")
+            if letter_token_ids:
+                clean_token_ids = {}
+                for ltr, tid in letter_token_ids.items():
+                    if not isinstance(ltr, str) or not ltr.strip():
+                        raise SchemaContractViolationError(
+                            f"letter_token_ids keys must be non-empty strings, got {ltr!r}"
+                        )
+                    clean_token_ids[ltr] = _require_nonneg_int(tid, f"letter_token_ids[{ltr!r}]")
         self.endpoint_url = clean_url
         self.model = model
         self.api_key = api_key
-        self.timeout_sec = timeout_sec
-        self.max_retries = max_retries
-        self.base_backoff_sec = base_backoff_sec
-        self.max_concurrency = max(1, int(max_concurrency))
-        self.letter_token_ids = dict(letter_token_ids) if letter_token_ids else None
-        self.min_captured_mass = min_captured_mass
+        self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
+        self.max_retries = _require_nonneg_int(max_retries, "max_retries")
+        self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
+        self.max_concurrency = _require_positive_int(max_concurrency, "max_concurrency")
+        self.letter_token_ids = clean_token_ids
+        self.min_captured_mass = clean_mass
         self.name = name or f"openai_logprob:{model}"
         self.last_evidence: dict[str, str] = {}
 
@@ -674,10 +761,12 @@ class VertexGeminiBackend:
         self.project = _validate_resource_segment("project", project)
         self.model = _validate_resource_segment("model", model)
         self.location = _validate_resource_segment("location", location)
+        if access_token_fn is not None and not callable(access_token_fn):
+            raise SchemaContractViolationError("access_token_fn must be callable when provided")
         self.access_token_fn = access_token_fn
-        self.timeout_sec = timeout_sec
-        self.max_retries = max_retries
-        self.base_backoff_sec = base_backoff_sec
+        self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
+        self.max_retries = _require_nonneg_int(max_retries, "max_retries")
+        self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
         if endpoint_override is not None:
             _validate_http_url(endpoint_override)
         self.endpoint_override = endpoint_override
@@ -968,6 +1057,10 @@ SamplerFn = Callable[..., Mapping[str, Any] | str]
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 
+def _reject_nonfinite_json_constant(token: str) -> Any:
+    raise SchemaContractViolationError(f"non-finite JSON constant {token!r} in sampler output")
+
+
 def _extract_json_dict_if_present(raw_text: str) -> dict[str, Any] | None:
     stripped = raw_text.strip()
     if not stripped:
@@ -982,7 +1075,7 @@ def _extract_json_dict_if_present(raw_text: str) -> dict[str, Any] | None:
     if not candidate_str:
         return None
     try:
-        parsed = json.loads(candidate_str)
+        parsed = json.loads(candidate_str, parse_constant=_reject_nonfinite_json_constant)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
@@ -992,27 +1085,87 @@ def _resolve_option_token(
     raw_token: str,
     valid_keys: list[str],
     letter_to_key: Mapping[str, str],
+    fallback_key: str | None = None,
 ) -> str | None:
     cleaned = raw_token.strip()
     if not cleaned:
         return None
     if cleaned in valid_keys:
         return cleaned
-    trimmed = cleaned.strip(" \t\r\n\"'().:")
-    if trimmed in valid_keys:
-        return trimmed
-    if trimmed in letter_to_key:
-        return letter_to_key[trimmed]
-    if trimmed.upper() in letter_to_key and len(trimmed) == 1:
-        return letter_to_key[trimmed.upper()]
-    m_lead = re.match(r"^\s*(?:option\s+)?([A-Z])(?:\b|[).:])", cleaned)
-    if m_lead and m_lead.group(1) in letter_to_key:
-        return letter_to_key[m_lead.group(1)]
-    lower_cleaned = cleaned.lower()
-    for k in valid_keys:
-        if re.search(rf"(?<![a-z0-9_]){re.escape(k.lower())}(?![a-z0-9_])", lower_cleaned):
-            return k
+    unquoted = cleaned.strip(" \t\r\n\"'")
+    if not unquoted:
+        return None
+    if unquoted in valid_keys:
+        return unquoted
+    ci_matches = [k for k in valid_keys if k.lower() == unquoted.lower()]
+    if len(ci_matches) == 1:
+        return ci_matches[0]
+    m_opt = re.fullmatch(r"\(?\s*(?:[Oo]ption\s+)?([A-Za-z])\s*[).:]?", unquoted)
+    if m_opt:
+        ltr = m_opt.group(1).upper()
+        if ltr in letter_to_key:
+            return letter_to_key[ltr]
+    m_pair = re.match(r"^\(?\s*(?:[Oo]ption\s+)?([A-Z])\s*[)=:\u2014-]\s*(.+)$", unquoted)
+    if m_pair and m_pair.group(1) in letter_to_key:
+        expected_key = letter_to_key[m_pair.group(1)]
+        rest = m_pair.group(2).strip()
+        if (
+            rest == expected_key
+            or rest.lower().startswith(f"{expected_key.lower()}:")
+            or rest.lower().startswith(f"{expected_key.lower()} ")
+            or rest.lower().startswith(f"{expected_key.lower()}(")
+        ):
+            return expected_key
+    if fallback_key is not None and unquoted.lower() in _EXPLICIT_ABSTAIN_ALIASES:
+        return fallback_key
     return None
+
+
+def _resolve_choice_scalar(
+    raw_val: Any,
+    valid_keys: list[str],
+    letter_to_key: Mapping[str, str],
+    fallback_key: str | None,
+    field: str,
+) -> str:
+    if isinstance(raw_val, bool) or raw_val is None:
+        raise SchemaContractViolationError(
+            f"{field} must be a valid option string, got {raw_val!r}"
+        )
+    if isinstance(raw_val, int):
+        int_str = str(raw_val)
+        if int_str in valid_keys:
+            return int_str
+        raise SchemaContractViolationError(
+            f"{field} integer token {raw_val!r} is not in valid option keys {valid_keys!r}"
+        )
+    if not isinstance(raw_val, str):
+        raise SchemaContractViolationError(
+            f"{field} must be a valid option string, got {raw_val!r}"
+        )
+    matched = _resolve_option_token(raw_val, valid_keys, letter_to_key, fallback_key)
+    if matched is None:
+        raise SchemaContractViolationError(
+            f"{field} value {raw_val!r} does not match any valid option in {valid_keys!r}"
+        )
+    return matched
+
+
+def _validate_draw_mapping_keys_and_meta(mapping_obj: Mapping[str, Any], context: str) -> str:
+    for raw_k in mapping_obj.keys():
+        if not isinstance(raw_k, str) or not raw_k.strip():
+            raise SchemaContractViolationError(
+                f"{context} keys must be non-empty strings, got {raw_k!r}"
+            )
+    for meta_k in _ALLOWED_DRAW_META_KEYS:
+        if meta_k in mapping_obj and mapping_obj[meta_k] is not None and not isinstance(
+            mapping_obj[meta_k], str
+        ):
+            raise SchemaContractViolationError(
+                f"{context}[{meta_k!r}] must be a string when provided, got {mapping_obj[meta_k]!r}"
+            )
+    ev_raw = mapping_obj.get("evidence_read") or mapping_obj.get("evidence") or ""
+    return str(ev_raw).strip()
 
 
 def _sampler_accepts_sample_idx(fn: SamplerFn) -> tuple[int, bool]:
@@ -1057,38 +1210,50 @@ class BlackBoxSampledBackend:
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise SchemaContractViolationError("BlackBoxSampledBackend name must be non-empty")
-        if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
-            raise SchemaContractViolationError(f"num_samples must be an int >= 1, got {num_samples!r}")
-        if (
-            isinstance(prior_alpha, bool)
-            or not isinstance(prior_alpha, (int, float))
-            or not math.isfinite(float(prior_alpha))
-            or float(prior_alpha) <= 0.0
-        ):
+        if sampler is not None and not callable(sampler):
             raise SchemaContractViolationError(
-                f"prior_alpha must be finite and > 0, got {prior_alpha!r}"
+                "BlackBoxSampledBackend sampler must be callable when provided"
             )
+        clean_samples = _require_positive_int(num_samples, "num_samples")
+        clean_alpha = _require_positive_finite_number(prior_alpha, "prior_alpha")
         if sampler is None and not endpoint_url:
             raise SchemaContractViolationError(
                 "BlackBoxSampledBackend requires either a callable `sampler` or `endpoint_url`"
             )
+        if not isinstance(model, str) or not model.strip():
+            raise SchemaContractViolationError(f"model must be a non-empty string, got {model!r}")
+        if api_key is not None and not isinstance(api_key, str):
+            raise SchemaContractViolationError(f"api_key must be a string or None, got {api_key!r}")
+        if (
+            not isinstance(catch_all_keys, Collection)
+            or isinstance(catch_all_keys, (str, bytes, bytearray))
+            or not all(isinstance(k, str) and bool(k.strip()) for k in catch_all_keys)
+        ):
+            raise SchemaContractViolationError(
+                "catch_all_keys must be a collection of non-empty strings"
+            )
 
         self.name = str(name).strip()
         self.sampler = sampler
-        self.num_samples = int(num_samples)
-        self.prior_alpha = float(prior_alpha)
+        self.num_samples = clean_samples
+        self.prior_alpha = clean_alpha
         self.endpoint_url: str | None = None
         if endpoint_url is not None:
+            if not isinstance(endpoint_url, str):
+                raise SchemaContractViolationError(
+                    f"endpoint_url must be a string, got {endpoint_url!r}"
+                )
             clean_url = endpoint_url.rstrip("/")
             _validate_http_url(clean_url)
             self.endpoint_url = clean_url
         self.model = model
         self.api_key = api_key
-        self.timeout_sec = timeout_sec
-        self.max_retries = max_retries
-        self.base_backoff_sec = base_backoff_sec
-        self.max_concurrency = max(1, int(max_concurrency))
-        self.catch_all_keys = frozenset(str(k) for k in catch_all_keys) | {"0"}
+        self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
+        self.max_retries = _require_nonneg_int(max_retries, "max_retries")
+        self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
+        self.max_concurrency = _require_positive_int(max_concurrency, "max_concurrency")
+        default_zero = {"0"} if catch_all_keys is _DEFAULT_OOS_KEYS else set()
+        self.catch_all_keys = frozenset(str(k) for k in catch_all_keys) | default_zero
 
         self.last_epistemic_variance: dict[str, float] = {}
         self.last_option_epistemic_variance: dict[str, dict[str, float]] = {}
@@ -1135,9 +1300,19 @@ class BlackBoxSampledBackend:
             if isinstance(c0, Mapping):
                 msg = c0.get("message")
                 if isinstance(msg, Mapping) and msg.get("content") is not None:
-                    return str(msg["content"])
+                    content_val = msg["content"]
+                    if isinstance(content_val, (str, Mapping)):
+                        return content_val
+                    raise SchemaContractViolationError(
+                        f"upstream message.content must be a string or object, got {content_val!r}"
+                    )
                 if c0.get("text") is not None:
-                    return str(c0["text"])
+                    text_val = c0["text"]
+                    if isinstance(text_val, str):
+                        return text_val
+                    raise SchemaContractViolationError(
+                        f"upstream choice.text must be a string, got {text_val!r}"
+                    )
         if isinstance(data.get("candidates"), list) and data["candidates"]:
             cand0 = data["candidates"][0]
             if isinstance(cand0, Mapping):
@@ -1177,23 +1352,104 @@ class BlackBoxSampledBackend:
         letter_to_key: Mapping[str, str],
         fallback_key: str | None,
     ) -> None:
+        if not isinstance(votes_raw, Mapping) or not votes_raw:
+            raise SchemaContractViolationError(
+                "verbalized votes map must be a non-empty JSON object"
+            )
+        added_weight = 0.0
         for raw_opt, raw_w in votes_raw.items():
-            if isinstance(raw_w, bool) or not isinstance(raw_w, (int, float)):
+            if not isinstance(raw_opt, str) or not raw_opt.strip():
                 raise SchemaContractViolationError(
-                    f"verbalized vote count for {raw_opt!r} must be a finite non-boolean number, got {raw_w!r}"
+                    f"verbalized vote option key must be a non-empty string, got {raw_opt!r}"
                 )
-            weight = float(raw_w)
-            if not math.isfinite(weight) or weight < 0.0:
+            weight = _require_nonneg_finite_number(
+                raw_w, f"verbalized vote count for {raw_opt!r}"
+            )
+            matched = _resolve_option_token(raw_opt, valid_keys, letter_to_key, fallback_key)
+            if matched is None:
                 raise SchemaContractViolationError(
-                    f"verbalized vote count for {raw_opt!r} must be finite and >= 0, got {raw_w!r}"
+                    f"unrecognized option token {raw_opt!r} in verbalized votes (valid={valid_keys!r})"
                 )
-            if weight == 0.0:
-                continue
-            matched = _resolve_option_token(str(raw_opt), valid_keys, letter_to_key)
-            if matched is not None:
+            if weight > 0.0:
                 counts_q[matched] += weight
-            elif fallback_key is not None:
-                counts_q[fallback_key] += weight
+                added_weight += weight
+        if not math.isfinite(added_weight) or added_weight <= 0.0:
+            raise SchemaContractViolationError(
+                "verbalized votes map must have strictly positive finite total vote mass"
+            )
+
+    def _accumulate_slot_entry(
+        self,
+        slot_entry: Any,
+        qid: str,
+        counts_q: dict[str, float],
+        evidences_q: list[str],
+        valid_keys: list[str],
+        letter_to_key: Mapping[str, str],
+        fallback_key: str | None,
+    ) -> bool:
+        if isinstance(slot_entry, Mapping):
+            slot_ev = _validate_draw_mapping_keys_and_meta(slot_entry, f"slot {qid!r}")
+            if slot_ev:
+                evidences_q.append(slot_ev)
+            slot_payload_keys = [k for k in slot_entry.keys() if k not in _ALLOWED_DRAW_META_KEYS]
+            if not slot_payload_keys:
+                raise SchemaContractViolationError(
+                    f"slot {qid!r} object contains no choice or votes field"
+                )
+            has_votes_key = "votes" in slot_entry
+            has_counts_key = "counts" in slot_entry
+            if has_votes_key and has_counts_key:
+                raise SchemaContractViolationError(
+                    f"slot {qid!r} object cannot specify both 'votes' and 'counts'"
+                )
+            if has_votes_key or has_counts_key:
+                sv_field = "votes" if has_votes_key else "counts"
+                if slot_payload_keys != [sv_field]:
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} object has unexpected keys alongside {sv_field!r}: {slot_payload_keys!r}"
+                    )
+                sub_votes = slot_entry[sv_field]
+                if not isinstance(sub_votes, Mapping):
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} {sv_field!r} field must be a JSON object, got {sub_votes!r}"
+                    )
+                self._accumulate_votes_map(
+                    sub_votes, counts_q, valid_keys, letter_to_key, fallback_key
+                )
+                return True
+
+            present_aliases = [a for a in _CHOICE_ALIAS_KEYS if a in slot_entry]
+            if present_aliases:
+                if len(present_aliases) > 1 or slot_payload_keys != [present_aliases[0]]:
+                    raise SchemaContractViolationError(
+                        f"slot {qid!r} object has ambiguous or unrecognized keys: {slot_payload_keys!r}"
+                    )
+                chosen = _resolve_choice_scalar(
+                    slot_entry[present_aliases[0]],
+                    valid_keys,
+                    letter_to_key,
+                    fallback_key,
+                    f"slot {qid!r}.{present_aliases[0]}",
+                )
+                counts_q[chosen] += 1.0
+                return False
+
+            flat_sub_votes = {k: slot_entry[k] for k in slot_payload_keys}
+            self._accumulate_votes_map(
+                flat_sub_votes, counts_q, valid_keys, letter_to_key, fallback_key
+            )
+            return True
+
+        chosen_scalar = _resolve_choice_scalar(
+            slot_entry,
+            valid_keys,
+            letter_to_key,
+            fallback_key,
+            f"slot {qid!r}",
+        )
+        counts_q[chosen_scalar] += 1.0
+        return False
 
     def _accumulate_draw(
         self,
@@ -1205,6 +1461,7 @@ class BlackBoxSampledBackend:
         counts: dict[str, dict[str, float]],
         evidences: dict[str, list[str]],
     ) -> bool:
+        before_totals = {qid: sum(counts[qid].values()) for qid in questions}
         saw_explicit_votes = False
         parsed_map: Mapping[str, Any] | None = None
 
@@ -1214,70 +1471,65 @@ class BlackBoxSampledBackend:
                 parsed_map = extracted
             else:
                 for qid in questions:
-                    matched = _resolve_option_token(draw, valid_keys_map[qid], bijections[qid])
-                    if matched is not None:
-                        counts[qid][matched] += 1.0
-                    elif fallback_keys[qid] is not None:
-                        fk = fallback_keys[qid]
-                        assert fk is not None
-                        counts[qid][fk] += 1.0
+                    matched = _resolve_option_token(
+                        draw,
+                        valid_keys_map[qid],
+                        bijections[qid],
+                        fallback_keys[qid],
+                    )
+                    if matched is None:
+                        raise SchemaContractViolationError(
+                            f"unparseable sampler token {draw!r} for slot {qid!r} (valid={valid_keys_map[qid]!r})"
+                        )
+                    counts[qid][matched] += 1.0
                 return False
         elif isinstance(draw, Mapping):
             parsed_map = draw
         else:
-            raise SchemaContractViolationError(f"unsupported sampler draw type: {type(draw).__name__}")
+            raise SchemaContractViolationError(
+                f"unsupported sampler draw type: {type(draw).__name__}"
+            )
 
         assert parsed_map is not None
-        top_ev = str(parsed_map.get("evidence_read") or parsed_map.get("evidence") or "").strip()
+        if not parsed_map:
+            raise SchemaContractViolationError(
+                "BlackBoxSampledBackend received empty JSON object draw"
+            )
+        top_ev = _validate_draw_mapping_keys_and_meta(parsed_map, "sampler draw")
+        has_top_votes = "votes" in parsed_map
+        has_top_counts = "counts" in parsed_map
+        if has_top_votes and has_top_counts:
+            raise SchemaContractViolationError(
+                "sampler draw cannot specify both 'votes' and 'counts'"
+            )
 
-        for v_field in ("votes", "counts"):
-            if v_field in parsed_map and parsed_map[v_field] is not None and not isinstance(
-                parsed_map[v_field], Mapping
-            ):
+        if has_top_votes or has_top_counts:
+            v_field = "votes" if has_top_votes else "counts"
+            extra_top = [
+                k for k in parsed_map.keys() if k != v_field and k not in _ALLOWED_DRAW_META_KEYS
+            ]
+            if extra_top:
                 raise SchemaContractViolationError(
-                    f"BlackBoxSampledBackend {v_field!r} field must be a JSON object, got {parsed_map[v_field]!r}"
+                    f"sampler draw has unexpected top-level keys alongside {v_field!r}: {extra_top!r}"
                 )
-
-        top_votes: Mapping[str, Any] | None = None
-        if isinstance(parsed_map.get("votes"), Mapping):
-            top_votes = parsed_map["votes"]
-        elif isinstance(parsed_map.get("counts"), Mapping):
-            top_votes = parsed_map["counts"]
-
-        if top_votes is not None:
-            # Support either {qid: {opt: count}} or single-slot {opt: count}
-            if len(questions) == 1:
-                only_qid = next(iter(questions.keys()))
-                if only_qid in top_votes and isinstance(top_votes[only_qid], Mapping):
-                    self._accumulate_votes_map(
-                        top_votes[only_qid],
-                        counts[only_qid],
-                        valid_keys_map[only_qid],
-                        bijections[only_qid],
-                        fallback_keys[only_qid],
+            raw_top_votes = parsed_map[v_field]
+            if not isinstance(raw_top_votes, Mapping) or not raw_top_votes:
+                raise SchemaContractViolationError(
+                    f"BlackBoxSampledBackend {v_field!r} field must be a non-empty JSON object, got {raw_top_votes!r}"
+                )
+            if any(isinstance(v, Mapping) for v in raw_top_votes.values()):
+                if not all(isinstance(v, Mapping) for v in raw_top_votes.values()):
+                    raise SchemaContractViolationError(
+                        f"BlackBoxSampledBackend {v_field!r} mixes nested slot objects and scalar values"
                     )
-                    if top_ev:
-                        evidences[only_qid].append(top_ev)
-                    return True
-                if not any(isinstance(v, Mapping) for v in top_votes.values()):
-                    self._accumulate_votes_map(
-                        top_votes,
-                        counts[only_qid],
-                        valid_keys_map[only_qid],
-                        bijections[only_qid],
-                        fallback_keys[only_qid],
+                if set(raw_top_votes.keys()) != set(questions.keys()):
+                    raise SchemaContractViolationError(
+                        f"BlackBoxSampledBackend {v_field!r} slot keys {list(raw_top_votes.keys())!r} "
+                        f"do not match expected slots {list(questions.keys())!r}"
                     )
-                    if top_ev:
-                        evidences[only_qid].append(top_ev)
-                    return True
-            for qid in questions:
-                if qid in top_votes:
-                    q_votes = top_votes[qid]
-                    if not isinstance(q_votes, Mapping):
-                        raise SchemaContractViolationError(
-                            f"verbalized votes for slot {qid!r} must be a JSON object, got {q_votes!r}"
-                        )
-                    saw_explicit_votes = True
+                for qid in questions:
+                    q_votes = raw_top_votes[qid]
+                    assert isinstance(q_votes, Mapping)
                     self._accumulate_votes_map(
                         q_votes,
                         counts[qid],
@@ -1287,91 +1539,117 @@ class BlackBoxSampledBackend:
                     )
                     if top_ev:
                         evidences[qid].append(top_ev)
-            if saw_explicit_votes:
-                return True
-
-        if "answers" in parsed_map and parsed_map["answers"] is not None and not isinstance(
-            parsed_map["answers"], Mapping
-        ):
-            raise SchemaContractViolationError("BlackBoxSampledBackend 'answers' field must be a JSON object")
-        container_raw = parsed_map.get("answers")
-        container: Mapping[str, Any] = container_raw if isinstance(container_raw, Mapping) else parsed_map
-
-        for qid in questions:
-            if top_ev:
-                evidences[qid].append(top_ev)
-            slot_entry: Any = container.get(qid)
-            if slot_entry is None and len(questions) == 1:
-                for alias in ("choice", "answer", "selected", "predicted"):
-                    if alias in container and container[alias] is not None:
-                        slot_entry = container[alias]
-                        break
-            if slot_entry is None:
-                continue
-
-            if isinstance(slot_entry, Mapping):
-                slot_ev = str(slot_entry.get("evidence") or slot_entry.get("evidence_read") or "").strip()
-                if slot_ev:
-                    evidences[qid].append(slot_ev)
-                for sv_field in ("votes", "counts"):
-                    if (
-                        sv_field in slot_entry
-                        and slot_entry[sv_field] is not None
-                        and not isinstance(slot_entry[sv_field], Mapping)
-                    ):
-                        raise SchemaContractViolationError(
-                            f"slot {qid!r} {sv_field!r} field must be a JSON object, got {slot_entry[sv_field]!r}"
-                        )
-                sub_votes: Mapping[str, Any] | None = None
-                if isinstance(slot_entry.get("votes"), Mapping):
-                    sub_votes = slot_entry["votes"]
-                elif isinstance(slot_entry.get("counts"), Mapping):
-                    sub_votes = slot_entry["counts"]
-                if sub_votes is not None:
+                saw_explicit_votes = True
+            elif len(questions) == 1:
+                only_qid = next(iter(questions.keys()))
+                self._accumulate_votes_map(
+                    raw_top_votes,
+                    counts[only_qid],
+                    valid_keys_map[only_qid],
+                    bijections[only_qid],
+                    fallback_keys[only_qid],
+                )
+                if top_ev:
+                    evidences[only_qid].append(top_ev)
+                saw_explicit_votes = True
+            else:
+                raise SchemaContractViolationError(
+                    f"multi-slot {v_field!r} must map each slot_id in {list(questions.keys())!r} to an option-weight object"
+                )
+        elif "answers" in parsed_map:
+            extra_ans = [
+                k for k in parsed_map.keys() if k != "answers" and k not in _ALLOWED_DRAW_META_KEYS
+            ]
+            if extra_ans:
+                raise SchemaContractViolationError(
+                    f"sampler draw has unexpected top-level keys alongside 'answers': {extra_ans!r}"
+                )
+            answers_obj = parsed_map["answers"]
+            if not isinstance(answers_obj, Mapping) or not answers_obj:
+                raise SchemaContractViolationError(
+                    "BlackBoxSampledBackend 'answers' field must be a non-empty JSON object"
+                )
+            ans_ev = _validate_draw_mapping_keys_and_meta(answers_obj, "answers")
+            ans_payload_keys = [k for k in answers_obj.keys() if k not in _ALLOWED_DRAW_META_KEYS]
+            if set(ans_payload_keys) != set(questions.keys()):
+                raise SchemaContractViolationError(
+                    f"BlackBoxSampledBackend 'answers' keys {ans_payload_keys!r} "
+                    f"do not match expected slots {list(questions.keys())!r}"
+                )
+            for qid in questions:
+                if top_ev:
+                    evidences[qid].append(top_ev)
+                if ans_ev:
+                    evidences[qid].append(ans_ev)
+                if self._accumulate_slot_entry(
+                    answers_obj[qid],
+                    qid,
+                    counts[qid],
+                    evidences[qid],
+                    valid_keys_map[qid],
+                    bijections[qid],
+                    fallback_keys[qid],
+                ):
                     saw_explicit_votes = True
-                    self._accumulate_votes_map(
-                        sub_votes,
+        else:
+            payload_keys = [k for k in parsed_map.keys() if k not in _ALLOWED_DRAW_META_KEYS]
+            if not payload_keys:
+                raise SchemaContractViolationError(
+                    "sampler draw object contains no slot answers, choice alias, or votes"
+                )
+            if set(payload_keys) == set(questions.keys()):
+                for qid in questions:
+                    if top_ev:
+                        evidences[qid].append(top_ev)
+                    if self._accumulate_slot_entry(
+                        parsed_map[qid],
+                        qid,
                         counts[qid],
+                        evidences[qid],
                         valid_keys_map[qid],
                         bijections[qid],
                         fallback_keys[qid],
+                    ):
+                        saw_explicit_votes = True
+            elif len(questions) == 1:
+                only_qid = next(iter(questions.keys()))
+                if top_ev:
+                    evidences[only_qid].append(top_ev)
+                present_top_aliases = [a for a in _CHOICE_ALIAS_KEYS if a in parsed_map]
+                if present_top_aliases:
+                    if len(present_top_aliases) > 1 or payload_keys != [present_top_aliases[0]]:
+                        raise SchemaContractViolationError(
+                            f"sampler draw has ambiguous or unrecognized keys: {payload_keys!r}"
+                        )
+                    chosen_top = _resolve_choice_scalar(
+                        parsed_map[present_top_aliases[0]],
+                        valid_keys_map[only_qid],
+                        bijections[only_qid],
+                        fallback_keys[only_qid],
+                        f"draw.{present_top_aliases[0]}",
                     )
-                    continue
-                tok_raw: Any = None
-                for alias in ("choice", "answer", "selected", "predicted"):
-                    if alias in slot_entry and slot_entry[alias] is not None:
-                        tok_raw = slot_entry[alias]
-                        break
-                if tok_raw is None:
-                    continue
-                if isinstance(tok_raw, (bool, Mapping, list, tuple, set)):
-                    raise SchemaContractViolationError(
-                        f"slot {qid!r} choice value must be a string or scalar token, got {tok_raw!r}"
+                    counts[only_qid][chosen_top] += 1.0
+                else:
+                    flat_votes = {k: parsed_map[k] for k in payload_keys}
+                    self._accumulate_votes_map(
+                        flat_votes,
+                        counts[only_qid],
+                        valid_keys_map[only_qid],
+                        bijections[only_qid],
+                        fallback_keys[only_qid],
                     )
-                if isinstance(tok_raw, float) and not math.isfinite(tok_raw):
-                    raise SchemaContractViolationError(
-                        f"slot {qid!r} choice value must be finite, got {tok_raw!r}"
-                    )
-                token_str = str(tok_raw)
+                    saw_explicit_votes = True
             else:
-                if isinstance(slot_entry, (bool, list, tuple, set)):
-                    raise SchemaContractViolationError(
-                        f"slot {qid!r} draw entry must be a string, scalar, or object, got {slot_entry!r}"
-                    )
-                if isinstance(slot_entry, float) and not math.isfinite(slot_entry):
-                    raise SchemaContractViolationError(
-                        f"slot {qid!r} draw entry must be finite, got {slot_entry!r}"
-                    )
-                token_str = str(slot_entry)
+                raise SchemaContractViolationError(
+                    f"multi-slot sampler draw keys {payload_keys!r} do not match expected slots {list(questions.keys())!r}"
+                )
 
-            matched = _resolve_option_token(token_str, valid_keys_map[qid], bijections[qid])
-            if matched is not None:
-                counts[qid][matched] += 1.0
-            elif fallback_keys[qid] is not None:
-                fk = fallback_keys[qid]
-                assert fk is not None
-                counts[qid][fk] += 1.0
-
+        for qid in questions:
+            delta = sum(counts[qid].values()) - before_totals[qid]
+            if not math.isfinite(delta) or delta <= 0.0:
+                raise SchemaContractViolationError(
+                    f"sampler draw failed to accumulate positive vote mass for slot {qid!r}"
+                )
         return saw_explicit_votes
 
     def score_questions(
@@ -1527,13 +1805,37 @@ class CascadeDecisionOrchestrator:
         conformal_seed: int | None = None,
         conformal_rng: random.Random | None = None,
     ) -> None:
+        if stage1_backend is None or not callable(getattr(stage1_backend, "score_questions", None)):
+            raise SchemaContractViolationError(
+                "stage1_backend must implement score_questions(state, questions, images)"
+            )
+        if stage2_backend is not None and not callable(
+            getattr(stage2_backend, "score_questions", None)
+        ):
+            raise SchemaContractViolationError(
+                "stage2_backend must implement score_questions(state, questions, images) when provided"
+            )
+        for flag_name, flag_val in (
+            ("shortlist_pairwise_diff", shortlist_pairwise_diff),
+            ("enable_stage2a_fast_exit", enable_stage2a_fast_exit),
+            ("escalate_on_inferred_evidence", escalate_on_inferred_evidence),
+            ("total_contract_mode", total_contract_mode),
+            ("escalate_on_conformal_ambiguous", escalate_on_conformal_ambiguous),
+            ("conformal_randomized", conformal_randomized),
+        ):
+            if not isinstance(flag_val, bool):
+                raise SchemaContractViolationError(
+                    f"{flag_name} must be bool, got {flag_val!r}"
+                )
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
-        self.hesitation_threshold = hesitation_threshold
-        self.prior_weight = prior_weight
+        self.hesitation_threshold = _require_nonneg_finite_number(
+            hesitation_threshold, "hesitation_threshold"
+        )
+        self.prior_weight = _require_nonneg_finite_number(prior_weight, "prior_weight")
         self.prior_gate_mode = prior_gate_mode
-        self.temperature = temperature
-        self.shortlist_top_k = shortlist_top_k
+        self.temperature = _require_positive_finite_number(temperature, "temperature")
+        self.shortlist_top_k = _require_nonneg_int(shortlist_top_k, "shortlist_top_k")
         self.shortlist_pairwise_diff = shortlist_pairwise_diff
         self.evidence_prompt = evidence_prompt
         self.evidence_criteria: dict[str, str] | Any = (
@@ -1544,7 +1846,9 @@ class CascadeDecisionOrchestrator:
         self.enable_stage2a_fast_exit = enable_stage2a_fast_exit
         self.escalate_on_inferred_evidence = escalate_on_inferred_evidence
         self.total_contract_mode = total_contract_mode
-        self.sla_timeout_sec = sla_timeout_sec
+        self.sla_timeout_sec = _require_positive_finite_number(
+            sla_timeout_sec, "sla_timeout_sec"
+        )
         self.response_cache = response_cache
         self.oos_keys: frozenset[str] | Any = (
             frozenset(str(k) for k in oos_keys)
@@ -1554,12 +1858,19 @@ class CascadeDecisionOrchestrator:
         self.conformal_q_hat: float | dict[str, float] | Any = (
             dict(conformal_q_hat) if isinstance(conformal_q_hat, Mapping) else conformal_q_hat
         )
+        self.conformal_q_hat = self._validated_conformal_q_hat()
         self.conformal_method = conformal_method
-        self.conformal_lam_reg = conformal_lam_reg
-        self.conformal_k_reg = conformal_k_reg
+        self.conformal_lam_reg = _require_nonneg_finite_number(
+            conformal_lam_reg, "conformal_lam_reg"
+        )
+        self.conformal_k_reg = _require_nonneg_int(conformal_k_reg, "conformal_k_reg")
         self.escalate_on_conformal_ambiguous = escalate_on_conformal_ambiguous
         self.conformal_randomized = conformal_randomized
-        self.conformal_seed = conformal_seed
+        self.conformal_seed = (
+            _require_strict_int(conformal_seed, "conformal_seed")
+            if conformal_seed is not None
+            else None
+        )
         self.conformal_rng = conformal_rng
         self.layer5_slot_context: dict[str, dict[str, Any]] | Any = (
             {
@@ -1860,13 +2171,25 @@ class CascadeDecisionOrchestrator:
             clean_call_slot_ctx = self._validate_slot_context_map(
                 layer5_slot_context, "call_layer5_slot_context"
             )
-            if not isinstance(self.prior_gate_mode, str) or self.prior_gate_mode not in (
-                "hesitant",
-                "always",
-                "never",
-            ):
+            if not isinstance(self.prior_gate_mode, str) or self.prior_gate_mode not in VALID_PRIOR_GATE_MODES:
                 raise SchemaContractViolationError(
-                    f"prior_gate_mode must be 'hesitant', 'always', or 'never', got {self.prior_gate_mode!r}"
+                    f"prior_gate_mode must be one of {VALID_PRIOR_GATE_MODES}, got {self.prior_gate_mode!r}"
+                )
+            if not isinstance(self.enable_stage2a_fast_exit, bool):
+                raise SchemaContractViolationError(
+                    f"enable_stage2a_fast_exit must be bool, got {self.enable_stage2a_fast_exit!r}"
+                )
+            if not isinstance(self.shortlist_pairwise_diff, bool):
+                raise SchemaContractViolationError(
+                    f"shortlist_pairwise_diff must be bool, got {self.shortlist_pairwise_diff!r}"
+                )
+            if not isinstance(self.escalate_on_inferred_evidence, bool):
+                raise SchemaContractViolationError(
+                    f"escalate_on_inferred_evidence must be bool, got {self.escalate_on_inferred_evidence!r}"
+                )
+            if not isinstance(self.escalate_on_conformal_ambiguous, bool):
+                raise SchemaContractViolationError(
+                    f"escalate_on_conformal_ambiguous must be bool, got {self.escalate_on_conformal_ambiguous!r}"
                 )
             if not isinstance(self.evidence_prompt, str):
                 raise SchemaContractViolationError(
@@ -1882,19 +2205,37 @@ class CascadeDecisionOrchestrator:
             if self.conformal_seed is not None:
                 _require_strict_int(self.conformal_seed, "conformal_seed")
 
-            s2_name = self.stage2_backend.name if self.stage2_backend else "none"
+            s1_name = getattr(self.stage1_backend, "name", None)
+            if not isinstance(s1_name, str) or not s1_name.strip():
+                raise SchemaContractViolationError("stage1_backend.name must be a non-empty string")
+            if self.stage2_backend is not None:
+                s2_raw_name = getattr(self.stage2_backend, "name", None)
+                if not isinstance(s2_raw_name, str) or not s2_raw_name.strip():
+                    raise SchemaContractViolationError("stage2_backend.name must be a non-empty string")
+                s2_name = s2_raw_name
+            else:
+                s2_name = "none"
             extra_cfg: dict[str, Any] = {
                 "hesitation_threshold": clean_hes,
                 "prior_weight": clean_pw,
                 "prior_gate_mode": self.prior_gate_mode,
                 "temperature": clean_temp,
                 "shortlist_top_k": clean_top_k,
-                "shortlist_pairwise_diff": bool(self.shortlist_pairwise_diff),
+                "shortlist_pairwise_diff": self.shortlist_pairwise_diff,
                 "evidence_prompt": self.evidence_prompt,
-                "enable_stage2a_fast_exit": bool(self.enable_stage2a_fast_exit),
+                "enable_stage2a_fast_exit": self.enable_stage2a_fast_exit,
                 "sister_pack_collision": sister_pack_collision,
                 "decoded_pack_size": clean_dec_pack,
             }
+            if (
+                (self.stage2_backend is not None and s2_name == "none")
+                or "->" in s1_name
+                or (self.stage2_backend is not None and "->" in s2_name)
+            ):
+                extra_cfg["backend_pair"] = [
+                    s1_name,
+                    s2_name if self.stage2_backend is not None else None,
+                ]
             if self.oos_keys != _DEFAULT_OOS_KEYS:
                 extra_cfg["oos_keys"] = sorted(self.oos_keys)
             if self.evidence_criteria is not None:
@@ -1949,7 +2290,7 @@ class CascadeDecisionOrchestrator:
                     extra_cfg["conformal_seed"] = self.conformal_seed
 
             cache_key = compute_decision_cache_key(
-                f"{self.stage1_backend.name}->{s2_name}",
+                f"{s1_name}->{s2_name}",
                 state,
                 questions,
                 images,
@@ -2008,8 +2349,11 @@ class CascadeDecisionOrchestrator:
         # 1. Stage 2A Adaptive Fast-Exit check for single-slot retrieval verification
         if self.enable_stage2a_fast_exit and len(questions) == 1 and prior_logits:
             only_qid = next(iter(questions.keys()))
+            only_question = questions[only_qid]
+            allowed_opts = only_question.option_keys()
+            allowed_set = set(allowed_opts)
             slot_priors = prior_logits.get(only_qid, {})
-            if slot_priors:
+            if slot_priors and allowed_opts:
                 max_lp = max(slot_priors.values())
                 exps = {k: math.exp(v - max_lp) for k, v in slot_priors.items()}
                 tot = sum(exps.values())
@@ -2018,21 +2362,33 @@ class CascadeDecisionOrchestrator:
                     prior_probs,
                     sister_pack_collision=sister_pack_collision,
                 )
-                if fast_ok and winner is not None:
-                    h_fast = normalized_entropy(prior_probs)
+                if fast_ok and winner is not None and winner in allowed_set:
+                    closed_raw = {k: prior_probs.get(k, 0.0) for k in allowed_opts}
+                    closed_tot = sum(closed_raw.values())
+                    closed_probs = (
+                        {k: v / closed_tot for k, v in closed_raw.items()}
+                        if closed_tot > 0.0
+                        else {k: 1.0 / len(allowed_opts) for k in allowed_opts}
+                    )
+                    h_fast = normalized_entropy(closed_probs)
                     elapsed = (time.perf_counter() - t0) * 1000.0
                     term = (
                         DecisionTerminalState.ABSTAIN_OOS
                         if winner in self.oos_keys
                         else DecisionTerminalState.STAGE2A_FAST_EXIT
                     )
+                    f_cat_fast = (
+                        FailureCategory.ABSTAINED_OOS
+                        if term == DecisionTerminalState.ABSTAIN_OOS
+                        else FailureCategory.NONE
+                    )
                     res = DecisionResult(
                         slots={
                             only_qid: SlotReadout(
                                 slot_id=only_qid,
                                 predicted=winner,
-                                probabilities=prior_probs,
-                                raw_probabilities=prior_probs,
+                                probabilities=closed_probs,
+                                raw_probabilities=closed_probs,
                                 h_raw=h_fast,
                                 confidence=1.0 - h_fast,
                                 escalated=False,
@@ -2040,17 +2396,14 @@ class CascadeDecisionOrchestrator:
                                 backend_name="stage2a_prior_fast_exit",
                                 passes_used=0,
                                 terminal_state=term,
-                                failure_category=(
-                                    FailureCategory.ABSTAINED_OOS
-                                    if term == DecisionTerminalState.ABSTAIN_OOS
-                                    else FailureCategory.NONE
-                                ),
+                                failure_category=f_cat_fast,
                             )
                         },
                         escalated=False,
                         latency_ms=elapsed,
                         backend_name="stage2a_prior_fast_exit",
                         terminal_state=term,
+                        failure_category=f_cat_fast,
                         cache_key=cache_key,
                     )
                     if can_use_cache and self.response_cache is not None:
@@ -2179,6 +2532,11 @@ class CascadeDecisionOrchestrator:
                     rank1_id=rank1_id,
                     rank1_visual_similarity=rank1_visual_similarity,
                 )
+                slot_allowed_s1 = set(q.option_keys())
+                if s1_packs:
+                    s1_packs = {k: v for k, v in s1_packs.items() if k in slot_allowed_s1} or None
+                if s1_r1_id is not None and s1_r1_id not in slot_allowed_s1:
+                    s1_r1_id = None
                 if s1_packs or s1_ven or s1_r1_sim is not None:
                     try:
                         predicted, guard_name = apply_layer5_deterministic_guards(
@@ -2271,6 +2629,11 @@ class CascadeDecisionOrchestrator:
                         rank1_id=rank1_id,
                         rank1_visual_similarity=rank1_visual_similarity,
                     )
+                    slot_allowed_s2 = set(active_questions[qid].option_keys())
+                    if s2_packs:
+                        s2_packs = {k: v for k, v in s2_packs.items() if k in slot_allowed_s2} or None
+                    if s2_r1_id is not None and s2_r1_id not in slot_allowed_s2:
+                        s2_r1_id = None
                     if s2_packs or s2_ven or s2_r1_sim is not None:
                         try:
                             s2_pred, s2_guard_name = apply_layer5_deterministic_guards(

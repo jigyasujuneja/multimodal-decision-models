@@ -18,7 +18,7 @@ Implements:
   1. Cardinality-normalized Shannon hesitation H_raw = H(p_raw) / ln(K) and confidence C_2 = 1 - H_raw.
   2. Pre-gated Bayesian Product-of-Experts (PoE) prior fusion: evaluates H_raw strictly BEFORE
      fusing retrieval or base-rate prior logits so strong priors never mask out-of-distribution hesitation.
-     Supports gate_mode in {"always", "confident", "hesitant", "proportional"}.
+     Supports gate_mode in {"always", "confident", "hesitant", "proportional", "never", "off"}.
   3. Stage 2A Adaptive Fast-Exit Gate (0-VLM resolution when P_1 - P_2 >= 0.14, Z >= 1.65, and no sister
      pack-size collision).
   4. Co-denoised / Causal Evidence-First slot injection.
@@ -35,11 +35,21 @@ import statistics
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from .contracts import SchemaContractViolationError
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     MAX_OPTIONS_PER_SLOT,
     MAX_SLOTS_PER_PASS,
     DecisionQuestion,
+)
+
+VALID_PRIOR_GATE_MODES: tuple[str, ...] = (
+    "always",
+    "confident",
+    "hesitant",
+    "proportional",
+    "never",
+    "off",
 )
 
 DEFAULT_EVIDENCE_CRITERIA: dict[str, str] = {
@@ -88,27 +98,48 @@ def pre_gated_bayesian_poe_fusion(
         - "confident": fuse only when h_raw < hesitation_threshold.
         - "hesitant": fuse only when h_raw >= hesitation_threshold (tie-breaking on uncertain items).
         - "proportional": scale effective weight by prior_weight * h_raw.
+        - "never" / "off": set effective prior weight to 0.0 while preserving h_raw and temperature.
 
     Returns:
       (fused_probabilities, h_raw, should_escalate)
     """
     if not raw_probs:
         return {}, 1.0, True
-    if temperature <= 0.0:
-        raise ValueError(f"temperature must be > 0, got {temperature}")
-    if prior_weight < 0.0:
-        raise ValueError(f"prior_weight must be >= 0, got {prior_weight}")
-    if gate_mode not in ("always", "confident", "hesitant", "proportional"):
-        raise ValueError(f"unsupported gate_mode: {gate_mode!r}")
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(float(temperature))
+        or float(temperature) <= 0.0
+    ):
+        raise SchemaContractViolationError(f"temperature must be > 0, got {temperature!r}")
+    if (
+        isinstance(prior_weight, bool)
+        or not isinstance(prior_weight, (int, float))
+        or not math.isfinite(float(prior_weight))
+        or float(prior_weight) < 0.0
+    ):
+        raise SchemaContractViolationError(f"prior_weight must be >= 0, got {prior_weight!r}")
+    if (
+        isinstance(hesitation_threshold, bool)
+        or not isinstance(hesitation_threshold, (int, float))
+        or not math.isfinite(float(hesitation_threshold))
+    ):
+        raise SchemaContractViolationError(
+            f"hesitation_threshold must be finite, got {hesitation_threshold!r}"
+        )
+    if not isinstance(gate_mode, str) or gate_mode not in VALID_PRIOR_GATE_MODES:
+        raise SchemaContractViolationError(f"unsupported gate_mode: {gate_mode!r}")
 
     for k, v in raw_probs.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise SchemaContractViolationError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
         fv = float(v)
         if not math.isfinite(fv) or fv < 0.0:
-            raise ValueError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
+            raise SchemaContractViolationError(f"raw_probs[{k!r}] must be finite and >= 0, got {v!r}")
     if prior_logits:
         for k, v in prior_logits.items():
-            if not math.isfinite(float(v)):
-                raise ValueError(f"prior_logits[{k!r}] must be finite, got {v!r}")
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+                raise SchemaContractViolationError(f"prior_logits[{k!r}] must be finite, got {v!r}")
 
     # Step 1: Normalize raw probabilities and evaluate H_raw BEFORE touching priors.
     total_raw = sum(max(0.0, float(v)) for v in raw_probs.values())
@@ -117,18 +148,23 @@ def pre_gated_bayesian_poe_fusion(
     else:
         norm_raw = {k: max(0.0, float(v)) / total_raw for k, v in raw_probs.items()}
 
+    temp_f = float(temperature)
+    pw_f = float(prior_weight)
+    hes_f = float(hesitation_threshold)
     h_raw = normalized_entropy(norm_raw)
-    should_escalate = h_raw >= hesitation_threshold
+    should_escalate = h_raw >= hes_f
 
-    eff_weight = prior_weight
-    if gate_mode == "confident" and h_raw >= hesitation_threshold:
+    eff_weight = pw_f
+    if gate_mode in ("never", "off"):
         eff_weight = 0.0
-    elif gate_mode == "hesitant" and h_raw < hesitation_threshold:
+    elif gate_mode == "confident" and h_raw >= hes_f:
+        eff_weight = 0.0
+    elif gate_mode == "hesitant" and h_raw < hes_f:
         eff_weight = 0.0
     elif gate_mode == "proportional":
-        eff_weight = prior_weight * h_raw
+        eff_weight = pw_f * h_raw
 
-    if (not prior_logits or eff_weight == 0.0) and math.isclose(temperature, 1.0):
+    if (not prior_logits or eff_weight == 0.0) and math.isclose(temp_f, 1.0):
         return dict(norm_raw), h_raw, should_escalate
 
     # Step 2: Log-space Bayesian Product-of-Experts fusion:
@@ -137,7 +173,7 @@ def pre_gated_bayesian_poe_fusion(
     log_scores: dict[str, float] = {}
     for k, p in norm_raw.items():
         prior_val = float(prior_logits.get(k, 0.0)) if prior_logits else 0.0
-        log_scores[k] = (math.log(max(eps, p)) / temperature) + (eff_weight * prior_val)
+        log_scores[k] = (math.log(max(eps, p)) / temp_f) + (eff_weight * prior_val)
 
     max_log = max(log_scores.values())
     exp_scores = {k: math.exp(v - max_log) for k, v in log_scores.items()}

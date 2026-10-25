@@ -191,16 +191,25 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
         self.assertGreater(unanimous_1.last_epistemic_variance["slot_sku"], var_m5)
         self.assertGreater(var_m5, unanimous_20.last_epistemic_variance["slot_sku"])
 
-        # Verbalized vote counts + catch-all routing for unrecognized choice tokens
+        # Verbalized vote counts + explicit abstain alias routing; unrecognized tokens must fail closed
         verbalized = mdm.BlackBoxSampledBackend(
             "verbalized_votes",
-            lambda state, qs: {"votes": {"sku_200": 4, "unknown_hallucination": 1}, "evidence": "500ml bottle"},
+            lambda state, qs: {"votes": {"sku_200": 4, "oos": 1}, "evidence": "500ml bottle"},
             num_samples=5,
             prior_alpha=0.5,
         )
         v_probs = verbalized.score_questions({}, questions)["slot_sku"]
         self.assertAlmostEqual(v_probs["sku_200"], 4.5 / 7.0, places=9)
         self.assertAlmostEqual(v_probs["none_of_the_above"], 1.5 / 7.0, places=9)
+
+        hallucinated = mdm.BlackBoxSampledBackend(
+            "verbalized_hallucinated",
+            lambda state, qs: {"votes": {"sku_200": 4, "unknown_hallucination": 1}, "evidence": "500ml bottle"},
+            num_samples=5,
+            prior_alpha=0.5,
+        )
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            hallucinated.score_questions({}, questions)
 
         # Live local ThreadingHTTPServer /v1/chat/completions without top_logprobs
         draw_seq = ["B", "B", "A", "B"]
@@ -1807,6 +1816,355 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             )
             self.assertFalse(res_opt_out.contains_abstain)
             self.assertFalse(res_opt_out.should_escalate)
+
+    def test_iter4_positive_allowlist_draw_grammar_and_constructor_contracts(self) -> None:
+        q_open = {
+            "sku": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Select SKU.",
+                criteria={"sku_a": "Alpha", "sku_b": "Beta", "oos": "Out of scope"},
+                order=["sku_a", "sku_b", "oos"],
+            )
+        }
+        q_closed = {
+            "sku": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Select SKU.",
+                criteria={"sku_a": "Alpha", "sku_b": "Beta"},
+                order=["sku_a", "sku_b"],
+            )
+        }
+        q_multi = {
+            "s1": q_open["sku"],
+            "s2": q_closed["sku"],
+        }
+
+        single_malformed: list[Any] = [
+            {"A": -0.5},
+            {"A": True},
+            {"A": float("nan")},
+            {"A": 0.0},
+            {"A": {"nested": 1}},
+            "bad",
+            "-0.5",
+            "0.0",
+            "",
+            "not a valid token",
+            "A bad string",
+            {},
+            {"evidence": "label only"},
+            {"votes": {}},
+            {"votes": {"A": 0.0, "B": 0.0}},
+            {"votes": {"A": {"nested": 1}, "B": 2}},
+            {"votes": {"INVALID": 0.0, "A": 1.0}},
+            '{"votes": {"A": NaN, "B": 1}}',
+            {"sku": -0.5},
+            {"sku": 0.0},
+            {"sku": {}},
+            {"choice": "bad"},
+        ]
+        for q_schema in (q_open, q_closed):
+            for idx, payload in enumerate(single_malformed):
+                bb = mdm.BlackBoxSampledBackend(
+                    f"iter4_bad_{idx}",
+                    sampler=lambda _s, _qs, _im=None, _p=payload: _p,
+                    num_samples=1,
+                )
+                with self.assertRaises(mdm.SchemaContractViolationError, msg=f"payload={payload!r}"):
+                    bb.score_questions({"x": idx}, q_schema)
+                env = mdm.CascadeDecisionOrchestrator(
+                    stage1_backend=bb, total_contract_mode=True
+                ).evaluate({"x": idx}, q_schema)
+                self.assertEqual(
+                    env.terminal_state, mdm.DecisionTerminalState.REJECTED_CONTRACT_VIOLATION
+                )
+
+        for mixed_seq in (["A", {"A": float("nan")}], ["A", {"A": True}], ["A", "bad"], ["A", {}]):
+            state_idx = {"i": 0}
+
+            def _mixed_sampler(
+                _s: Any, _qs: Any, _im: list[str] | None = None, _k: int = 0, _seq: list[Any] = mixed_seq
+            ) -> Any:
+                val = _seq[state_idx["i"] % len(_seq)]
+                state_idx["i"] += 1
+                return val
+
+            bb_mix = mdm.BlackBoxSampledBackend("iter4_mix", sampler=_mixed_sampler, num_samples=2)
+            env_mix = mdm.CascadeDecisionOrchestrator(
+                stage1_backend=bb_mix, total_contract_mode=True
+            ).evaluate({"x": 1}, q_open)
+            self.assertEqual(
+                env_mix.terminal_state, mdm.DecisionTerminalState.REJECTED_CONTRACT_VIOLATION
+            )
+
+        for multi_bad in (
+            {"votes": {"A": "not_a_number"}},
+            {"votes": {"s1": {"A": 2}}},
+            {"s1": "A"},
+            {"s1": "A", "s2": "bad"},
+        ):
+            bb_m = mdm.BlackBoxSampledBackend(
+                "iter4_multi_bad",
+                sampler=lambda _s, _qs, _im=None, _mb=multi_bad: _mb,
+                num_samples=1,
+            )
+            with self.assertRaises(mdm.SchemaContractViolationError):
+                bb_m.score_questions({"x": 1}, q_multi)
+
+        bb_flat_ok = mdm.BlackBoxSampledBackend(
+            "iter4_flat_ok",
+            sampler=lambda _s, _qs: {"A": 3, "B": 1},
+            num_samples=4,
+            prior_alpha=0.5,
+        )
+        p_flat = bb_flat_ok.score_questions({}, q_closed)["sku"]
+        self.assertAlmostEqual(p_flat["sku_a"], 3.5 / 5.0, places=9)
+
+        s1_valid = mdm.MockCallableBackend(
+            "s1_valid", lambda _s, _qs, _im=None: {"sku": {"sku_a": 0.8, "sku_b": 0.2}}
+        )
+        bad_ctors = [
+            lambda: mdm.BlackBoxSampledBackend("bb", lambda _s, _qs: "A", timeout_sec=True),
+            lambda: mdm.BlackBoxSampledBackend("bb", lambda _s, _qs: "A", max_retries=False),
+            lambda: mdm.BlackBoxSampledBackend("bb", lambda _s, _qs: "A", base_backoff_sec=True),
+            lambda: mdm.BlackBoxSampledBackend("bb", lambda _s, _qs: "A", max_concurrency=False),
+            lambda: mdm.DgemSystemOneBackend("https://example.com", timeout_sec=True),
+            lambda: mdm.DgemSystemOneBackend("https://example.com", max_retries=False),
+            lambda: mdm.DgemSystemOneBackend("https://example.com", base_backoff_sec=True),
+            lambda: mdm.OpenAILogprobBackend("https://example.com", "gpt-4o", timeout_sec=True),
+            lambda: mdm.OpenAILogprobBackend("https://example.com", "gpt-4o", max_retries=False),
+            lambda: mdm.OpenAILogprobBackend("https://example.com", "gpt-4o", base_backoff_sec=True),
+            lambda: mdm.OpenAILogprobBackend("https://example.com", "gpt-4o", max_concurrency=False),
+            lambda: mdm.OpenAILogprobBackend("https://example.com", "gpt-4o", min_captured_mass=True),
+            lambda: mdm.VertexGeminiBackend("proj-1", timeout_sec=True),
+            lambda: mdm.VertexGeminiBackend("proj-1", max_retries=False),
+            lambda: mdm.VertexGeminiBackend("proj-1", base_backoff_sec=True),
+            lambda: mdm.CascadeDecisionOrchestrator(s1_valid, hesitation_threshold=True),
+            lambda: mdm.CascadeDecisionOrchestrator(s1_valid, temperature=False),
+            lambda: mdm.CascadeDecisionOrchestrator(s1_valid, sla_timeout_sec=True),
+            lambda: mdm.CascadeDecisionOrchestrator(s1_valid, conformal_lam_reg=True),
+            lambda: mdm.CascadeDecisionOrchestrator(s1_valid, conformal_k_reg=False),
+        ]
+        for ctor in bad_ctors:
+            with self.assertRaises(mdm.SchemaContractViolationError):
+                ctor()
+
+    def test_iter4_prior_gate_modes_fast_exit_closure_and_cache_bijection(self) -> None:
+        q = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Select SKU",
+            criteria={"sku_a": "A", "sku_b": "B"},
+        )
+        qs = {"slot": q}
+        s1_fn = lambda _s, _q, _i=None: {"slot": {"sku_a": 0.52, "sku_b": 0.48}}
+        s2_fn = lambda _s, _q, _i=None: {"slot": {"sku_a": 0.05, "sku_b": 0.95}}
+        s1 = mdm.MockCallableBackend("s1", s1_fn)
+
+        # 1. All 6 prior_gate_mode values across calibration, orchestrator, and MCP
+        self.assertEqual(
+            mdm.VALID_PRIOR_GATE_MODES,
+            ("always", "confident", "hesitant", "proportional", "never", "off"),
+        )
+        for mode in mdm.VALID_PRIOR_GATE_MODES:
+            orch = mdm.CascadeDecisionOrchestrator(
+                stage1_backend=s1,
+                prior_weight=1.0,
+                prior_gate_mode=mode,
+                total_contract_mode=False,
+            )
+            res = orch.evaluate({"id": mode}, qs, prior_logits={"slot": {"sku_a": 0.0, "sku_b": 4.0}})
+            self.assertIn(res.slots["slot"].predicted, ("sku_a", "sku_b"))
+            if mode in ("never", "off"):
+                self.assertEqual(res.slots["slot"].predicted, "sku_a")
+                self.assertAlmostEqual(res.slots["slot"].probabilities["sku_a"], 0.52, places=9)
+
+            rpc_resp = mdm.handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "evaluate_conformal_decision",
+                        "arguments": {
+                            "probabilities": {"sku_a": 0.52, "sku_b": 0.48},
+                            "q_hat": 0.55,
+                            "prior_logits": {"sku_a": 0.0, "sku_b": 4.0},
+                            "prior_weight": 1.0,
+                            "prior_gate_mode": mode,
+                        },
+                    },
+                }
+            )
+            assert rpc_resp is not None
+            self.assertNotIn("error", rpc_resp)
+
+        bad_rpc = mdm.handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "evaluate_conformal_decision",
+                    "arguments": {
+                        "probabilities": {"sku_a": 0.52, "sku_b": 0.48},
+                        "q_hat": 0.55,
+                        "prior_gate_mode": "invalid_gate",
+                    },
+                },
+            }
+        )
+        assert bad_rpc is not None
+        self.assertEqual(bad_rpc["error"]["code"], -32602)
+
+        # 2. Stage-2A fast-exit and Layer-5 domain closure when unlisted SKU is present
+        orch_fast = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=s1,
+            enable_stage2a_fast_exit=True,
+            total_contract_mode=False,
+        )
+        res_unlisted = orch_fast.evaluate(
+            {"case": "unlisted"},
+            qs,
+            prior_logits={
+                "slot": {"unlisted_sku": 10.0, "sku_a": 0.0, "sku_b": 0.0, "c3": 0.0, "c4": 0.0}
+            },
+            candidate_pack_sizes={"sku_a": 6, "sku_b": 6, "unlisted_pack12": 12},
+            decoded_pack_size=12,
+            visual_energies={"sku_a": -0.9, "sku_b": -0.1, "unlisted_r1": -0.95},
+            rank1_id="unlisted_r1",
+            rank1_visual_similarity=0.95,
+        )
+        self.assertTrue(mdm.verify_slot_domain_closure(res_unlisted.slots["slot"], q))
+        self.assertEqual(res_unlisted.slots["slot"].terminal_state, mdm.DecisionTerminalState.STAGE1_RESOLVED)
+
+        res_listed = orch_fast.evaluate(
+            {"case": "listed"},
+            qs,
+            prior_logits={
+                "slot": {"sku_a": 10.0, "sku_b": 0.0, "unlisted_1": 0.0, "unlisted_2": 0.0}
+            },
+        )
+        self.assertTrue(mdm.verify_slot_domain_closure(res_listed.slots["slot"], q))
+        self.assertEqual(res_listed.slots["slot"].terminal_state, mdm.DecisionTerminalState.STAGE2A_FAST_EXIT)
+        self.assertEqual(set(res_listed.slots["slot"].probabilities.keys()), {"sku_a", "sku_b"})
+        self.assertAlmostEqual(sum(res_listed.slots["slot"].probabilities.values()), 1.0, places=9)
+
+        # 3. Cache-key disambiguation: stage2_backend=None vs Backend("none") and "->" delimiter
+        cache = mdm.ContentAddressedDecisionCache()
+        s2_named_none = mdm.MockCallableBackend("none", s2_fn)
+        o_no_s2 = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=s1, stage2_backend=None, hesitation_threshold=0.10, response_cache=cache
+        )
+        o_named_none = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=s1,
+            stage2_backend=s2_named_none,
+            hesitation_threshold=0.10,
+            response_cache=cache,
+        )
+        r_no_s2 = o_no_s2.evaluate({"id": 99}, qs)
+        r_named_none = o_named_none.evaluate({"id": 99}, qs)
+        self.assertNotEqual(r_no_s2.cache_key, r_named_none.cache_key)
+        self.assertEqual(r_no_s2.slots["slot"].predicted, "sku_a")
+        self.assertEqual(r_named_none.slots["slot"].predicted, "sku_b")
+
+        o_delim_1 = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend("a->b", s1_fn),
+            stage2_backend=mdm.MockCallableBackend("c", s2_fn),
+        )
+        o_delim_2 = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend("a", s1_fn),
+            stage2_backend=mdm.MockCallableBackend("b->c", s2_fn),
+        )
+        self.assertNotEqual(
+            o_delim_1.evaluate({"id": 1}, qs).cache_key,
+            o_delim_2.evaluate({"id": 1}, qs).cache_key,
+        )
+
+        # 4. compute_decision_cache_key with "__mdm_type__" + conformal_q_hat=inf
+        key_inf = mdm.compute_decision_cache_key(
+            "s1->none",
+            {"x": 1},
+            qs,
+            extra_config={"__mdm_type__": "user_tag", "conformal_q_hat": float("inf")},
+        )
+        self.assertEqual(len(key_inf), 64)
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            mdm.compute_decision_cache_key(
+                "s1->none",
+                {"x": 1},
+                qs,
+                extra_config={"__mdm_type__": "user_tag", "other": float("inf")},
+            )
+
+    def test_mcp_evaluate_conformal_decision_small_calib_qhat_inf_rfc8259_and_roundtrip(self) -> None:
+        from multimodal_decision_models.mcp_server import handle_jsonrpc_message, serve_stdio
+
+        def _reject_const(tok: str) -> None:
+            raise ValueError(f"Non-RFC-8259 JSON token: {tok}")
+
+        for n_cal, alpha_val in ((2, 0.05), (5, 0.10)):
+            req = {
+                "jsonrpc": "2.0",
+                "id": n_cal,
+                "method": "tools/call",
+                "params": {
+                    "name": "evaluate_conformal_decision",
+                    "arguments": {
+                        "probabilities": {"a": 0.9, "b": 0.1},
+                        "calib_probs": [{"a": 0.8, "b": 0.2} for _ in range(n_cal)],
+                        "calib_labels": ["a" for _ in range(n_cal)],
+                        "alpha": alpha_val,
+                        "method": "lac",
+                    },
+                },
+            }
+            in_buf = io.BytesIO((json.dumps(req, allow_nan=False) + "\n").encode("utf-8"))
+            out_buf = io.BytesIO()
+            self.assertEqual(serve_stdio(in_buf, out_buf), 0)
+            wire_text = out_buf.getvalue().decode("utf-8")
+            self.assertNotIn("Infinity", wire_text)
+            outer = json.loads(wire_text, parse_constant=_reject_const)
+            inner = json.loads(outer["result"]["content"][0]["text"], parse_constant=_reject_const)
+            self.assertIsNone(inner["q_hat"])
+            self.assertIs(inner["q_hat_infinite"], True)
+            self.assertEqual(inner["prediction_set"], ["a", "b"])
+            self.assertTrue(inner["should_escalate"])
+
+            rt = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 100 + n_cal,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "evaluate_conformal_decision",
+                        "arguments": {
+                            "probabilities": {"a": 0.9, "b": 0.1},
+                            "q_hat": inner["q_hat"],
+                            "q_hat_infinite": inner["q_hat_infinite"],
+                            "method": "lac",
+                        },
+                    },
+                }
+            )
+            assert rt is not None
+            rt_inner = json.loads(rt["result"]["content"][0]["text"], parse_constant=_reject_const)
+            self.assertEqual(rt_inner, inner)
+
+        for bad_args in (
+            {"probabilities": {"a": 0.9, "b": 0.1}, "q_hat": 0.2, "q_hat_infinite": True},
+            {"probabilities": {"a": 0.9, "b": 0.1}, "q_hat": None, "q_hat_infinite": False},
+            {"probabilities": {"a": 0.9, "b": 0.1}, "q_hat": None},
+        ):
+            err = handle_jsonrpc_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "method": "tools/call",
+                    "params": {"name": "evaluate_conformal_decision", "arguments": bad_args},
+                }
+            )
+            assert err is not None
+            self.assertEqual(err["error"]["code"], -32602)
 
 
 if __name__ == "__main__":

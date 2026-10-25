@@ -125,7 +125,7 @@ func NormalizeAndScale(raw map[string]float64, optKeys []string, tempScale float
 }
 
 // FusePriorWithGate computes raw normalized hesitation before applying log-linear prior fusion
-// according to gateMode ("always", "confident", "hesitant", "proportional", or "off").
+// according to gateMode ("always", "confident", "hesitant", "proportional", "never", or "off").
 func FusePriorWithGate(
 	rawProbs map[string]float64,
 	priorLogits map[string]float64,
@@ -137,7 +137,7 @@ func FusePriorWithGate(
 ) (probs map[string]float64, winner string, normH, rawNormH float64, fused bool) {
 	baseProbs, baseWinner, _, baseNormH := NormalizeAndScale(rawProbs, optKeys, tempScale)
 	rawNormH = baseNormH
-	if gateMode == "off" || len(priorLogits) == 0 || priorWeight <= 0 || len(optKeys) <= 1 {
+	if gateMode == "off" || gateMode == "never" || len(priorLogits) == 0 || priorWeight <= 0 || len(optKeys) <= 1 {
 		return baseProbs, baseWinner, baseNormH, rawNormH, false
 	}
 
@@ -158,6 +158,8 @@ func FusePriorWithGate(
 		if effWeight <= 1e-9 {
 			return baseProbs, baseWinner, baseNormH, rawNormH, false
 		}
+	default:
+		return baseProbs, baseWinner, baseNormH, rawNormH, false
 	}
 
 	logits := make(map[string]float64, len(optKeys))

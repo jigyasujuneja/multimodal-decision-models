@@ -341,13 +341,39 @@ def compute_decision_cache_key(
     q_sorted = {qid: q_canonical[qid] for qid in sorted(q_canonical.keys())}
     cfg_canonical: Any = {}
     if extra_config is not None:
+        cfg_seen = {id(extra_config)}
         if all(type(k) is str for k in extra_config.keys()) and "__mdm_type__" not in extra_config:
             cfg_canonical = {
-                k: _canonicalize_cache_value(extra_config[k], allow_pos_inf=(k == "conformal_q_hat"))
+                k: _canonicalize_cache_value(
+                    extra_config[k],
+                    allow_pos_inf=(type(k) is str and k == "conformal_q_hat"),
+                    _seen=cfg_seen,
+                )
                 for k in sorted(extra_config.keys())
             }
         else:
-            cfg_canonical = _canonicalize_cache_value(extra_config, allow_pos_inf=False)
+            entries = [
+                [
+                    type(k).__qualname__,
+                    _canonicalize_cache_value(k, allow_pos_inf=False, _seen=cfg_seen),
+                    _canonicalize_cache_value(
+                        v,
+                        allow_pos_inf=(type(k) is str and k == "conformal_q_hat"),
+                        _seen=cfg_seen,
+                    ),
+                ]
+                for k, v in extra_config.items()
+            ]
+            entries.sort(
+                key=lambda item: json.dumps(
+                    item[:2],
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+            cfg_canonical = {"__mdm_type__": "mapping", "entries": entries}
 
     envelope = {
         "backend": backend_name,
@@ -471,4 +497,4 @@ class ContentAddressedDecisionCache:
                     },
                 }
                 with self.persist_path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(serializable, sort_keys=True) + "\n")
+                    fh.write(json.dumps(serializable, sort_keys=True, allow_nan=False) + "\n")

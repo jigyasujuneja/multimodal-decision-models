@@ -35,7 +35,7 @@ import re
 import sys
 from typing import Any, BinaryIO, Mapping, Sequence
 
-from .calibration import pre_gated_bayesian_poe_fusion
+from .calibration import VALID_PRIOR_GATE_MODES, pre_gated_bayesian_poe_fusion
 from .conformal import (
     DEFAULT_CONFORMAL_ABSTAIN_KEYS,
     calibrate_conformal_quantile,
@@ -67,6 +67,11 @@ class _InvalidParamsError(ValueError):
 
 class _FramingInvalidRequestError(ValueError):
     """Raised when LSP Content-Length header bounds or header line limits are violated."""
+
+
+def _reject_json_constant(token: str) -> Any:
+    """Reject non-RFC-8259 NaN/Infinity tokens during JSON parsing."""
+    raise ValueError(f"Non-RFC-8259 JSON constant not permitted: {token}")
 
 
 def _require_mapping(val: Any, field: str, *, non_empty: bool = False) -> Mapping[str, Any]:
@@ -184,7 +189,20 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "object",
                     "additionalProperties": {"type": "number"},
                 },
-                "q_hat": {"type": "number"},
+                "q_hat": {
+                    "type": ["number", "null"],
+                    "description": (
+                        "Calibrated nonconformity quantile threshold, or null when "
+                        "q_hat_infinite is true (trivial full-set coverage)."
+                    ),
+                },
+                "q_hat_infinite": {
+                    "type": "boolean",
+                    "description": (
+                        "Set to true (with q_hat null or omitted) when the calibrated "
+                        "quantile is +Infinity so every candidate is retained."
+                    ),
+                },
                 "calib_probs": {
                     "type": "array",
                     "items": {"type": "object", "additionalProperties": {"type": "number"}},
@@ -196,7 +214,11 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "k_reg": {"type": "integer", "default": 1},
                 "prior_logits": {"type": "object", "additionalProperties": {"type": "number"}},
                 "prior_weight": {"type": "number", "default": 0.0},
-                "prior_gate_mode": {"type": "string", "default": "hesitant"},
+                "prior_gate_mode": {
+                    "type": "string",
+                    "enum": list(VALID_PRIOR_GATE_MODES),
+                    "default": "hesitant",
+                },
                 "hesitation_threshold": {"type": "number", "default": 0.16},
             },
             "required": ["probabilities"],
@@ -422,8 +444,31 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
             for i, lbl in enumerate(cl_seq)
         ]
 
-    if "q_hat" in args and args["q_hat"] is not None:
-        q_hat = _require_number(args["q_hat"], "q_hat")
+    q_hat_present = "q_hat" in args
+    q_hat_raw = args.get("q_hat")
+    q_hat_inf_raw = args.get("q_hat_infinite")
+    q_hat_inf_flag: bool | None = (
+        _require_bool(q_hat_inf_raw, "q_hat_infinite")
+        if q_hat_inf_raw is not None
+        else None
+    )
+
+    if q_hat_inf_flag is True:
+        if q_hat_raw is not None:
+            raise _InvalidParamsError(
+                "q_hat must be null or omitted when q_hat_infinite is true"
+            )
+        q_hat = float("inf")
+    elif q_hat_raw is not None:
+        q_hat = _require_number(q_hat_raw, "q_hat")
+    elif q_hat_present and q_hat_raw is None and q_hat_inf_flag is False:
+        raise _InvalidParamsError(
+            "contradictory parameters: q_hat is null while q_hat_infinite is false"
+        )
+    elif q_hat_present and q_hat_raw is None and (c_probs is None or c_labels is None):
+        raise _InvalidParamsError(
+            "q_hat cannot be null unless q_hat_infinite is true or (calib_probs and calib_labels) are provided"
+        )
     elif c_probs is not None and c_labels is not None:
         alpha = (
             _require_number(args["alpha"], "alpha")
@@ -440,7 +485,9 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         )
         q_hat = cal_res.q_hat
     else:
-        raise _InvalidParamsError("provide either q_hat or (calib_probs and calib_labels)")
+        raise _InvalidParamsError(
+            "provide either q_hat, q_hat_infinite=true, or (calib_probs and calib_labels)"
+        )
 
     # Evaluate conformal prediction set strictly on raw_probs BEFORE prior fusion.
     conf_res = conformal_prediction_set(
@@ -468,6 +515,10 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         if "prior_gate_mode" in args and args["prior_gate_mode"] is not None
         else "hesitant"
     )
+    if prior_gate_mode not in VALID_PRIOR_GATE_MODES:
+        raise _InvalidParamsError(
+            f"prior_gate_mode must be one of {list(VALID_PRIOR_GATE_MODES)}, got {prior_gate_mode!r}"
+        )
     hesitation_threshold = (
         _require_number(args["hesitation_threshold"], "hesitation_threshold")
         if "hesitation_threshold" in args and args["hesitation_threshold"] is not None
@@ -482,12 +533,16 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         gate_mode=prior_gate_mode,
     )
     predicted = max(fused_probs.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    q_hat_is_inf = math.isinf(q_hat) and q_hat > 0.0
+    if not q_hat_is_inf and not math.isfinite(q_hat):
+        raise ValueError("calibrated q_hat must be finite or +inf")
     return {
         "predicted": predicted,
         "probabilities": fused_probs,
         "raw_probabilities": probs,
         "h_raw": h_raw,
-        "q_hat": q_hat,
+        "q_hat": None if q_hat_is_inf else float(q_hat),
+        "q_hat_infinite": q_hat_is_inf,
         "prediction_set": conf_res.prediction_set,
         "singleton": conf_res.singleton,
         "contains_abstain": conf_res.contains_abstain,
@@ -625,6 +680,19 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
     """Process a single JSON-RPC 2.0 request or notification and return response dict (or None)."""
     has_id = "id" in msg
     req_id = msg.get("id")
+    if has_id and req_id is not None and (
+        isinstance(req_id, bool)
+        or not isinstance(req_id, (str, int, float))
+        or (isinstance(req_id, float) and not math.isfinite(req_id))
+    ):
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request: id must be a string, finite number, or null",
+            },
+        }
     method = msg.get("method")
 
     if not isinstance(method, str):
@@ -716,7 +784,7 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "content": [{"type": "text", "text": json.dumps(payload, sort_keys=True)}],
+                    "content": [{"type": "text", "text": json.dumps(payload, sort_keys=True, allow_nan=False)}],
                     "isError": False,
                 },
             }
@@ -836,7 +904,7 @@ def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
 
 
 def _write_frame(stream: BinaryIO, response: Mapping[str, Any], use_content_length: bool) -> None:
-    encoded = json.dumps(response, sort_keys=True).encode("utf-8")
+    encoded = json.dumps(response, sort_keys=True, allow_nan=False).encode("utf-8")
     if use_content_length:
         header = f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii")
         stream.write(header + encoded)
@@ -874,8 +942,11 @@ def serve_stdio(stdin: BinaryIO | None = None, stdout: BinaryIO | None = None) -
             break
 
         try:
-            parsed = json.loads(raw_frame.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            parsed = json.loads(
+                raw_frame.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             err_resp = {
                 "jsonrpc": "2.0",
                 "id": None,
