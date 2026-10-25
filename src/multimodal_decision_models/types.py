@@ -96,6 +96,8 @@ class SlotReadout:
     terminal_state: DecisionTerminalState = DecisionTerminalState.STAGE1_RESOLVED
     failure_category: FailureCategory = FailureCategory.NONE
     invalid_coordinates: tuple[str, str] | None = None
+    conformal_set: list[str] = field(default_factory=list)
+    epistemic_variance: float = 0.0
 
 
 @dataclass

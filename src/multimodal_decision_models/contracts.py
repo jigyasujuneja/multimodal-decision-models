@@ -213,6 +213,8 @@ class ContentAddressedDecisionCache:
                     terminal_state=DecisionTerminalState(s.get("terminal_state", "STAGE1_RESOLVED")),
                     failure_category=FailureCategory(s.get("failure_category", "NONE")),
                     invalid_coordinates=tuple(s["invalid_coordinates"]) if s.get("invalid_coordinates") else None,
+                    conformal_set=[str(x) for x in s.get("conformal_set", [])],
+                    epistemic_variance=float(s.get("epistemic_variance", 0.0)),
                 )
                 for sid, s in row["slots"].items()
             }
@@ -281,6 +283,8 @@ class ContentAddressedDecisionCache:
                             "terminal_state": s.terminal_state.value,
                             "failure_category": s.failure_category.value,
                             "invalid_coordinates": list(s.invalid_coordinates) if s.invalid_coordinates else None,
+                            "conformal_set": list(s.conformal_set),
+                            "epistemic_variance": float(s.epistemic_variance),
                         }
                         for sid, s in stored.slots.items()
                     },

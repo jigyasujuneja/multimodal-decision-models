@@ -20,15 +20,19 @@ Supports:
      with Vision `image_url` blocks, bounded multi-slot concurrency, and zero uniform fallback.
   3. VertexGeminiBackend: Vertex AI generateContent with single-token `[A..Z]` enum binding,
      `responseLogprobs` validation, and zero fabricated fallback distributions.
-  4. MockCallableBackend: Deterministic in-memory adapter for unit testing and offline replay.
-  5. CascadeDecisionOrchestrator: Unifies Stage-2A Fast-Exit, Wide-Option Shortlist, Co-Denoised/Causal
-     Evidence Slot, Pre-Gated Bayesian PoE Prior Fusion, Layer-5 Guards, Hesitation-Gated Escalation,
-     SHA-256 Content-Addressed Caching, and `RETRY_PENDING` / `REJECTED_CONTRACT_VIOLATION` Total Contracts.
+  4. BlackBoxSampledBackend: Logprob-free multi-sample and verbalized-vote adapter with symmetric
+     Dirichlet/Jeffreys prior smoothing and posterior epistemic variance.
+  5. MockCallableBackend: Deterministic in-memory adapter for unit testing and offline replay.
+  6. CascadeDecisionOrchestrator: Unifies Stage-2A Fast-Exit, Wide-Option Shortlist, Co-Denoised/Causal
+     Evidence Slot, Pre-Fusion Split Conformal / RAPS Set-Size Gating, Pre-Gated Bayesian PoE Prior Fusion,
+     Layer-5 Guards, Hesitation-Gated Escalation, SHA-256 Content-Addressed Caching, and
+     `RETRY_PENDING` / `REJECTED_CONTRACT_VIOLATION` Total Contracts.
 """
 
 from __future__ import annotations
 
 import concurrent.futures as cf
+import inspect
 import json
 import math
 import os
@@ -48,6 +52,10 @@ from .calibration import (
     normalized_entropy,
     pre_gated_bayesian_poe_fusion,
     stage2a_fast_exit_gate,
+)
+from .conformal import (
+    DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+    conformal_prediction_set,
 )
 from .contracts import (
     UNTRUSTED_BOUNDARY_NOTICE,
@@ -802,6 +810,462 @@ class VertexGeminiBackend:
         return dists
 
 
+SamplerFn = Callable[..., Mapping[str, Any] | str]
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_json_dict_if_present(raw_text: str) -> dict[str, Any] | None:
+    stripped = raw_text.strip()
+    if not stripped:
+        return None
+    fenced = _JSON_FENCE_RE.search(stripped)
+    candidate_str = fenced.group(1) if fenced else ""
+    if not candidate_str and "{" in stripped and "}" in stripped:
+        i0 = stripped.find("{")
+        i1 = stripped.rfind("}")
+        if i1 > i0:
+            candidate_str = stripped[i0 : i1 + 1]
+    if not candidate_str:
+        return None
+    try:
+        parsed = json.loads(candidate_str)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _resolve_option_token(
+    raw_token: str,
+    valid_keys: list[str],
+    letter_to_key: Mapping[str, str],
+) -> str | None:
+    cleaned = raw_token.strip()
+    if not cleaned:
+        return None
+    if cleaned in valid_keys:
+        return cleaned
+    trimmed = cleaned.strip(" \t\r\n\"'().:")
+    if trimmed in valid_keys:
+        return trimmed
+    if trimmed in letter_to_key:
+        return letter_to_key[trimmed]
+    if trimmed.upper() in letter_to_key and len(trimmed) == 1:
+        return letter_to_key[trimmed.upper()]
+    m_lead = re.match(r"^\s*(?:option\s+)?([A-Z])(?:\b|[).:])", cleaned)
+    if m_lead and m_lead.group(1) in letter_to_key:
+        return letter_to_key[m_lead.group(1)]
+    lower_cleaned = cleaned.lower()
+    for k in valid_keys:
+        if re.search(rf"(?<![a-z0-9_]){re.escape(k.lower())}(?![a-z0-9_])", lower_cleaned):
+            return k
+    return None
+
+
+def _sampler_accepts_sample_idx(fn: SamplerFn) -> tuple[int, bool]:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return 3, False
+    pos_count = 0
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            return 4, True
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            pos_count += 1
+    return pos_count, pos_count >= 4
+
+
+class BlackBoxSampledBackend:
+    """Logprob-free multi-sample and verbalized-vote DecisionBackend with Dirichlet/Jeffreys smoothing.
+
+    Supports black-box frontier models, reasoning endpoints, and callable samplers that emit discrete
+    choices or verbalized vote counts without exposing token log-probabilities. Applies a symmetric
+    Dirichlet prior `alpha_0 = prior_alpha` (default 0.5 Jeffreys prior) so finite M-draw consensus
+    yields positive normalized entropy, finite NLL, and analytic epistemic variance:
+      p_k = (c_k + alpha_0) / A_0,  Var(theta_k | c) = p_k * (1 - p_k) / (A_0 + 1).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        sampler: SamplerFn | None = None,
+        *,
+        num_samples: int = 5,
+        prior_alpha: float = 0.5,
+        endpoint_url: str | None = None,
+        model: str = "blackbox-sampled",
+        api_key: str | None = None,
+        timeout_sec: float = 30.0,
+        max_retries: int = 2,
+        base_backoff_sec: float = 0.05,
+        max_concurrency: int = 8,
+        catch_all_keys: Collection[str] = _DEFAULT_OOS_KEYS,
+    ) -> None:
+        if not name or not str(name).strip():
+            raise ValueError("BlackBoxSampledBackend name must be non-empty")
+        if num_samples < 1:
+            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+        if not math.isfinite(prior_alpha) or prior_alpha <= 0.0:
+            raise ValueError(f"prior_alpha must be finite and > 0, got {prior_alpha!r}")
+        if sampler is None and not endpoint_url:
+            raise ValueError("BlackBoxSampledBackend requires either a callable `sampler` or `endpoint_url`")
+
+        self.name = str(name).strip()
+        self.sampler = sampler
+        self.num_samples = int(num_samples)
+        self.prior_alpha = float(prior_alpha)
+        self.endpoint_url: str | None = None
+        if endpoint_url is not None:
+            clean_url = endpoint_url.rstrip("/")
+            _validate_http_url(clean_url)
+            self.endpoint_url = clean_url
+        self.model = model
+        self.api_key = api_key
+        self.timeout_sec = timeout_sec
+        self.max_retries = max_retries
+        self.base_backoff_sec = base_backoff_sec
+        self.max_concurrency = max(1, int(max_concurrency))
+        self.catch_all_keys = frozenset(str(k) for k in catch_all_keys) | {"0"}
+
+        self.last_epistemic_variance: dict[str, float] = {}
+        self.last_option_epistemic_variance: dict[str, dict[str, float]] = {}
+        self.last_evidence: dict[str, str] = {}
+
+    def _build_http_sample_prompt(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        bijections: Mapping[str, dict[str, str]],
+    ) -> str:
+        lines = [
+            UNTRUSTED_BOUNDARY_NOTICE,
+            "State:",
+            wrap_untrusted_state(state),
+            "",
+            "Return a single JSON object containing concise `evidence_read` and the chosen uppercase option letter for each slot:",
+        ]
+        for qid, q in questions.items():
+            letter_to_key = bijections[qid]
+            opts = ", ".join(
+                f"{ltr}={k} ({q.criteria.get(k, k) if q.type != 'score' else k})"
+                for ltr, k in letter_to_key.items()
+            )
+            lines.append(f"- {qid}: {q.instructions} | Options: {opts}")
+        return "\n".join(lines)
+
+    def _fetch_single_http_draw(
+        self,
+        url: str,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any] | str:
+        data = _post_json_with_retry(
+            url,
+            payload,
+            headers,
+            timeout_sec=self.timeout_sec,
+            max_retries=self.max_retries,
+            base_backoff_sec=self.base_backoff_sec,
+        )
+        if isinstance(data.get("choices"), list) and data["choices"]:
+            c0 = data["choices"][0]
+            if isinstance(c0, Mapping):
+                msg = c0.get("message")
+                if isinstance(msg, Mapping) and "content" in msg:
+                    return str(msg["content"])
+                if "text" in c0:
+                    return str(c0["text"])
+        if isinstance(data.get("candidates"), list) and data["candidates"]:
+            cand0 = data["candidates"][0]
+            if isinstance(cand0, Mapping):
+                parts = (cand0.get("content") or {}).get("parts") or []
+                txt = "".join(str(p.get("text", "")) for p in parts if isinstance(p, Mapping))
+                if txt:
+                    return txt
+        return data
+
+    def _invoke_callable_sampler(
+        self,
+        pos_arity: int,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None,
+        sample_idx: int,
+    ) -> Mapping[str, Any] | str:
+        assert self.sampler is not None
+        if pos_arity >= 4:
+            return self.sampler(state, questions, images, sample_idx)
+        if pos_arity == 3:
+            return self.sampler(state, questions, images)
+        if pos_arity == 2:
+            return self.sampler(state, questions)
+        if pos_arity == 1:
+            return self.sampler(state)
+        return self.sampler()
+
+    def _accumulate_votes_map(
+        self,
+        votes_raw: Mapping[str, Any],
+        counts_q: dict[str, float],
+        valid_keys: list[str],
+        letter_to_key: Mapping[str, str],
+        fallback_key: str | None,
+    ) -> None:
+        for raw_opt, raw_w in votes_raw.items():
+            weight = float(raw_w)
+            if not math.isfinite(weight) or weight < 0.0:
+                raise ValueError(f"verbalized vote count for {raw_opt!r} must be finite and >= 0, got {raw_w!r}")
+            if weight == 0.0:
+                continue
+            matched = _resolve_option_token(str(raw_opt), valid_keys, letter_to_key)
+            if matched is not None:
+                counts_q[matched] += weight
+            elif fallback_key is not None:
+                counts_q[fallback_key] += weight
+
+    def _accumulate_draw(
+        self,
+        draw: Mapping[str, Any] | str,
+        questions: Mapping[str, DecisionQuestion],
+        valid_keys_map: Mapping[str, list[str]],
+        bijections: Mapping[str, dict[str, str]],
+        fallback_keys: Mapping[str, str | None],
+        counts: dict[str, dict[str, float]],
+        evidences: dict[str, list[str]],
+    ) -> bool:
+        saw_explicit_votes = False
+        parsed_map: Mapping[str, Any] | None = None
+
+        if isinstance(draw, str):
+            extracted = _extract_json_dict_if_present(draw)
+            if extracted is not None:
+                parsed_map = extracted
+            else:
+                for qid in questions:
+                    matched = _resolve_option_token(draw, valid_keys_map[qid], bijections[qid])
+                    if matched is not None:
+                        counts[qid][matched] += 1.0
+                    elif fallback_keys[qid] is not None:
+                        fk = fallback_keys[qid]
+                        assert fk is not None
+                        counts[qid][fk] += 1.0
+                return False
+        elif isinstance(draw, Mapping):
+            parsed_map = draw
+        else:
+            raise SchemaContractViolationError(f"unsupported sampler draw type: {type(draw).__name__}")
+
+        assert parsed_map is not None
+        top_ev = str(parsed_map.get("evidence_read") or parsed_map.get("evidence") or "").strip()
+
+        top_votes = parsed_map.get("votes") or parsed_map.get("counts")
+        if isinstance(top_votes, Mapping):
+            # Support either {qid: {opt: count}} or single-slot {opt: count}
+            if len(questions) == 1:
+                only_qid = next(iter(questions.keys()))
+                first_val = next(iter(top_votes.values()), None)
+                if not isinstance(first_val, Mapping):
+                    saw_explicit_votes = True
+                    self._accumulate_votes_map(
+                        top_votes,
+                        counts[only_qid],
+                        valid_keys_map[only_qid],
+                        bijections[only_qid],
+                        fallback_keys[only_qid],
+                    )
+                    if top_ev:
+                        evidences[only_qid].append(top_ev)
+                    return True
+            for qid in questions:
+                q_votes = top_votes.get(qid)
+                if isinstance(q_votes, Mapping):
+                    saw_explicit_votes = True
+                    self._accumulate_votes_map(
+                        q_votes,
+                        counts[qid],
+                        valid_keys_map[qid],
+                        bijections[qid],
+                        fallback_keys[qid],
+                    )
+                    if top_ev:
+                        evidences[qid].append(top_ev)
+            if saw_explicit_votes:
+                return True
+
+        container_raw = parsed_map.get("answers")
+        container: Mapping[str, Any] = container_raw if isinstance(container_raw, Mapping) else parsed_map
+
+        for qid in questions:
+            if top_ev:
+                evidences[qid].append(top_ev)
+            slot_entry: Any = container.get(qid)
+            if slot_entry is None and len(questions) == 1:
+                for alias in ("choice", "answer", "selected", "predicted"):
+                    if alias in container:
+                        slot_entry = container[alias]
+                        break
+            if slot_entry is None:
+                continue
+
+            if isinstance(slot_entry, Mapping):
+                slot_ev = str(slot_entry.get("evidence") or slot_entry.get("evidence_read") or "").strip()
+                if slot_ev:
+                    evidences[qid].append(slot_ev)
+                sub_votes = slot_entry.get("votes") or slot_entry.get("counts")
+                if isinstance(sub_votes, Mapping):
+                    saw_explicit_votes = True
+                    self._accumulate_votes_map(
+                        sub_votes,
+                        counts[qid],
+                        valid_keys_map[qid],
+                        bijections[qid],
+                        fallback_keys[qid],
+                    )
+                    continue
+                tok_raw = (
+                    slot_entry.get("choice")
+                    or slot_entry.get("answer")
+                    or slot_entry.get("selected")
+                    or slot_entry.get("predicted")
+                )
+                if tok_raw is None:
+                    continue
+                token_str = str(tok_raw)
+            else:
+                token_str = str(slot_entry)
+
+            matched = _resolve_option_token(token_str, valid_keys_map[qid], bijections[qid])
+            if matched is not None:
+                counts[qid][matched] += 1.0
+            elif fallback_keys[qid] is not None:
+                fk = fallback_keys[qid]
+                assert fk is not None
+                counts[qid][fk] += 1.0
+
+        return saw_explicit_votes
+
+    def score_questions(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None = None,
+    ) -> dict[str, dict[str, float]]:
+        if not questions:
+            self.last_epistemic_variance = {}
+            self.last_option_epistemic_variance = {}
+            self.last_evidence = {}
+            return {}
+
+        valid_keys_map: dict[str, list[str]] = {}
+        bijections: dict[str, dict[str, str]] = {}
+        fallback_keys: dict[str, str | None] = {}
+        counts: dict[str, dict[str, float]] = {}
+        evidences: dict[str, list[str]] = {}
+
+        for qid, q in questions.items():
+            keys = q.option_keys()
+            if len(keys) < 2 or len(keys) > MAX_OPTIONS_PER_SLOT:
+                raise SchemaContractViolationError(
+                    f"BlackBoxSampledBackend requires 2..{MAX_OPTIONS_PER_SLOT} options for {qid!r}, got {len(keys)}"
+                )
+            valid_keys_map[qid] = keys
+            letters = string.ascii_uppercase[: len(keys)]
+            bijections[qid] = {letters[i]: keys[i] for i in range(len(keys))}
+            fb: str | None = None
+            for k in keys:
+                if k in self.catch_all_keys:
+                    fb = k
+                    break
+            fallback_keys[qid] = fb
+            counts[qid] = {k: 0.0 for k in keys}
+            evidences[qid] = []
+
+        if self.sampler is not None:
+            pos_arity, has_sample_idx = _sampler_accepts_sample_idx(self.sampler)
+            for s_idx in range(self.num_samples):
+                draw = self._invoke_callable_sampler(pos_arity, state, questions, images, s_idx)
+                explicit_votes = self._accumulate_draw(
+                    draw,
+                    questions,
+                    valid_keys_map,
+                    bijections,
+                    fallback_keys,
+                    counts,
+                    evidences,
+                )
+                if explicit_votes and not has_sample_idx:
+                    break
+        else:
+            assert self.endpoint_url is not None
+            url = (
+                self.endpoint_url
+                if self.endpoint_url.endswith("/v1/chat/completions")
+                else f"{self.endpoint_url}/v1/chat/completions"
+            )
+            _validate_http_url(url)
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            prompt_text = self._build_http_sample_prompt(state, questions, bijections)
+            user_content: Any = prompt_text
+            if images:
+                parts_list: list[dict[str, Any]] = [
+                    {"type": "image_url", "image_url": {"url": img.strip()}}
+                    for img in images
+                    if img.strip()
+                ]
+                parts_list.append({"type": "text", "text": prompt_text})
+                user_content = parts_list
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": user_content}],
+                "temperature": 0.7 if self.num_samples > 1 else 0.0,
+            }
+
+            if self.num_samples == 1 or self.max_concurrency == 1:
+                draws = [self._fetch_single_http_draw(url, headers, payload) for _ in range(self.num_samples)]
+            else:
+                workers = min(self.max_concurrency, self.num_samples)
+                with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+                    futs = [
+                        pool.submit(self._fetch_single_http_draw, url, headers, payload)
+                        for _ in range(self.num_samples)
+                    ]
+                    draws = [f.result() for f in futs]
+
+            for draw in draws:
+                self._accumulate_draw(
+                    draw,
+                    questions,
+                    valid_keys_map,
+                    bijections,
+                    fallback_keys,
+                    counts,
+                    evidences,
+                )
+
+        out_probs: dict[str, dict[str, float]] = {}
+        epistemic_tot: dict[str, float] = {}
+        epistemic_opt: dict[str, dict[str, float]] = {}
+        evidence_out: dict[str, str] = {}
+
+        for qid, keys in valid_keys_map.items():
+            alpha_post = {k: counts[qid][k] + self.prior_alpha for k in keys}
+            a0 = sum(alpha_post.values())
+            probs_q = {k: alpha_post[k] / a0 for k in keys}
+            var_q = {k: (probs_q[k] * (1.0 - probs_q[k])) / (a0 + 1.0) for k in keys}
+            out_probs[qid] = probs_q
+            epistemic_opt[qid] = var_q
+            epistemic_tot[qid] = sum(var_q.values())
+            if evidences[qid]:
+                evidence_out[qid] = evidences[qid][0]
+
+        self.last_epistemic_variance = epistemic_tot
+        self.last_option_epistemic_variance = epistemic_opt
+        self.last_evidence = evidence_out
+        return out_probs
+
+
 class CascadeDecisionOrchestrator:
     """Level-4 Total-Contract Multimodal Decision Funnel Orchestrator."""
 
@@ -823,6 +1287,11 @@ class CascadeDecisionOrchestrator:
         sla_timeout_sec: float = 180.0,
         response_cache: ContentAddressedDecisionCache | None = None,
         oos_keys: Collection[str] = _DEFAULT_OOS_KEYS,
+        conformal_q_hat: float | Mapping[str, float] | None = None,
+        conformal_method: str = "raps",
+        conformal_lam_reg: float = 0.01,
+        conformal_k_reg: int = 1,
+        escalate_on_conformal_ambiguous: bool = True,
     ) -> None:
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
@@ -840,6 +1309,23 @@ class CascadeDecisionOrchestrator:
         self.sla_timeout_sec = sla_timeout_sec
         self.response_cache = response_cache
         self.oos_keys = frozenset(oos_keys)
+        self.conformal_q_hat = (
+            {str(k): float(v) for k, v in conformal_q_hat.items()}
+            if isinstance(conformal_q_hat, Mapping)
+            else (float(conformal_q_hat) if conformal_q_hat is not None else None)
+        )
+        self.conformal_method = conformal_method
+        self.conformal_lam_reg = conformal_lam_reg
+        self.conformal_k_reg = conformal_k_reg
+        self.escalate_on_conformal_ambiguous = escalate_on_conformal_ambiguous
+
+    def _resolve_slot_q_hat(self, qid: str) -> float | None:
+        if self.conformal_q_hat is None:
+            return None
+        if isinstance(self.conformal_q_hat, Mapping):
+            val = self.conformal_q_hat.get(qid)
+            return float(val) if val is not None else None
+        return float(self.conformal_q_hat)
 
     def _quarantine_result(
         self,
@@ -900,23 +1386,31 @@ class CascadeDecisionOrchestrator:
     ) -> DecisionResult:
         t0 = time.perf_counter()
         s2_name = self.stage2_backend.name if self.stage2_backend else "none"
+        extra_cfg: dict[str, Any] = {
+            "hesitation_threshold": self.hesitation_threshold,
+            "prior_weight": self.prior_weight,
+            "prior_gate_mode": self.prior_gate_mode,
+            "temperature": self.temperature,
+            "shortlist_top_k": self.shortlist_top_k,
+            "shortlist_pairwise_diff": self.shortlist_pairwise_diff,
+            "evidence_prompt": self.evidence_prompt,
+            "enable_stage2a_fast_exit": self.enable_stage2a_fast_exit,
+            "sister_pack_collision": sister_pack_collision,
+            "decoded_pack_size": decoded_pack_size,
+        }
+        if self.conformal_q_hat is not None:
+            extra_cfg["conformal_q_hat"] = self.conformal_q_hat
+            extra_cfg["conformal_method"] = self.conformal_method
+            extra_cfg["conformal_lam_reg"] = self.conformal_lam_reg
+            extra_cfg["conformal_k_reg"] = self.conformal_k_reg
+            extra_cfg["escalate_on_conformal_ambiguous"] = self.escalate_on_conformal_ambiguous
+
         cache_key = compute_decision_cache_key(
             f"{self.stage1_backend.name}->{s2_name}",
             state,
             questions,
             images,
-            extra_config={
-                "hesitation_threshold": self.hesitation_threshold,
-                "prior_weight": self.prior_weight,
-                "prior_gate_mode": self.prior_gate_mode,
-                "temperature": self.temperature,
-                "shortlist_top_k": self.shortlist_top_k,
-                "shortlist_pairwise_diff": self.shortlist_pairwise_diff,
-                "evidence_prompt": self.evidence_prompt,
-                "enable_stage2a_fast_exit": self.enable_stage2a_fast_exit,
-                "sister_pack_collision": sister_pack_collision,
-                "decoded_pack_size": decoded_pack_size,
-            },
+            extra_config=extra_cfg,
         )
         if self.response_cache is not None:
             cached = self.response_cache.get(cache_key)
@@ -1053,6 +1547,7 @@ class CascadeDecisionOrchestrator:
                 f"Stage-1 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
             )
         backend_evidence: Mapping[str, str] = getattr(self.stage1_backend, "last_evidence", {}) or {}
+        stage1_epistemic: Mapping[str, float] = getattr(self.stage1_backend, "last_epistemic_variance", {}) or {}
 
         injected_ev_choice = ""
         if evidence_slot_id and evidence_slot_id in raw_stage1 and raw_stage1[evidence_slot_id]:
@@ -1066,6 +1561,24 @@ class CascadeDecisionOrchestrator:
             raw_dist = raw_stage1.get(qid, {})
             if not raw_dist:
                 raise SchemaContractViolationError(f"Stage-1 backend returned empty distribution for {qid!r}")
+
+            # Evaluate Split Conformal / RAPS set strictly on raw_dist BEFORE Stage-1 prior fusion.
+            slot_conformal_set: list[str] = []
+            conformal_esc = False
+            slot_q_hat = self._resolve_slot_q_hat(qid) if qid != evidence_slot_id else None
+            if slot_q_hat is not None:
+                conf_res = conformal_prediction_set(
+                    raw_dist,
+                    slot_q_hat,
+                    method=self.conformal_method,
+                    lam_reg=self.conformal_lam_reg,
+                    k_reg=self.conformal_k_reg,
+                    abstain_keys=self.oos_keys | DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+                )
+                slot_conformal_set = conf_res.prediction_set
+                if self.escalate_on_conformal_ambiguous:
+                    conformal_esc = conf_res.should_escalate
+
             slot_prior = (
                 ((prior_logits or {}).get(qid) or q.prior_logits or None)
                 if qid != evidence_slot_id
@@ -1101,12 +1614,14 @@ class CascadeDecisionOrchestrator:
                 and slot_ev in _INFERRED_EVIDENCE_LABELS
             )
 
-            if qid != evidence_slot_id and (should_esc or inferred_flag):
+            if qid != evidence_slot_id and (should_esc or inferred_flag or conformal_esc):
                 escalated_qids.append(qid)
                 if should_esc:
                     escalation_reasons.append(f"{qid}:h_raw={h_raw:.4f}>={self.hesitation_threshold}")
                 if inferred_flag:
                     escalation_reasons.append(f"{qid}:evidence={slot_ev}")
+                if conformal_esc:
+                    escalation_reasons.append(f"{qid}:conformal_set_size={len(slot_conformal_set)}")
 
             if predicted in self.oos_keys:
                 slot_state = DecisionTerminalState.ABSTAIN_OOS
@@ -1131,9 +1646,11 @@ class CascadeDecisionOrchestrator:
                 evidence=slot_ev,
                 terminal_state=slot_state,
                 failure_category=f_cat,
+                conformal_set=slot_conformal_set,
+                epistemic_variance=float(stage1_epistemic.get(qid, 0.0)),
             )
 
-        # 5. Optional Stage-2 Frontier Escalation on Hesitant or Inferred-Evidence Slots
+        # 5. Optional Stage-2 Frontier Escalation on Hesitant, Conformal-Ambiguous, or Inferred-Evidence Slots
         did_escalate = False
         if escalated_qids and self.stage2_backend is not None:
             if (time.perf_counter() - t0) >= self.sla_timeout_sec:
@@ -1148,6 +1665,7 @@ class CascadeDecisionOrchestrator:
                     f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
                 )
             s2_evidence: Mapping[str, str] = getattr(self.stage2_backend, "last_evidence", {}) or {}
+            s2_epistemic: Mapping[str, float] = getattr(self.stage2_backend, "last_epistemic_variance", {}) or {}
             for qid in escalated_qids:
                 s2_dist = stage2_dists.get(qid) or {}
                 if not s2_dist:
@@ -1177,6 +1695,8 @@ class CascadeDecisionOrchestrator:
                         if s2_term == DecisionTerminalState.ABSTAIN_OOS
                         else FailureCategory.NONE
                     ),
+                    conformal_set=list(slots_out[qid].conformal_set),
+                    epistemic_variance=float(s2_epistemic.get(qid, slots_out[qid].epistemic_variance)),
                 )
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0

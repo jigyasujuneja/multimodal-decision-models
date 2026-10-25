@@ -1,0 +1,1031 @@
+# Copyright 2026 Jigyasu Juneja
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit and integration tests for v0.4.0 conformal, calibration, visual compiler, index, pruner, and MCP."""
+
+from __future__ import annotations
+
+import base64
+import http.server
+import io
+import itertools
+import json
+import math
+import os
+import pathlib
+import random
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+import zlib
+from typing import Any
+
+import multimodal_decision_models as mdm
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+SRC_DIR = REPO_ROOT / "src"
+
+
+def _png_chunk_raw(chunk_type: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+
+
+def _encode_png_with_explicit_filters(
+    width: int,
+    height: int,
+    color_type: int,
+    raw_rows: list[bytes],
+    filter_types: list[int],
+) -> bytes:
+    bpp = {0: 1, 2: 3, 6: 4}[color_type]
+    row_bytes = width * bpp
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    prev = bytearray(row_bytes)
+    scan = bytearray()
+
+    for y in range(height):
+        cur = raw_rows[y]
+        ftype = filter_types[y]
+        scan.append(ftype)
+        for i in range(row_bytes):
+            x_val = cur[i]
+            a_val = cur[i - bpp] if i >= bpp else 0
+            b_val = prev[i]
+            c_val = prev[i - bpp] if i >= bpp else 0
+            if ftype == 0:
+                filt = x_val
+            elif ftype == 1:
+                filt = (x_val - a_val) & 0xFF
+            elif ftype == 2:
+                filt = (x_val - b_val) & 0xFF
+            elif ftype == 3:
+                filt = (x_val - ((a_val + b_val) >> 1)) & 0xFF
+            elif ftype == 4:
+                p = a_val + b_val - c_val
+                pa = abs(p - a_val)
+                pb = abs(p - b_val)
+                pc = abs(p - c_val)
+                pred = a_val if (pa <= pb and pa <= pc) else (b_val if pb <= pc else c_val)
+                filt = (x_val - pred) & 0xFF
+            else:
+                raise ValueError(f"bad filter {ftype}")
+            scan.append(filt)
+        prev = bytearray(cur)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk_raw(b"IHDR", ihdr)
+        + _png_chunk_raw(b"IDAT", zlib.compress(bytes(scan)))
+        + _png_chunk_raw(b"IEND", b"")
+    )
+
+
+def _make_solid_buffer(width: int, height: int, rgb_triplet: tuple[int, int, int]) -> mdm.ImageBuffer:
+    pixel = bytes(rgb_triplet)
+    return mdm.ImageBuffer(width, height, pixel * (width * height))
+
+
+class V040ConformalVisualAndMcpTest(unittest.TestCase):
+    def test_v040_version_and_public_contract_exports(self) -> None:
+        self.assertEqual(mdm.__version__, "0.4.0")
+        self.assertEqual(mdm.MCP_SERVER_NAME, "dgem-catalog")
+        expected_exports = [
+            "BlackBoxSampledBackend",
+            "ConformalCalibrationResult",
+            "ConformalSetResult",
+            "calibrate_conformal_quantile",
+            "conformal_prediction_set",
+            "TemperatureScalingModel",
+            "VectorScalingModel",
+            "fit_temperature_scaling",
+            "fit_vector_scaling",
+            "MurphyDecomposition",
+            "brier_murphy_decomposition",
+            "adaptive_calibration_error",
+            "macro_f1_score",
+            "ndcg_at_k",
+            "ImageBuffer",
+            "CompiledContactSheet",
+            "encode_png",
+            "decode_png",
+            "encode_ppm",
+            "decode_ppm",
+            "shades_of_gray_white_balance",
+            "inner_crop_cie_lab_similarity",
+            "apply_residual_mlp_adapter",
+            "extract_inter_candidate_saliency_band",
+            "compile_dual_buffer_contact_sheet",
+            "VertexMultimodalEmbeddingAdapter",
+            "MultimodalEmbeddingIndex",
+            "ContextBlock",
+            "ContextPruneResult",
+            "prune_agent_context_blocks",
+            "build_context_pruning_questions",
+            "serve_stdio",
+            "handle_jsonrpc_message",
+        ]
+        for sym in expected_exports:
+            self.assertTrue(hasattr(mdm, sym), f"missing export {sym}")
+            self.assertIn(sym, mdm.__all__)
+
+    def test_blackbox_sampled_backend_dirichlet_epistemic_and_http(self) -> None:
+        question = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Select the matching SKU option.",
+            criteria={
+                "sku_100": "Brand Alpha 250ml",
+                "sku_200": "Brand Alpha 500ml",
+                "sku_300": "Brand Beta 250ml",
+                "none_of_the_above": "Unlisted item",
+            },
+            order=["sku_100", "sku_200", "sku_300", "none_of_the_above"],
+        )
+        questions = {"slot_sku": question}
+
+        unanimous_5 = mdm.BlackBoxSampledBackend(
+            "sampled_m5",
+            lambda state, qs, imgs, idx: "```json\n{\"evidence_read\": \"250ml printed\", \"slot_sku\": \"A\"}\n```",
+            num_samples=5,
+            prior_alpha=0.5,
+        )
+        dists_5 = unanimous_5.score_questions({"crop": "c1"}, questions)
+        probs_5 = dists_5["slot_sku"]
+        # With M=5 unanimous votes on K=4 options and alpha_0=0.5: (5 + 0.5) / (5 + 2.0) = 5.5 / 7.0
+        self.assertAlmostEqual(probs_5["sku_100"], 5.5 / 7.0, places=9)
+        self.assertAlmostEqual(probs_5["sku_200"], 0.5 / 7.0, places=9)
+        self.assertGreater(mdm.normalized_entropy(probs_5), 0.05)
+        self.assertTrue(math.isfinite(mdm.negative_log_likelihood([probs_5], ["sku_200"])))
+        self.assertEqual(unanimous_5.last_evidence["slot_sku"], "250ml printed")
+        var_m5 = unanimous_5.last_epistemic_variance["slot_sku"]
+        self.assertGreater(var_m5, 0.0)
+
+        unanimous_1 = mdm.BlackBoxSampledBackend(
+            "sampled_m1",
+            lambda state, qs: {"slot_sku": "sku_100"},
+            num_samples=1,
+            prior_alpha=0.5,
+        )
+        unanimous_20 = mdm.BlackBoxSampledBackend(
+            "sampled_m20",
+            lambda state, qs: {"slot_sku": "sku_100"},
+            num_samples=20,
+            prior_alpha=0.5,
+        )
+        unanimous_1.score_questions({}, questions)
+        unanimous_20.score_questions({}, questions)
+        self.assertGreater(unanimous_1.last_epistemic_variance["slot_sku"], var_m5)
+        self.assertGreater(var_m5, unanimous_20.last_epistemic_variance["slot_sku"])
+
+        # Verbalized vote counts + catch-all routing for unrecognized choice tokens
+        verbalized = mdm.BlackBoxSampledBackend(
+            "verbalized_votes",
+            lambda state, qs: {"votes": {"sku_200": 4, "unknown_hallucination": 1}, "evidence": "500ml bottle"},
+            num_samples=5,
+            prior_alpha=0.5,
+        )
+        v_probs = verbalized.score_questions({}, questions)["slot_sku"]
+        self.assertAlmostEqual(v_probs["sku_200"], 4.5 / 7.0, places=9)
+        self.assertAlmostEqual(v_probs["none_of_the_above"], 1.5 / 7.0, places=9)
+
+        # Live local ThreadingHTTPServer /v1/chat/completions without top_logprobs
+        draw_seq = ["B", "B", "A", "B"]
+        lock = threading.Lock()
+        counter = {"idx": 0}
+
+        class _NoLogprobChatHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                with lock:
+                    pick = draw_seq[counter["idx"] % len(draw_seq)]
+                    counter["idx"] += 1
+                resp = {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps({"evidence_read": "tall bottle", "slot_sku": pick}),
+                            }
+                        }
+                    ]
+                }
+                body = json.dumps(resp).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _NoLogprobChatHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            http_backend = mdm.BlackBoxSampledBackend(
+                "http_sampled",
+                endpoint_url=f"http://{host}:{port}",
+                num_samples=4,
+                prior_alpha=0.5,
+                max_concurrency=2,
+            )
+            http_probs = http_backend.score_questions({"scene": "aisle_2"}, questions)["slot_sku"]
+            self.assertAlmostEqual(http_probs["sku_200"], 3.5 / 6.0, places=9)
+            self.assertAlmostEqual(http_probs["sku_100"], 1.5 / 6.0, places=9)
+            self.assertEqual(http_backend.last_evidence["slot_sku"], "tall bottle")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_split_conformal_and_raps_exchangeable_coverage_and_edge_cases(self) -> None:
+        rng = random.Random(20260417)
+        classes = [f"cls_{i:02d}" for i in range(16)]
+        n_calib = 400
+        n_test = 1200
+
+        all_probs: list[dict[str, float]] = []
+        all_labels: list[str] = []
+        for _ in range(n_calib + n_test):
+            logits = [rng.gauss(0.0, 1.35) for _ in classes]
+            max_l = max(logits)
+            exps = [math.exp(z - max_l) for z in logits]
+            tot = sum(exps)
+            true_p = [e / tot for e in exps]
+            # Sample true label from true_p, then perturb model probs slightly (imperfect model)
+            u_draw = rng.random()
+            cum = 0.0
+            gold = classes[-1]
+            for c_name, p_val in zip(classes, true_p):
+                cum += p_val
+                if u_draw <= cum:
+                    gold = c_name
+                    break
+            noisy_logits = [z * 1.3 + rng.gauss(0.0, 0.25) for z in logits]
+            m_nl = max(noisy_logits)
+            n_exps = [math.exp(z - m_nl) for z in noisy_logits]
+            n_tot = sum(n_exps)
+            all_probs.append({c_name: e / n_tot for c_name, e in zip(classes, n_exps)})
+            all_labels.append(gold)
+
+        calib_probs = all_probs[:n_calib]
+        calib_labels = all_labels[:n_calib]
+        test_probs = all_probs[n_calib:]
+        test_labels = all_labels[n_calib:]
+
+        mean_sizes: dict[str, float] = {}
+        for alpha in (0.05, 0.10):
+            for method in ("lac", "aps", "raps"):
+                for randomized in (False, True):
+                    cal = mdm.calibrate_conformal_quantile(
+                        calib_probs,
+                        calib_labels,
+                        alpha=alpha,
+                        method=method,
+                        lam_reg=0.02,
+                        k_reg=2,
+                        randomized=randomized,
+                        seed=101,
+                    )
+                    hits = 0
+                    size_sum = 0
+                    for idx, (tp, tg) in enumerate(zip(test_probs, test_labels)):
+                        cset = mdm.conformal_prediction_set(
+                            tp,
+                            cal.q_hat,
+                            method=method,
+                            lam_reg=0.02,
+                            k_reg=2,
+                            randomized=randomized,
+                            seed=10000 + idx,
+                        )
+                        size_sum += len(cset.prediction_set)
+                        if tg in cset.prediction_set:
+                            hits += 1
+                    emp_cov = hits / float(n_test)
+                    self.assertGreaterEqual(
+                        emp_cov,
+                        1.0 - alpha - 0.025,
+                        f"coverage {emp_cov:.4f} below target for alpha={alpha}, method={method}, rand={randomized}",
+                    )
+                    if alpha == 0.10 and not randomized:
+                        mean_sizes[method] = size_sum / float(n_test)
+
+        # RAPS regularization shrinks tail prediction set sizes on wide shortlists with diffuse OOD/ambiguous tails
+        tail_probs: list[dict[str, float]] = []
+        tail_labels: list[str] = []
+        for idx_t in range(600):
+            if idx_t % 12 == 0:
+                unif_p = 1.0 / float(len(classes))
+                tail_probs.append({c_name: unif_p for c_name in classes})
+                tail_labels.append(classes[idx_t % len(classes)])
+            else:
+                w0 = classes[idx_t % len(classes)]
+                w1 = classes[(idx_t + 1) % len(classes)]
+                rem_p = 0.08 / float(len(classes) - 2)
+                dist_t = {c_name: rem_p for c_name in classes}
+                dist_t[w0] = 0.72
+                dist_t[w1] = 0.20
+                tail_probs.append(dist_t)
+                tail_labels.append(w0 if (idx_t % 5 != 0) else w1)
+
+        cal_aps = mdm.calibrate_conformal_quantile(tail_probs[:250], tail_labels[:250], alpha=0.10, method="aps")
+        cal_raps = mdm.calibrate_conformal_quantile(
+            tail_probs[:250], tail_labels[:250], alpha=0.10, method="raps", lam_reg=0.05, k_reg=2
+        )
+        aps_tail_sizes = [
+            len(mdm.conformal_prediction_set(tp, cal_aps.q_hat, method="aps").prediction_set)
+            for tp in tail_probs[250:]
+        ]
+        raps_tail_sizes = [
+            len(
+                mdm.conformal_prediction_set(
+                    tp, cal_raps.q_hat, method="raps", lam_reg=0.05, k_reg=2
+                ).prediction_set
+            )
+            for tp in tail_probs[250:]
+        ]
+        self.assertLess(sum(raps_tail_sizes), sum(aps_tail_sizes))
+
+        # Finite-sample overflow: n=4, alpha=0.05 -> ceil(5 * 0.95) = 5 > 4 -> q_hat = +inf
+        tiny_cal = mdm.calibrate_conformal_quantile(
+            calib_probs[:4],
+            calib_labels[:4],
+            alpha=0.05,
+            method="raps",
+        )
+        self.assertTrue(math.isinf(tiny_cal.q_hat))
+        full_set = mdm.conformal_prediction_set({"a": 0.7, "b": 0.2, "none_of_the_above": 0.1}, tiny_cal.q_hat)
+        self.assertEqual(len(full_set.prediction_set), 3)
+        self.assertTrue(full_set.contains_abstain)
+        self.assertTrue(full_set.should_escalate)
+
+        # Singleton abstain option also triggers should_escalate
+        abstain_singleton = mdm.conformal_prediction_set(
+            {"none_of_the_above": 0.96, "sku_a": 0.04},
+            q_hat=0.10,
+            method="lac",
+        )
+        self.assertTrue(abstain_singleton.singleton)
+        self.assertTrue(abstain_singleton.contains_abstain)
+        self.assertTrue(abstain_singleton.should_escalate)
+
+    def test_pre_fusion_conformal_cascade_gate_and_cache_roundtrip(self) -> None:
+        q = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Pick exact catalog variant.",
+            criteria={"sku_1": "Variant 1", "sku_2": "Variant 2"},
+            order=["sku_1", "sku_2"],
+        )
+        questions = {"variant": q}
+
+        stage1 = mdm.MockCallableBackend(
+            "fast_stage1",
+            lambda st, qs, imgs: {"variant": {"sku_1": 0.52, "sku_2": 0.48}},
+        )
+        stage2 = mdm.BlackBoxSampledBackend(
+            "frontier_stage2",
+            lambda st, qs: {"variant": "sku_2", "evidence_read": "verified variant 2"},
+            num_samples=6,
+            prior_alpha=0.5,
+        )
+
+        # Baseline v0.3.0 cache key parity when conformal_q_hat is None
+        orch_no_conf = mdm.CascadeDecisionOrchestrator(stage1_backend=stage1, stage2_backend=stage2)
+        res_no_conf = orch_no_conf.evaluate({"id": 1}, questions)
+        expected_v030_key = mdm.compute_decision_cache_key(
+            "fast_stage1->frontier_stage2",
+            {"id": 1},
+            questions,
+            None,
+            extra_config={
+                "hesitation_threshold": mdm.DEFAULT_HESITATION_THRESHOLD,
+                "prior_weight": 0.0,
+                "prior_gate_mode": "hesitant",
+                "temperature": 1.0,
+                "shortlist_top_k": 0,
+                "shortlist_pairwise_diff": False,
+                "evidence_prompt": "",
+                "enable_stage2a_fast_exit": False,
+                "sister_pack_collision": False,
+                "decoded_pack_size": None,
+            },
+        )
+        self.assertEqual(res_no_conf.cache_key, expected_v030_key)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = pathlib.Path(tmpdir) / "decisions.jsonl"
+            cache = mdm.ContentAddressedDecisionCache(persist_path=cache_path)
+
+            # Set hesitation_threshold=0.999 so entropy alone would NOT escalate, and pass an extreme
+            # prior for sku_1 so post-fusion distribution would look 99.98% confident. Pre-fusion
+            # conformal gate MUST still see raw_dist = {0.52, 0.48}, produce |C_alpha|=2, and escalate!
+            orch = mdm.CascadeDecisionOrchestrator(
+                stage1_backend=stage1,
+                stage2_backend=stage2,
+                hesitation_threshold=0.999,
+                prior_weight=1.0,
+                prior_gate_mode="always",
+                conformal_q_hat=0.55,
+                conformal_method="aps",
+                response_cache=cache,
+            )
+            res = orch.evaluate(
+                {"id": 7},
+                questions,
+                prior_logits={"variant": {"sku_1": 9.0, "sku_2": 0.0}},
+            )
+            self.assertTrue(res.escalated)
+            self.assertTrue(any("conformal_set_size=2" in r for r in res.escalation_reasons))
+            slot = res.slots["variant"]
+            self.assertEqual(slot.predicted, "sku_2")
+            self.assertEqual(slot.conformal_set, ["sku_1", "sku_2"])
+            self.assertGreater(slot.epistemic_variance, 0.0)
+
+            reloaded_cache = mdm.ContentAddressedDecisionCache(persist_path=cache_path)
+            cached_res = reloaded_cache.get(res.cache_key)
+            self.assertIsNotNone(cached_res)
+            assert cached_res is not None
+            self.assertTrue(cached_res.cache_hit)
+            self.assertEqual(cached_res.slots["variant"].conformal_set, ["sku_1", "sku_2"])
+            self.assertAlmostEqual(
+                cached_res.slots["variant"].epistemic_variance,
+                slot.epistemic_variance,
+                places=9,
+            )
+
+    def test_temperature_and_vector_scaling_reduce_heldout_nll_and_ece(self) -> None:
+        rng = random.Random(9001)
+        classes = ["c0", "c1", "c2", "c3", "c4"]
+        skew_gain = {"c0": 3.4, "c1": 2.9, "c2": 3.8, "c3": 2.5, "c4": 3.2}
+        skew_bias = {"c0": 0.75, "c1": -0.45, "c2": 0.55, "c3": -0.35, "c4": -0.50}
+
+        def _sample_split(n_rows: int) -> tuple[list[dict[str, float]], list[dict[str, float]], list[str]]:
+            logits_out: list[dict[str, float]] = []
+            probs_out: list[dict[str, float]] = []
+            labels_out: list[str] = []
+            for _ in range(n_rows):
+                true_z = {c: rng.gauss(0.0, 1.1) for c in classes}
+                m_true = max(true_z.values())
+                exps_true = {c: math.exp(v - m_true) for c, v in true_z.items()}
+                tot_true = sum(exps_true.values())
+                u = rng.random()
+                cum = 0.0
+                gold = classes[-1]
+                for c in classes:
+                    cum += exps_true[c] / tot_true
+                    if u <= cum:
+                        gold = c
+                        break
+                raw_z = {c: skew_gain[c] * true_z[c] + skew_bias[c] for c in classes}
+                m_raw = max(raw_z.values())
+                exps_raw = {c: math.exp(v - m_raw) for c, v in raw_z.items()}
+                tot_raw = sum(exps_raw.values())
+                logits_out.append(raw_z)
+                probs_out.append({c: exps_raw[c] / tot_raw for c in classes})
+                labels_out.append(gold)
+            return logits_out, probs_out, labels_out
+
+        fit_logits, fit_probs, fit_labels = _sample_split(320)
+        eval_logits, eval_probs, eval_labels = _sample_split(450)
+
+        raw_nll = mdm.negative_log_likelihood(eval_probs, eval_labels)
+        raw_ece = mdm.expected_calibration_error(eval_probs, eval_labels)
+
+        temp_model = mdm.fit_temperature_scaling(fit_logits, fit_labels, is_logits=True, l2_reg=1e-3)
+        self.assertGreater(temp_model.temperature, 1.5)
+        temp_probs = temp_model.predict_proba(eval_logits, is_logits=True)
+        temp_nll = mdm.negative_log_likelihood(temp_probs, eval_labels)
+        temp_ece = mdm.expected_calibration_error(temp_probs, eval_labels)
+        self.assertLess(temp_nll, raw_nll)
+        self.assertLess(temp_ece, raw_ece)
+
+        vec_model = mdm.fit_vector_scaling(fit_logits, fit_labels, is_logits=True, l2_reg=0.05)
+        vec_probs = vec_model.predict_proba(eval_logits, is_logits=True)
+        vec_nll = mdm.negative_log_likelihood(vec_probs, eval_labels)
+        vec_ece = mdm.expected_calibration_error(vec_probs, eval_labels)
+        self.assertLess(vec_nll, raw_nll)
+        self.assertLess(vec_ece, raw_ece)
+        self.assertLess(vec_nll, temp_nll)
+
+        # Probability-input mode (`is_logits=False`)
+        prob_temp_model = mdm.fit_temperature_scaling(fit_probs, fit_labels, is_logits=False)
+        prob_cal = prob_temp_model.predict_proba(eval_probs, is_logits=False)
+        self.assertLess(mdm.negative_log_likelihood(prob_cal, eval_labels), raw_nll)
+
+    def test_murphy_brier_decomposition_ace_macro_f1_and_ndcg(self) -> None:
+        # On quantized forecasts whose values lie at bin centers, Brier == REL - RES + UNC identically
+        quantized_preds = [
+            {"a": 0.1, "b": 0.9},
+            {"a": 0.1, "b": 0.9},
+            {"a": 0.8, "b": 0.2},
+            {"a": 0.8, "b": 0.2},
+            {"a": 0.5, "b": 0.5},
+            {"a": 0.5, "b": 0.5},
+        ]
+        quantized_golds = ["b", "b", "a", "b", "a", "b"]
+        decomp = mdm.brier_murphy_decomposition(quantized_preds, quantized_golds, num_bins=10)
+        self.assertGreaterEqual(decomp.reliability, 0.0)
+        self.assertGreaterEqual(decomp.resolution, 0.0)
+        self.assertGreaterEqual(decomp.uncertainty, 0.0)
+        self.assertAlmostEqual(
+            decomp.reliability - decomp.resolution + decomp.uncertainty,
+            decomp.brier,
+            places=9,
+        )
+
+        # Calibrated vs overconfident ACE
+        calibrated_preds = [{"x": 0.75, "y": 0.25}] * 40 + [{"x": 0.25, "y": 0.75}] * 40
+        calibrated_golds = (["x"] * 30 + ["y"] * 10) + (["x"] * 10 + ["y"] * 30)
+        overconf_preds = [{"x": 0.99, "y": 0.01}] * 40 + [{"x": 0.01, "y": 0.99}] * 40
+        ace_cal = mdm.adaptive_calibration_error(calibrated_preds, calibrated_golds, num_bins=2)
+        ace_over = mdm.adaptive_calibration_error(overconf_preds, calibrated_golds, num_bins=2)
+        self.assertAlmostEqual(ace_cal, 0.0, places=9)
+        self.assertGreater(ace_over, 0.20)
+
+        # Macro-F1
+        f1 = mdm.macro_f1_score(
+            ["cat", "cat", "dog", "bird", "cat"],
+            ["cat", "dog", "dog", "bird", "bird"],
+        )
+        # cat: TP=1, FP=2, FN=0 -> 2/4=0.5; dog: TP=1, FP=0, FN=1 -> 2/3; bird: TP=1, FP=0, FN=1 -> 2/3
+        self.assertAlmostEqual(f1, (0.5 + (2.0 / 3.0) + (2.0 / 3.0)) / 3.0, places=9)
+
+        # nDCG@k + duplicate ID guard
+        relevance = {"d1": 3.0, "d2": 2.0, "d3": 1.0}
+        self.assertAlmostEqual(mdm.ndcg_at_k(["d1", "d2", "d3"], relevance, k=3), 1.0, places=9)
+        dup_score = mdm.ndcg_at_k(["d1", "d1", "d1"], relevance, k=3)
+        self.assertLess(dup_score, 1.0)
+        self.assertGreater(dup_score, 0.4)
+
+    def test_visual_compiler_png_filters_crc_ppm_dual_buffer_and_saliency_iou(self) -> None:
+        # 1. Explicit PNG filter types 0..4 on RGB (color_type=2)
+        w, h = 6, 5
+        rgb_rows = [
+            bytes(((x * 37 + y * 53 + c * 19) & 0xFF) for x in range(w) for c in range(3))
+            for y in range(h)
+        ]
+        png_all_filters = _encode_png_with_explicit_filters(w, h, 2, rgb_rows, [0, 1, 2, 3, 4])
+        decoded_rgb = mdm.decode_png(png_all_filters)
+        self.assertEqual((decoded_rgb.width, decoded_rgb.height), (w, h))
+        self.assertEqual(decoded_rgb.rgb, b"".join(rgb_rows))
+
+        # Round-trip encode_png -> decode_png
+        rt_png = mdm.encode_png(decoded_rgb)
+        self.assertTrue(rt_png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn(b"IHDR", rt_png)
+        self.assertIn(b"IDAT", rt_png)
+        self.assertIn(b"IEND", rt_png)
+        self.assertEqual(mdm.decode_png(rt_png).rgb, decoded_rgb.rgb)
+
+        # Corrupt CRC32 must fail closed with ValueError
+        corrupted = bytearray(rt_png)
+        corrupted[-6] ^= 0x01
+        with self.assertRaises(ValueError):
+            mdm.decode_png(bytes(corrupted))
+
+        # RGBA (color_type=6) and Grayscale (color_type=0)
+        rgba_rows = [bytes([200, 100, 50, 255, 0, 0, 0, 0]) for _ in range(2)]
+        rgba_buf = mdm.decode_png(_encode_png_with_explicit_filters(2, 2, 6, rgba_rows, [0, 4]))
+        self.assertEqual(rgba_buf.pixel(0, 0), (200, 100, 50))
+        self.assertEqual(rgba_buf.pixel(1, 0), (255, 255, 255))
+
+        gray_rows = [bytes([42, 180]) for _ in range(2)]
+        gray_buf = mdm.decode_png(_encode_png_with_explicit_filters(2, 2, 0, gray_rows, [0, 2]))
+        self.assertEqual(gray_buf.pixel(0, 1), (42, 42, 42))
+        self.assertEqual(gray_buf.pixel(1, 1), (180, 180, 180))
+
+        # 2. PPM P6 round-trip and P3 ASCII with comments
+        ppm_bytes = mdm.encode_ppm(decoded_rgb)
+        self.assertEqual(mdm.decode_ppm(ppm_bytes).rgb, decoded_rgb.rgb)
+        p3_ascii = b"P3\n# synthetic comment\n2 1\n255\n10 20 30  200 210 220\n"
+        p3_buf = mdm.decode_ppm(p3_ascii)
+        self.assertEqual(p3_buf.pixel(0, 0), (10, 20, 30))
+        self.assertEqual(p3_buf.pixel(1, 0), (200, 210, 220))
+
+        # 3. Shades-of-Gray white balance + all-black image safety + CIE Lab inner-80% crop
+        black_buf = _make_solid_buffer(8, 8, (0, 0, 0))
+        self.assertEqual(mdm.shades_of_gray_white_balance(black_buf).rgb, black_buf.rgb)
+
+        warm_cast = _make_solid_buffer(12, 12, (220, 160, 110))
+        wb_neutral = mdm.shades_of_gray_white_balance(warm_cast, p=6.0)
+        r_px, g_px, b_px = wb_neutral.pixel(6, 6)
+        self.assertLessEqual(max(r_px, g_px, b_px) - min(r_px, g_px, b_px), 3)
+
+        # Inner-80% CIE Lab ignores outer 10% border clutter
+        clean_blue = _make_solid_buffer(20, 20, (30, 80, 210))
+        noisy_border_rgb = bytearray(clean_blue.rgb)
+        for y in range(20):
+            for x in range(20):
+                if x < 2 or x >= 18 or y < 2 or y >= 18:
+                    off = (y * 20 + x) * 3
+                    noisy_border_rgb[off : off + 3] = bytes((250, 240, 10))
+        noisy_border_blue = mdm.ImageBuffer(20, 20, bytes(noisy_border_rgb))
+        sim_same, de_same = mdm.inner_crop_cie_lab_similarity(clean_blue, noisy_border_blue, crop_fraction=0.80)
+        self.assertAlmostEqual(de_same, 0.0, places=9)
+        self.assertAlmostEqual(sim_same, 1.0, places=9)
+
+        red_pack = _make_solid_buffer(20, 20, (220, 25, 25))
+        sim_diff, de_diff = mdm.inner_crop_cie_lab_similarity(clean_blue, red_pack, crop_fraction=0.80)
+        self.assertGreater(de_diff, 50.0)
+        self.assertLess(sim_diff, 0.20)
+
+        # Residual MLP adapter
+        adapted = mdm.apply_residual_mlp_adapter(
+            [1.0, 0.0, 0.0, 0.0],
+            w1=[[0.5, -0.2, 0.1, 0.0], [0.0, 0.8, -0.4, 0.2]],
+            w2=[[0.3, 0.1], [0.4, -0.2], [-0.1, 0.5], [0.2, 0.2]],
+            alpha=0.35,
+        )
+        self.assertEqual(len(adapted), 4)
+        self.assertAlmostEqual(sum(v * v for v in adapted), 1.0, places=9)
+
+        # 4. Saliency band extraction IoU >= 0.80 across synthetic horizontal variant bands
+        band_specs = [(10, 24), (22, 38), (36, 52), (4, 18)]
+        img_w, img_h = 32, 60
+        for gt_y0, gt_y1 in band_specs:
+            cands: list[mdm.ImageBuffer] = []
+            for k_idx, badge_rgb in enumerate([(235, 30, 30), (30, 220, 60), (30, 60, 240)]):
+                buf_bytes = bytearray(img_w * img_h * 3)
+                for y in range(img_h):
+                    for x in range(img_w):
+                        off = (y * img_w + x) * 3
+                        if gt_y0 <= y < gt_y1:
+                            # Variant-specific high-contrast stripe pattern inside ground-truth band
+                            stripe = badge_rgb if ((x + k_idx * 3) % 6 < 3) else (245, 245, 245)
+                            buf_bytes[off : off + 3] = bytes(stripe)
+                        else:
+                            # Shared packaging body across siblings
+                            base_c = (120 + (x % 5), 130 + (y % 4), 140)
+                            buf_bytes[off : off + 3] = bytes(base_c)
+                cands.append(mdm.ImageBuffer(img_w, img_h, bytes(buf_bytes)))
+
+            pred_y0, pred_y1, variances = mdm.extract_inter_candidate_saliency_band(cands)
+            self.assertEqual(len(variances), img_h)
+            inter = max(0, min(gt_y1, pred_y1) - max(gt_y0, pred_y0))
+            union = max(gt_y1, pred_y1) - min(gt_y0, pred_y0)
+            iou_1d = float(inter) / float(max(1, union))
+            self.assertGreaterEqual(
+                iou_1d,
+                0.80,
+                f"saliency band IoU {iou_1d:.3f} < 0.80 for gt=({gt_y0}, {gt_y1}), pred=({pred_y0}, {pred_y1})",
+            )
+
+        # 5. Dual-buffer contact sheet compilation + Stage-2A unsharpened invariance + curved unwarp
+        query_crop = cands[1]
+        sheet_flat = mdm.compile_dual_buffer_contact_sheet(
+            query_crop,
+            cands,
+            candidate_metadata=[
+                {"title": "Alpha Shampoo 180ml Bottle"},
+                {"title": "Alpha Shampoo 340ml Bottle"},
+                {"title": "Alpha Shampoo 650ml Pump"},
+            ],
+            curved_container=False,
+        )
+        sheet_curved = mdm.compile_dual_buffer_contact_sheet(
+            query_crop,
+            cands,
+            curved_container=True,
+        )
+        decoded_flat = mdm.decode_png(sheet_flat.png_bytes)
+        decoded_curved = mdm.decode_png(sheet_curved.png_bytes)
+        self.assertGreater(decoded_curved.width, decoded_flat.width)
+        self.assertEqual(sheet_flat.panel_labels, ["0", "1", "2", "3"])
+        self.assertEqual(len(sheet_flat.diff_hints), 3)
+        self.assertIn("340ml", sheet_flat.diff_hints[1])
+
+        # Stage-2A buffer must equal unsharpened Shades-of-Gray white balance of query
+        expected_s2a = mdm.shades_of_gray_white_balance(query_crop, p=6.0)
+        self.assertEqual(sheet_flat.stage2a_query_buffer.rgb, expected_s2a.rgb)
+
+    def test_multimodal_embedding_index_vertex_adapter_and_context_pruner(self) -> None:
+        # 1. VertexMultimodalEmbeddingAdapter wire payload + mock HTTP embed()
+        sample_png = mdm.encode_png(_make_solid_buffer(4, 4, (50, 120, 200)))
+
+        class _EmbedHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                n_bytes = int(self.headers.get("Content-Length", "0"))
+                req_json = json.loads(self.rfile.read(n_bytes).decode("utf-8"))
+                assert req_json["parameters"]["outputDimensionality"] == 4
+                assert "image" in req_json["instances"][0]
+                body = json.dumps(
+                    {"predictions": [{"multimodalEmbedding": [3.0, 4.0, 0.0, 0.0]}]}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _EmbedHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            adapter = mdm.VertexMultimodalEmbeddingAdapter(
+                project="public-demo-proj",
+                model="gemini-embedding-2",
+                location="us-central1",
+                output_dimensionality=4,
+                access_token_fn=lambda: "demo-token",
+                endpoint_override=f"http://{host}:{port}/predict",
+            )
+            emb_vec = adapter.embed(text="hydrating cleanser", image_bytes=sample_png)
+            self.assertAlmostEqual(emb_vec[0], 0.6, places=9)
+            self.assertAlmostEqual(emb_vec[1], 0.8, places=9)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        # 2. MultimodalEmbeddingIndex fast-exit vs sister pack-size collision + JSONL persistence
+        idx = mdm.MultimodalEmbeddingIndex(inv_temperature=24.0)
+        idx.add(
+            "sku_blue_180",
+            [0.98, 0.20, 0.0, 0.0],
+            title="Hydra Wash 180ml",
+            lab_color=(45.0, 5.0, -48.0),
+            aspect_bin="tall_cylinder",
+            pack_size=180,
+        )
+        with self.assertRaises(ValueError):
+            idx.add("sku_blue_180", [0.98, 0.20, 0.0, 0.0])
+
+        idx.upsert(
+            "sku_blue_340",
+            [0.97, 0.24, 0.0, 0.0],
+            title="Hydra Wash 340ml",
+            lab_color=(45.0, 5.0, -48.0),
+            aspect_bin="tall_cylinder",
+            pack_size=340,
+        )
+        idx.add(
+            "sku_red_500",
+            [0.10, 0.99, 0.0, 0.0],
+            title="Berry Tub 500g",
+            lab_color=(52.0, 62.0, 38.0),
+            aspect_bin="wide_tub",
+            pack_size=500,
+        )
+        idx.add(
+            "sku_green_250",
+            [0.0, 0.15, 0.98, 0.0],
+            title="Herbal Mist 250ml",
+            lab_color=(60.0, -45.0, 30.0),
+            aspect_bin="standard",
+            pack_size=250,
+        )
+
+        # Sister collision between 180ml and 340ml blocks Stage-2A fast exit
+        q_colliding = idx.query(
+            [0.98, 0.20, 0.0, 0.0],
+            query_lab_color=(45.0, 5.0, -48.0),
+            query_aspect_bin="tall_cylinder",
+            top_k=4,
+            use_csls=True,
+        )
+        self.assertEqual(q_colliding.shortlist_ids[0], "sku_blue_180")
+        self.assertFalse(q_colliding.fast_exit)
+
+        # Clear non-colliding query for Berry Tub 500g triggers fast_exit
+        q_clear = idx.query(
+            [0.08, 0.995, 0.0, 0.0],
+            query_lab_color=(52.0, 62.0, 38.0),
+            query_aspect_bin="wide_tub",
+            top_k=4,
+        )
+        self.assertTrue(q_clear.fast_exit)
+        self.assertEqual(q_clear.fast_exit_id, "sku_red_500")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idx_path = pathlib.Path(tmpdir) / "catalog_index.jsonl"
+            idx.save_jsonl(idx_path)
+            loaded_idx = mdm.MultimodalEmbeddingIndex.load_jsonl(idx_path)
+            self.assertEqual(len(loaded_idx), 4)
+            q_loaded = loaded_idx.query(
+                [0.08, 0.995, 0.0, 0.0],
+                query_lab_color=(52.0, 62.0, 38.0),
+                query_aspect_bin="wide_tub",
+                top_k=4,
+            )
+            self.assertEqual(q_loaded.shortlist_ids, q_clear.shortlist_ids)
+
+        # 3. 8-slot Context Pruner exact MCKP optimality vs brute-force 3^8 search
+        blocks = [
+            mdm.ContextBlock("sys_rules", 180, 70, "full sys", "stub sys", pinned=True),
+            mdm.ContextBlock("task_spec", 220, 90, "full spec", "stub spec", pinned=True),
+            mdm.ContextBlock("diff_hunk_1", 310, 85, "full d1", "stub d1", pinned=False),
+            mdm.ContextBlock("old_test_log", 420, 60, "full log", "stub log", pinned=False),
+            mdm.ContextBlock("grep_trace", 260, 55, "full grep", "stub grep", pinned=False),
+            mdm.ContextBlock("type_defs", 190, 65, "full types", "stub types", pinned=False),
+            mdm.ContextBlock("git_status", 140, 40, "full git", "stub git", pinned=False),
+            mdm.ContextBlock("active_err", 280, 95, "full err", "stub err", pinned=False),
+        ]
+        batches = mdm.build_context_pruning_questions(blocks)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0]), 8)
+
+        slot_probs = {
+            "sys_rules": {"full": 0.75, "stub": 0.20, "drop": 0.05},
+            "task_spec": {"full": 0.85, "stub": 0.12, "drop": 0.03},
+            "diff_hunk_1": {"full": 0.70, "stub": 0.20, "drop": 0.10},
+            "old_test_log": {"full": 0.05, "stub": 0.25, "drop": 0.70},
+            "grep_trace": {"full": 0.10, "stub": 0.55, "drop": 0.35},
+            "type_defs": {"full": 0.45, "stub": 0.45, "drop": 0.10},
+            "git_status": {"full": 0.08, "stub": 0.32, "drop": 0.60},
+            "active_err": {"full": 0.90, "stub": 0.08, "drop": 0.02},
+        }
+        budget = 950
+        pruned = mdm.prune_agent_context_blocks(blocks, slot_probs, token_budget=budget)
+        self.assertLessEqual(pruned.tokens_after, budget)
+        self.assertGreater(pruned.token_reduction_ratio, 0.50)
+        self.assertNotEqual(pruned.decisions["sys_rules"], "drop")
+        self.assertNotEqual(pruned.decisions["task_spec"], "drop")
+
+        # Brute-force verify exact global optimum over all feasible assignments
+        best_bf_util = -1.0
+        for combo in itertools.product(("full", "stub", "drop"), repeat=len(blocks)):
+            tok_sum = 0
+            u_sum = 0.0
+            feasible = True
+            for blk, act in zip(blocks, combo):
+                if blk.pinned and act == "drop":
+                    feasible = False
+                    break
+                sp = slot_probs[blk.id]
+                pf, ps = sp["full"], sp["stub"]
+                if act == "full":
+                    tok_sum += blk.full_tokens
+                    u_sum += 1.0 * pf + 0.5 * ps
+                elif act == "stub":
+                    tok_sum += blk.stub_tokens
+                    u_sum += 0.6 * pf + 1.0 * ps
+            if feasible and tok_sum <= budget and u_sum > best_bf_util:
+                best_bf_util = u_sum
+        self.assertAlmostEqual(pruned.expected_utility, best_bf_util, places=9)
+
+        # Budget below sum of pinned stub tokens (70 + 90 = 160) must raise ValueError
+        with self.assertRaises(ValueError):
+            mdm.prune_agent_context_blocks(blocks, slot_probs, token_budget=150)
+
+    def test_mcp_stdio_server_end_to_end_subprocess_and_content_length_framing(self) -> None:
+        env = dict(os.environ)
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{SRC_DIR}{os.pathsep}{existing_pp}" if existing_pp else str(SRC_DIR)
+
+        q_png_b64 = base64.b64encode(mdm.encode_png(_make_solid_buffer(8, 12, (40, 90, 190)))).decode("ascii")
+        c1_png_b64 = base64.b64encode(mdm.encode_png(_make_solid_buffer(8, 12, (40, 90, 190)))).decode("ascii")
+        c2_png_b64 = base64.b64encode(mdm.encode_png(_make_solid_buffer(8, 12, (200, 50, 50)))).decode("ascii")
+
+        requests = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "clientInfo": {"name": "unit-test"}},
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "shortlist_candidates",
+                    "arguments": {
+                        "items": [
+                            {"id": "item_a", "embedding": [1.0, 0.0, 0.0], "title": "Item A"},
+                            {"id": "item_b", "embedding": [0.0, 1.0, 0.0], "title": "Item B"},
+                        ],
+                        "query_embedding": [0.98, 0.15, 0.0],
+                        "top_k": 2,
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "evaluate_conformal_decision",
+                    "arguments": {
+                        "probabilities": {"item_a": 0.51, "item_b": 0.49},
+                        "q_hat": 0.60,
+                        "method": "aps",
+                        "prior_logits": {"item_a": 4.0, "item_b": 0.0},
+                        "prior_weight": 0.5,
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "prune_context_blocks",
+                    "arguments": {
+                        "blocks": [
+                            {"id": "b1", "full_tokens": 100, "stub_tokens": 30, "pinned": True, "stub_text": "s1"},
+                            {"id": "b2", "full_tokens": 200, "stub_tokens": 50, "pinned": False, "full_text": "f2"},
+                        ],
+                        "slot_probabilities": {
+                            "b1": {"full": 0.2, "stub": 0.7, "drop": 0.1},
+                            "b2": {"full": 0.1, "stub": 0.1, "drop": 0.8},
+                        },
+                        "token_budget": 60,
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "compile_contact_sheet",
+                    "arguments": {
+                        "query_png_base64": q_png_b64,
+                        "candidates": [{"png_base64": c1_png_b64}, {"png_base64": c2_png_b64}],
+                        "curved_container": True,
+                    },
+                },
+            },
+        ]
+
+        stdin_payload = "".join(json.dumps(r) + "\n" for r in requests).encode("utf-8")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "multimodal_decision_models.mcp_server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(REPO_ROOT),
+            env=env,
+        )
+        stdout_bytes, stderr_bytes = proc.communicate(input=stdin_payload, timeout=15)
+        self.assertEqual(proc.returncode, 0, msg=stderr_bytes.decode("utf-8", errors="replace"))
+
+        lines = [ln for ln in stdout_bytes.decode("utf-8").splitlines() if ln.strip()]
+        # 7 messages sent, 1 notification without id -> 6 responses
+        self.assertEqual(len(lines), 6)
+        by_id = {resp["id"]: resp for resp in (json.loads(ln) for ln in lines)}
+
+        self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "dgem-catalog")
+        tool_names = [t["name"] for t in by_id[2]["result"]["tools"]]
+        self.assertEqual(
+            tool_names,
+            [
+                "shortlist_candidates",
+                "evaluate_conformal_decision",
+                "prune_context_blocks",
+                "compile_contact_sheet",
+            ],
+        )
+
+        shortlist_out = json.loads(by_id[3]["result"]["content"][0]["text"])
+        self.assertEqual(shortlist_out["shortlist_ids"][0], "item_a")
+
+        conf_out = json.loads(by_id[4]["result"]["content"][0]["text"])
+        self.assertEqual(conf_out["prediction_set"], ["item_a", "item_b"])
+        self.assertTrue(conf_out["conformal_escalate"])
+        self.assertTrue(conf_out["should_escalate"])
+
+        prune_out = json.loads(by_id[5]["result"]["content"][0]["text"])
+        self.assertEqual(prune_out["decisions"], {"b1": "stub", "b2": "drop"})
+
+        sheet_out = json.loads(by_id[6]["result"]["content"][0]["text"])
+        sheet_img = mdm.decode_png(base64.b64decode(sheet_out["png_base64"]))
+        self.assertGreater(sheet_img.width, 16)
+
+        # Also verify LSP Content-Length framing and JSON-RPC error responses in-process
+        framed_req = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "ping"}).encode("utf-8")
+        raw_in = f"Content-Length: {len(framed_req)}\r\n\r\n".encode("ascii") + framed_req
+        in_buf = io.BytesIO(raw_in)
+        out_buf = io.BytesIO()
+        rc = mdm.serve_stdio(in_buf, out_buf)
+        self.assertEqual(rc, 0)
+        out_raw = out_buf.getvalue()
+        self.assertTrue(out_raw.startswith(b"Content-Length:"))
+        _, body_part = out_raw.split(b"\r\n\r\n", 1)
+        self.assertEqual(json.loads(body_part.decode("utf-8"))["id"], 99)
+
+
+if __name__ == "__main__":
+    unittest.main()

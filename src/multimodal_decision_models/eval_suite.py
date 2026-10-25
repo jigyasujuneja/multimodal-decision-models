@@ -259,3 +259,176 @@ def cluster_bootstrap_ci(
     lo = boot[int(0.025 * (n_boot - 1))]
     hi = boot[int(0.975 * (n_boot - 1))]
     return obs_mean, lo, hi
+
+
+@dataclass(frozen=True)
+class MurphyDecomposition:
+    """Murphy (1973) multiclass Brier score decomposition into Reliability, Resolution, and Uncertainty."""
+
+    brier: float
+    reliability: float
+    resolution: float
+    uncertainty: float
+
+
+def brier_murphy_decomposition(
+    predictions: Sequence[Mapping[str, float]],
+    golds: Sequence[str],
+    num_bins: int = 15,
+) -> MurphyDecomposition:
+    """Decompose multiclass Brier score into sum_k REL_k, RES_k, and UNC_k across equal-width bins."""
+    if len(predictions) != len(golds) or not predictions:
+        raise ValueError("predictions and golds must be non-empty sequences of equal length")
+    if num_bins < 1:
+        raise ValueError(f"num_bins must be >= 1, got {num_bins}")
+
+    norm_preds = [_normalize_dist(d) for d in predictions]
+    gold_strs = [str(g) for g in golds]
+    all_classes = sorted({k for d in norm_preds for k in d.keys()} | set(gold_strs))
+    n = float(len(norm_preds))
+    brier = brier_score_multiclass(norm_preds, gold_strs)
+
+    rel_total = 0.0
+    res_total = 0.0
+    unc_total = 0.0
+
+    for cls_key in all_classes:
+        outcomes = [1.0 if g == cls_key else 0.0 for g in gold_strs]
+        o_bar = sum(outcomes) / n
+        unc_total += o_bar * (1.0 - o_bar)
+
+        bin_counts = [0] * num_bins
+        bin_p_sums = [0.0] * num_bins
+        bin_o_sums = [0.0] * num_bins
+
+        for dist, out_val in zip(norm_preds, outcomes):
+            p_val = dist.get(cls_key, 0.0)
+            b_idx = min(num_bins - 1, max(0, int(p_val * num_bins)))
+            bin_counts[b_idx] += 1
+            bin_p_sums[b_idx] += p_val
+            bin_o_sums[b_idx] += out_val
+
+        for b_idx in range(num_bins):
+            cnt = bin_counts[b_idx]
+            if cnt > 0:
+                p_b = bin_p_sums[b_idx] / float(cnt)
+                o_b = bin_o_sums[b_idx] / float(cnt)
+                weight = float(cnt) / n
+                rel_total += weight * ((p_b - o_b) ** 2)
+                res_total += weight * ((o_b - o_bar) ** 2)
+
+    return MurphyDecomposition(
+        brier=brier,
+        reliability=rel_total,
+        resolution=res_total,
+        uncertainty=unc_total,
+    )
+
+
+def adaptive_calibration_error(
+    predictions: Sequence[Mapping[str, float]],
+    golds: Sequence[str],
+    num_bins: int = 15,
+) -> float:
+    """Compute equal-mass Adaptive Calibration Error (ACE, Nixon et al. 2019) across all classes."""
+    if len(predictions) != len(golds) or not predictions:
+        raise ValueError("predictions and golds must be non-empty sequences of equal length")
+    if num_bins < 1:
+        raise ValueError(f"num_bins must be >= 1, got {num_bins}")
+
+    norm_preds = [_normalize_dist(d) for d in predictions]
+    gold_strs = [str(g) for g in golds]
+    all_classes = sorted({k for d in norm_preds for k in d.keys()} | set(gold_strs))
+    if not all_classes:
+        return 0.0
+
+    n = len(norm_preds)
+    r_bins = min(num_bins, n)
+    ace_sum = 0.0
+
+    for cls_key in all_classes:
+        pairs = sorted(
+            (dist.get(cls_key, 0.0), 1.0 if g == cls_key else 0.0)
+            for dist, g in zip(norm_preds, gold_strs)
+        )
+        cursor = 0
+        cls_err = 0.0
+        for r_idx in range(r_bins):
+            b_size = (n // r_bins) + (1 if r_idx < (n % r_bins) else 0)
+            if b_size <= 0:
+                continue
+            bucket = pairs[cursor : cursor + b_size]
+            cursor += b_size
+            avg_p = sum(p for p, _ in bucket) / float(b_size)
+            avg_o = sum(o for _, o in bucket) / float(b_size)
+            cls_err += (float(b_size) / float(n)) * abs(avg_o - avg_p)
+        ace_sum += cls_err
+
+    return ace_sum / float(len(all_classes))
+
+
+def macro_f1_score(
+    predicted_labels: Sequence[str],
+    gold_labels: Sequence[str],
+) -> float:
+    """Compute unweighted multiclass Macro-F1 across all unique labels present in gold or predicted."""
+    if len(predicted_labels) != len(gold_labels) or not gold_labels:
+        raise ValueError("predicted_labels and gold_labels must be non-empty sequences of equal length")
+    preds = [str(p) for p in predicted_labels]
+    golds = [str(g) for g in gold_labels]
+    classes = sorted(set(golds) | set(preds))
+
+    tp_map: dict[str, int] = {c: 0 for c in classes}
+    fp_map: dict[str, int] = {c: 0 for c in classes}
+    fn_map: dict[str, int] = {c: 0 for c in classes}
+
+    for pred, gold in zip(preds, golds):
+        if pred == gold:
+            tp_map[gold] += 1
+        else:
+            fp_map[pred] += 1
+            fn_map[gold] += 1
+
+    f1_sum = 0.0
+    for c in classes:
+        denom = 2 * tp_map[c] + fp_map[c] + fn_map[c]
+        if denom > 0:
+            f1_sum += (2.0 * float(tp_map[c])) / float(denom)
+    return f1_sum / float(len(classes))
+
+
+def ndcg_at_k(
+    ranked_ids: Sequence[str],
+    relevance_by_id: Mapping[str, float],
+    k: int = 10,
+) -> float:
+    """Compute Normalized Discounted Cumulative Gain (nDCG@k) in [0, 1] with duplicate-ID deduplication."""
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    clean_rel: dict[str, float] = {}
+    for raw_id, raw_val in relevance_by_id.items():
+        val = float(raw_val)
+        if not math.isfinite(val) or val < 0.0:
+            raise ValueError(f"relevance for {raw_id!r} must be finite and >= 0, got {raw_val!r}")
+        if val > 0.0:
+            clean_rel[str(raw_id)] = val
+
+    if not ranked_ids or not clean_rel:
+        return 0.0
+
+    ideal_gains = sorted(clean_rel.values(), reverse=True)[:k]
+    idcg = sum(rel / math.log2(float(idx + 2)) for idx, rel in enumerate(ideal_gains))
+    if idcg <= 0.0:
+        return 0.0
+
+    dcg = 0.0
+    seen: set[str] = set()
+    for idx, doc_id_raw in enumerate(ranked_ids[:k]):
+        doc_id = str(doc_id_raw)
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        rel = clean_rel.get(doc_id, 0.0)
+        if rel > 0.0:
+            dcg += rel / math.log2(float(idx + 2))
+    return min(1.0, max(0.0, dcg / idcg))
