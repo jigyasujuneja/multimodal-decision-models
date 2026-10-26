@@ -244,3 +244,44 @@ func TestFusePriorWithGateNeverAndUnknownModes(t *testing.T) {
 		}
 	}
 }
+
+func TestExtended255CodeBijectionAndReasoningToReadoutDistillation(t *testing.T) {
+	if len(Universal256DecisionCodes) != 256 {
+		t.Fatalf("expected 256 universal codes, got %d", len(Universal256DecisionCodes))
+	}
+	opts := make([]string, 255)
+	for i := 0; i < 255; i++ {
+		opts[i] = "opt_" + Universal256DecisionCodes[i]
+	}
+	codeToKey, err := BuildExtended255CodeBijection(opts)
+	if err != nil {
+		t.Fatalf("unexpected error building 255-code bijection: %v", err)
+	}
+	if len(codeToKey) != 255 {
+		t.Fatalf("expected 255 bijection entries, got %d", len(codeToKey))
+	}
+	for _, splitCode := range []string{"BQ", "BZ", "CJ", "CQ", "CZ", "DQ", "DZ", "EJ", "FJ", "FQ", "FV", "FZ", "GJ", "GQ", "GX", "GZ"} {
+		if _, exists := codeToKey[splitCode]; exists {
+			t.Fatalf("multi-token BPE split code %q must not appear in Universal256DecisionCodes", splitCode)
+		}
+	}
+
+	teacher := map[string]float64{"0": 0.05, "1": 0.80, "2": 0.15}
+	base := map[string]float64{"0": 0.25, "1": 0.55, "2": 0.20}
+	student := map[string]float64{"0": 0.12, "1": 0.70, "2": 0.18}
+	res, err := ReasoningToReadoutDistillationLoss(teacher, student, base, "score", 1.0, 0.25, 0.20, 1.50, 1.10)
+	if err != nil {
+		t.Fatalf("unexpected error in ReasoningToReadoutDistillationLoss: %v", err)
+	}
+	if res.TotalLoss <= 0.0 || res.OrdinalScoreLoss <= 0.0 {
+		t.Fatalf("unexpected distillation result: %+v", res)
+	}
+	sumP := 0.0
+	for _, p := range res.DistilledPosterior {
+		sumP += p
+	}
+	if math.Abs(sumP-1.0) > 1e-9 {
+		t.Fatalf("distilled posterior does not sum to 1: %f", sumP)
+	}
+}
+

@@ -67,3 +67,13 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
   1. Jointly calibrate funnel thresholds $(\tau_H, w, T)$ via `calibrate_ltt_funnel_gates`, enforcing the Hoeffding-Bentkus upper confidence bound $\text{UCB}(\lambda) \le r_{\max}$ at confidence $1 - \delta$.
   2. Calibrate simultaneous multi-slot conformal prediction sets via `calibrate_multislot_joint_conformal` and `multislot_joint_conformal_sets`.
 * **MDM-Bench Verification**: Simultaneous 4-slot joint conformal calibration restores family-wise coverage from `66.25%` (uncorrected per-slot RAPS) to `90.50%` (max-score) and `90.75%` (Bonferroni) at $\alpha_{\text{family}} = 0.10$.
+
+## 9. Universal 255-Code Single-Token Readouts & Reasoning-to-Readout Self-Distillation (`arXiv:2610.03935`)
+
+* **Problem**:
+  1. Naive sequential 255-option label schemes (`A..Z, AA..IT`) contain rare letter pairs (`BQ, BZ, CJ, CQ, CZ, DQ, DZ, EJ, FJ, FQ, FV, FZ, GJ, GQ, GX, GZ`) that split into 2 BPE tokens across `Qwen3`, `DeepSeek-V3`, `Llama-3.2`, `Gemma-3`, and `SmolLM2`, causing first-token readouts to read the prefix token (`B`) instead of the 2-letter option (`BQ`).
+  2. Reasoning models (`Qwen3.8-27B`, `DeepSeek-R1`) with default chat templates emit `<think>` at token position 0 (`>95%` mass), collapsing first-token letter accuracy to `34.67%` (`11.63%` on ordinal `score` slots), and even with `enable_thinking=False` remain over-peaked relative to human consensus (`KL_soft = 0.5822`).
+* **Solution**:
+  1. Use `build_extended_255_code_bijection` (and `OpenAILogprobBackend.build_letter_prompt(..., allow_extended_255=True)`), which maps up to 256 options onto `UNIVERSAL_256_DECISION_CODES` (`255/255` single-token coverage across all 5 BPE tokenizer families) while retaining `MAX_OPTIONS_PER_SLOT = 26` (`shortlist_wide_question` + `trie_constrained_joint_decode`) as the default for standard 20-logprob APIs.
+  2. Guard against unstripped thinking prefixes via `OpenAILogprobBackend.extract_letter_distribution` (which raises `LogprobAlignmentError` whenever `<think>`/`<thought>` dominates `top_logprobs`), and combine reasoning-teacher distributions with compact System-1 base anchors via `reasoning_to_readout_distillation_loss` (`arXiv:2610.03935` Eq. 12).
+* **Real-Data Verification (`benchmarks/run_real_public_benchmarks.py`)**: On `marcmagn1/jev-alt-systemone-eval` joined with `LocalLLaMA/typed-decisions`, Eq. (12) distillation improves accuracy to `70.00%` (`71.01%` on all $N=2,870$ held-out questions), reduces KL to human annotator consensus from `0.5822` to `0.2499` (`-57.1%`), and lowers ordinal `ScoreMAE` from `0.4533` to `0.3761`.

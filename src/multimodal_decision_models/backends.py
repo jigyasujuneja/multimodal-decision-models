@@ -72,7 +72,9 @@ from .contracts import (
 from .shortlist import shortlist_wide_question
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
+    MAX_EXTENDED_OPTIONS_PER_SLOT,
     MAX_OPTIONS_PER_SLOT,
+    UNIVERSAL_256_DECISION_CODES,
     DecisionQuestion,
     DecisionResult,
     DecisionTerminalState,
@@ -81,6 +83,47 @@ from .types import (
 )
 
 OPENAI_MAX_TOP_LOGPROBS = 20
+_THINKING_TAG_TOKENS = frozenset({"<think>", "</think>", "<|thought|>", "<thought>", "thought"})
+
+
+def build_extended_255_code_bijection(
+    option_keys: Sequence[str],
+    vocab: Collection[str] | None = None,
+) -> dict[str, str]:
+    """Map up to 256 option keys to single-token uppercase codes (A..Z, AA..PT).
+
+    Follows arXiv:2610.03935 Section 6.1 and DecisionBench 1.0 (imajev-4b / mojev)
+    while filtering out rare two-letter pairs (e.g., BQ, CJ, FQ, GZ) that split into
+    2 BPE sub-tokens in Qwen3, DeepSeek-V3, Gemma-3, Llama-3.2, or SmolLM2 tokenizers.
+    When a custom `vocab` is supplied, dynamically selects single-token codes verified
+    to exist in `vocab`.
+    """
+    keys = [str(k) for k in option_keys]
+    if len(keys) < 2:
+        raise SchemaContractViolationError(f"question requires >= 2 options, got {len(keys)}")
+    if len(keys) > MAX_EXTENDED_OPTIONS_PER_SLOT:
+        raise SchemaContractViolationError(
+            f"question has {len(keys)} options, exceeding extended single-token ceiling {MAX_EXTENDED_OPTIONS_PER_SLOT}"
+        )
+    if len(set(keys)) != len(keys):
+        raise SchemaContractViolationError("option_keys must not contain duplicate keys")
+
+    if vocab is not None:
+        all_candidates = list(string.ascii_uppercase) + [
+            a + b for a in string.ascii_uppercase for b in string.ascii_uppercase
+        ]
+        valid_codes = [c for c in all_candidates if c in vocab]
+        if len(valid_codes) < len(keys):
+            raise SchemaContractViolationError(
+                f"supplied vocabulary contains only {len(valid_codes)} single-token uppercase codes, need {len(keys)}"
+            )
+        selected_codes = valid_codes[: len(keys)]
+    elif len(keys) <= MAX_OPTIONS_PER_SLOT:
+        selected_codes = list(string.ascii_uppercase[: len(keys)])
+    else:
+        selected_codes = list(UNIVERSAL_256_DECISION_CODES[: len(keys)])
+
+    return {selected_codes[i]: keys[i] for i in range(len(keys))}
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _INFERRED_EVIDENCE_LABELS = frozenset({"inferred", "occluded_or_unreadable", "unreadable", "absent"})
 _RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
@@ -544,21 +587,27 @@ class OpenAILogprobBackend:
         q: DecisionQuestion,
         *,
         allow_above_20: bool = False,
+        allow_extended_255: bool = False,
+        vocab: Collection[str] | None = None,
     ) -> tuple[str, dict[str, str]]:
         keys = q.option_keys()
         if len(keys) < 2:
             raise SchemaContractViolationError(f"question requires >= 2 options, got {len(keys)}")
-        if len(keys) > MAX_OPTIONS_PER_SLOT:
+        max_allowed = MAX_EXTENDED_OPTIONS_PER_SLOT if allow_extended_255 else MAX_OPTIONS_PER_SLOT
+        if len(keys) > max_allowed:
             raise SchemaContractViolationError(
-                f"question has {len(keys)} options; shortlist to <= {MAX_OPTIONS_PER_SLOT} first"
+                f"question has {len(keys)} options; shortlist to <= {max_allowed} first"
             )
-        if len(keys) > OPENAI_MAX_TOP_LOGPROBS and not allow_above_20:
+        if len(keys) > OPENAI_MAX_TOP_LOGPROBS and not (allow_above_20 or allow_extended_255):
             raise SchemaContractViolationError(
                 f"question has {len(keys)} options, exceeding OpenAI top_logprobs={OPENAI_MAX_TOP_LOGPROBS} "
                 "ceiling without letter_token_ids logit_bias; shortlist to <= 20 options or supply letter_token_ids"
             )
-        letters = string.ascii_uppercase[: len(keys)]
-        letter_to_key = {letters[i]: keys[i] for i in range(len(keys))}
+        if len(keys) <= MAX_OPTIONS_PER_SLOT and vocab is None:
+            letters = string.ascii_uppercase[: len(keys)]
+            letter_to_key = {letters[i]: keys[i] for i in range(len(keys))}
+        else:
+            letter_to_key = build_extended_255_code_bijection(keys, vocab=vocab)
         lines = [
             UNTRUSTED_BOUNDARY_NOTICE,
             "State / Context:",
@@ -570,7 +619,8 @@ class OpenAILogprobBackend:
         for letter, key in letter_to_key.items():
             desc = q.criteria.get(key, key) if q.type != "score" else key
             lines.append(f"  {letter}) {key}: {desc}")
-        lines.append("\nReply with the single uppercase option letter only.")
+        code_kind = "option code" if len(keys) > MAX_OPTIONS_PER_SLOT else "single uppercase option letter"
+        lines.append(f"\nReply with the {code_kind} only.")
         return "\n".join(lines), letter_to_key
 
     @staticmethod
@@ -583,19 +633,39 @@ class OpenAILogprobBackend:
         if not isinstance(top_logprobs, Mapping) or not top_logprobs:
             raise LogprobAlignmentError("upstream chat completion omitted top_logprobs")
 
+        # Detect unstripped thinking-tag leakage (e.g., '<think>' occupying top-1 token when
+        # enable_thinking=False was omitted on hybrid thinking models; arXiv:2610.03935 Sec 6.2).
+        best_tok_overall: str | None = None
+        best_lp_overall = float("-inf")
         letter_logits: dict[str, float] = {}
+        for tok, lp in top_logprobs.items():
+            if not isinstance(tok, str):
+                raise SchemaContractViolationError("top_logprobs token key must be a string")
+            if isinstance(lp, bool) or not isinstance(lp, (int, float)):
+                raise SchemaContractViolationError(
+                    f"non-numeric logprob encountered on token {tok!r}: {lp!r}"
+                )
+            val = float(lp)
+            if math.isnan(val) or (math.isinf(val) and val > 0.0):
+                raise LogprobAlignmentError(f"invalid non-finite logprob {val!r} on token {tok!r}")
+            if val > best_lp_overall:
+                best_lp_overall = val
+                best_tok_overall = tok.strip().lower()
+
+        if (
+            best_tok_overall in _THINKING_TAG_TOKENS
+            and math.exp(min(0.0, best_lp_overall)) >= 0.50
+        ):
+            raise LogprobAlignmentError(
+                f"thinking token {best_tok_overall!r} dominates first-token logprobs "
+                f"(prob={math.exp(min(0.0, best_lp_overall)):.3f}); set enable_thinking=False "
+                "or extract post-reasoning token after </think>"
+            )
+
         for letter, key in letter_to_key.items():
             best_lp = float("-inf")
             for tok, lp in top_logprobs.items():
-                if not isinstance(tok, str):
-                    raise SchemaContractViolationError("top_logprobs token key must be a string")
-                if isinstance(lp, bool) or not isinstance(lp, (int, float)):
-                    raise SchemaContractViolationError(
-                        f"non-numeric logprob encountered on token {tok!r}: {lp!r}"
-                    )
                 val = float(lp)
-                if math.isnan(val) or (math.isinf(val) and val > 0.0):
-                    raise LogprobAlignmentError(f"invalid non-finite logprob {val!r} on token {tok!r}")
                 if tok.strip() == letter and val > best_lp:
                     best_lp = val
             letter_logits[key] = best_lp

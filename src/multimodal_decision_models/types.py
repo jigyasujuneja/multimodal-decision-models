@@ -21,8 +21,28 @@ from enum import Enum
 from typing import Any
 
 MAX_OPTIONS_PER_SLOT = 26
+MAX_EXTENDED_OPTIONS_PER_SLOT = 256
 MAX_SLOTS_PER_PASS = 8
 DEFAULT_HESITATION_THRESHOLD = 0.16
+
+UNIVERSAL_256_DECISION_CODES: tuple[str, ...] = (
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P",
+    "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "AA", "AB", "AC", "AD", "AE", "AF",
+    "AG", "AH", "AI", "AK", "AL", "AM", "AN", "AP", "AR", "AS", "AT", "AU", "AV", "AW", "BA", "BB",
+    "BC", "BD", "BE", "BI", "BL", "BM", "BO", "BP", "BR", "BS", "BT", "BU", "BY", "CA", "CB", "CC",
+    "CD", "CE", "CF", "CG", "CH", "CI", "CL", "CM", "CN", "CO", "CP", "CR", "CS", "CT", "CU", "CV",
+    "DA", "DB", "DC", "DD", "DE", "DF", "DH", "DI", "DL", "DM", "DN", "DO", "DP", "DR", "DS", "DT",
+    "EA", "EC", "ED", "EE", "EF", "EG", "EL", "EM", "EN", "EP", "ER", "ES", "ET", "EU", "EV", "EX",
+    "FA", "FC", "FD", "FE", "FI", "FL", "FM", "FO", "FP", "FR", "FS", "FT", "GA", "GB", "GC", "GD",
+    "GE", "GH", "GI", "GL", "GM", "GN", "GO", "GP", "GR", "GS", "GT", "GW", "HA", "HC", "HD", "HE",
+    "HF", "HI", "HL", "HO", "HP", "HR", "HS", "HT", "HV", "IA", "IB", "IC", "ID", "IE", "IF", "IG",
+    "II", "IL", "IM", "IN", "IO", "IP", "IR", "IS", "IT", "IU", "IV", "IX", "JC", "JD", "JO", "JS",
+    "KA", "KB", "KE", "KS", "LA", "LC", "LD", "LE", "LG", "LI", "LL", "LM", "LO", "LP", "LS", "LT",
+    "MA", "MB", "MC", "MD", "ME", "MH", "MI", "ML", "MM", "MN", "MO", "MP", "MR", "MS", "MT", "MW",
+    "MY", "NA", "NC", "ND", "NE", "NF", "NG", "NH", "NI", "NL", "NM", "NO", "NP", "NR", "NS", "NT",
+    "NV", "NW", "NY", "OA", "OB", "OC", "OD", "OF", "OH", "OK", "OM", "ON", "OP", "OR", "OS", "OT",
+    "PA", "PC", "PD", "PE", "PF", "PG", "PH", "PI", "PK", "PL", "PM", "PO", "PP", "PR", "PS", "PT",
+)
 
 
 class DecisionTerminalState(str, Enum):

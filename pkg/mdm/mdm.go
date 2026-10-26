@@ -28,9 +28,52 @@ import (
 
 const (
 	MaxOptionsPerSlot             = 26
+	MaxExtendedOptionsPerSlot     = 256
 	MaxSlotsPerPass               = 8
 	DefaultCosinePriorTemperature = 0.07
 )
+
+// Universal256DecisionCodes lists 256 uppercase 1-letter and 2-letter decision codes (A..Z, AA..PT)
+// verified to tokenize as a single BPE token (both bare and space-prefixed) across Qwen3, DeepSeek-V3,
+// Gemma-3, Llama-3.2, and SmolLM2 tokenizers (arXiv:2610.03935 Section 6.1 & DecisionBench 1.0).
+var Universal256DecisionCodes = [256]string{
+	"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P",
+	"Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "AA", "AB", "AC", "AD", "AE", "AF",
+	"AG", "AH", "AI", "AK", "AL", "AM", "AN", "AP", "AR", "AS", "AT", "AU", "AV", "AW", "BA", "BB",
+	"BC", "BD", "BE", "BI", "BL", "BM", "BO", "BP", "BR", "BS", "BT", "BU", "BY", "CA", "CB", "CC",
+	"CD", "CE", "CF", "CG", "CH", "CI", "CL", "CM", "CN", "CO", "CP", "CR", "CS", "CT", "CU", "CV",
+	"DA", "DB", "DC", "DD", "DE", "DF", "DH", "DI", "DL", "DM", "DN", "DO", "DP", "DR", "DS", "DT",
+	"EA", "EC", "ED", "EE", "EF", "EG", "EL", "EM", "EN", "EP", "ER", "ES", "ET", "EU", "EV", "EX",
+	"FA", "FC", "FD", "FE", "FI", "FL", "FM", "FO", "FP", "FR", "FS", "FT", "GA", "GB", "GC", "GD",
+	"GE", "GH", "GI", "GL", "GM", "GN", "GO", "GP", "GR", "GS", "GT", "GW", "HA", "HC", "HD", "HE",
+	"HF", "HI", "HL", "HO", "HP", "HR", "HS", "HT", "HV", "IA", "IB", "IC", "ID", "IE", "IF", "IG",
+	"II", "IL", "IM", "IN", "IO", "IP", "IR", "IS", "IT", "IU", "IV", "IX", "JC", "JD", "JO", "JS",
+	"KA", "KB", "KE", "KS", "LA", "LC", "LD", "LE", "LG", "LI", "LL", "LM", "LO", "LP", "LS", "LT",
+	"MA", "MB", "MC", "MD", "ME", "MH", "MI", "ML", "MM", "MN", "MO", "MP", "MR", "MS", "MT", "MW",
+	"MY", "NA", "NC", "ND", "NE", "NF", "NG", "NH", "NI", "NL", "NM", "NO", "NP", "NR", "NS", "NT",
+	"NV", "NW", "NY", "OA", "OB", "OC", "OD", "OF", "OH", "OK", "OM", "ON", "OP", "OR", "OS", "OT",
+	"PA", "PC", "PD", "PE", "PF", "PG", "PH", "PI", "PK", "PL", "PM", "PO", "PP", "PR", "PS", "PT",
+}
+
+// BuildExtended255CodeBijection maps up to 256 option keys to universal single-token uppercase codes.
+func BuildExtended255CodeBijection(optionKeys []string) (map[string]string, error) {
+	if len(optionKeys) < 2 {
+		return nil, fmt.Errorf("question requires >= 2 options, got %d", len(optionKeys))
+	}
+	if len(optionKeys) > MaxExtendedOptionsPerSlot {
+		return nil, fmt.Errorf("question has %d options, exceeding extended ceiling %d", len(optionKeys), MaxExtendedOptionsPerSlot)
+	}
+	seen := make(map[string]struct{}, len(optionKeys))
+	out := make(map[string]string, len(optionKeys))
+	for i, k := range optionKeys {
+		if _, dup := seen[k]; dup {
+			return nil, fmt.Errorf("duplicate option key %q", k)
+		}
+		seen[k] = struct{}{}
+		out[Universal256DecisionCodes[i]] = k
+	}
+	return out, nil
+}
 
 // NormalizeCosinePriorLogits converts raw cosine similarities into temperature-scaled log-softmax
 // prior logits: log P(k) = (cos_k / tau) - logsumexp_j(cos_j / tau).
@@ -864,3 +907,167 @@ func ValidatePackQuantityConsistency(titleA, titleB, predictedRelation, predicte
 	}
 	return true
 }
+
+// ReasoningToReadoutDistillationResult holds the breakdown of the arXiv:2610.03935 Eq. (12) objective.
+type ReasoningToReadoutDistillationResult struct {
+	TotalLoss            float64
+	CrossEntropyLoss     float64
+	OrdinalScoreLoss     float64
+	KLAnchorLoss         float64
+	ExpectedStudentScore float64
+	ExpectedTeacherScore float64
+	DistilledPosterior   map[string]float64
+}
+
+// ReasoningToReadoutDistillationLoss evaluates Eq. (12) from Duan et al. (arXiv:2610.03935)
+// and computes the closed-form stationary log-linear posterior combining teacher and base anchor readouts.
+func ReasoningToReadoutDistillationLoss(
+	teacherProbs map[string]float64,
+	studentProbs map[string]float64,
+	baseAnchorProbs map[string]float64,
+	primitiveType string,
+	taskWeight float64,
+	ordinalLambda float64,
+	klAnchorKappa float64,
+	teacherTemp float64,
+	anchorTemp float64,
+) (ReasoningToReadoutDistillationResult, error) {
+	if len(teacherProbs) == 0 || len(studentProbs) == 0 {
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("teacherProbs and studentProbs must be non-empty")
+	}
+	if len(teacherProbs) != len(studentProbs) {
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("teacherProbs and studentProbs key count mismatch")
+	}
+	if taskWeight <= 0 || math.IsNaN(taskWeight) || math.IsInf(taskWeight, 0) {
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("taskWeight must be finite and > 0")
+	}
+	if ordinalLambda < 0 || math.IsNaN(ordinalLambda) || math.IsInf(ordinalLambda, 0) {
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("ordinalLambda must be finite and >= 0")
+	}
+	if klAnchorKappa < 0 || math.IsNaN(klAnchorKappa) || math.IsInf(klAnchorKappa, 0) {
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("klAnchorKappa must be finite and >= 0")
+	}
+	if teacherTemp <= 0 || math.IsNaN(teacherTemp) || math.IsInf(teacherTemp, 0) {
+		teacherTemp = 1.0
+	}
+	if anchorTemp <= 0 || math.IsNaN(anchorTemp) || math.IsInf(anchorTemp, 0) {
+		anchorTemp = 1.0
+	}
+
+	keys := make([]string, 0, len(teacherProbs))
+	for k := range teacherProbs {
+		if _, ok := studentProbs[k]; !ok {
+			return ReasoningToReadoutDistillationResult{}, fmt.Errorf("option key %q missing from studentProbs", k)
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	normMap := func(m map[string]float64, label string) (map[string]float64, error) {
+		sum := 0.0
+		clean := make(map[string]float64, len(keys))
+		for _, k := range keys {
+			v, ok := m[k]
+			if !ok || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+				return nil, fmt.Errorf("invalid probability for %q in %s", k, label)
+			}
+			clean[k] = v
+			sum += v
+		}
+		if sum <= 0 {
+			return nil, fmt.Errorf("%s sums to zero", label)
+		}
+		for _, k := range keys {
+			p := clean[k] / sum
+			if p < 1e-12 {
+				p = 1e-12
+			}
+			clean[k] = p
+		}
+		return clean, nil
+	}
+
+	qBar, err := normMap(teacherProbs, "teacherProbs")
+	if err != nil {
+		return ReasoningToReadoutDistillationResult{}, err
+	}
+	pTheta, err := normMap(studentProbs, "studentProbs")
+	if err != nil {
+		return ReasoningToReadoutDistillationResult{}, err
+	}
+	p0 := pTheta
+	if len(baseAnchorProbs) > 0 {
+		p0, err = normMap(baseAnchorProbs, "baseAnchorProbs")
+		if err != nil {
+			return ReasoningToReadoutDistillationResult{}, err
+		}
+	}
+
+	ceLoss := 0.0
+	klAnchor := 0.0
+	for _, k := range keys {
+		ceLoss -= qBar[k] * math.Log(pTheta[k])
+		klAnchor += p0[k] * math.Log(p0[k]/pTheta[k])
+	}
+
+	cleanType := strings.ToLower(strings.TrimSpace(primitiveType))
+	isScore := cleanType == "score" || cleanType == "ordinal" || cleanType == "ordinal_scoring"
+	expStudent := 0.0
+	expTeacher := 0.0
+	ordLoss := 0.0
+	if isScore {
+		for idx, k := range keys {
+			val, parseErr := strconv.ParseFloat(k, 64)
+			if parseErr != nil {
+				val = float64(idx)
+			}
+			expStudent += val * pTheta[k]
+			expTeacher += val * qBar[k]
+		}
+		diff := expStudent - expTeacher
+		ordLoss = diff * diff
+	}
+
+	total := taskWeight*(ceLoss+(func() float64 {
+		if isScore {
+			return ordinalLambda * ordLoss
+		}
+		return 0.0
+	})()) + klAnchorKappa*klAnchor
+
+	denomW := taskWeight + klAnchorKappa
+	alphaAnchor := 0.0
+	if denomW > 0 {
+		alphaAnchor = klAnchorKappa / denomW
+	}
+	logits := make(map[string]float64, len(keys))
+	maxL := math.Inf(-1)
+	for _, k := range keys {
+		lg := (1.0-alphaAnchor)*(math.Log(qBar[k])/teacherTemp) + alphaAnchor*(math.Log(p0[k])/anchorTemp)
+		logits[k] = lg
+		if lg > maxL {
+			maxL = lg
+		}
+	}
+	sumExp := 0.0
+	post := make(map[string]float64, len(keys))
+	for _, k := range keys {
+		e := math.Exp(logits[k] - maxL)
+		post[k] = e
+		sumExp += e
+	}
+	for _, k := range keys {
+		post[k] /= sumExp
+	}
+
+	return ReasoningToReadoutDistillationResult{
+		TotalLoss:            total,
+		CrossEntropyLoss:     ceLoss,
+		OrdinalScoreLoss:     ordLoss,
+		KLAnchorLoss:         klAnchor,
+		ExpectedStudentScore: expStudent,
+		ExpectedTeacherScore: expTeacher,
+		DistilledPosterior:   post,
+	}, nil
+}
+

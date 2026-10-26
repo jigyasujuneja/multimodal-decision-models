@@ -983,3 +983,122 @@ def calibrate_ltt_funnel_gates(
         satisfied_bound=best.satisfied_bound,
     )
 
+
+@dataclass(frozen=True)
+class ReasoningToReadoutDistillationResult:
+    """Breakdown of the arXiv:2610.03935 Eq. (12) Reasoning-to-Readout Self-Distillation objective."""
+
+    total_loss: float
+    cross_entropy_loss: float
+    ordinal_score_loss: float
+    kl_anchor_loss: float
+    expected_student_score: float
+    expected_teacher_score: float
+    distilled_posterior: dict[str, float]
+
+
+def reasoning_to_readout_distillation_loss(
+    teacher_probs: Mapping[str, float],
+    student_probs: Mapping[str, float],
+    base_anchor_probs: Mapping[str, float] | None = None,
+    *,
+    primitive_type: str = "choice",
+    task_weight: float = 1.0,
+    ordinal_lambda: float = 0.25,
+    kl_anchor_kappa: float = 0.10,
+    ordinal_values: Mapping[str, float] | None = None,
+    teacher_temperature: float = 1.0,
+    anchor_temperature: float = 1.0,
+) -> ReasoningToReadoutDistillationResult:
+    """Compute the Reasoning-to-Readout Self-Distillation loss and analytic posterior (Duan et al., arXiv:2610.03935 Eq. 12).
+
+    Evaluates:
+      L_i = w_t * [ H(q_bar_i, p_theta) + lambda * 1[t == 'score'] * (E_{p_theta}[v] - E_{q_bar_i}[v])^2 ]
+            + kappa_t * KL(p_0 || p_theta)
+
+    Also computes the closed-form stationary log-linear posterior combining the temperature-calibrated
+    teacher distribution `q_bar_i` and frozen base readout anchor `p_0`:
+      p*(y | x_i) proportional to q_bar_i(y)^(w_t / (w_t + kappa_t) / T_teacher) * p_0(y)^(kappa_t / (w_t + kappa_t) / T_anchor)
+    """
+    if not teacher_probs or not student_probs:
+        raise ValueError("teacher_probs and student_probs must be non-empty mappings")
+    if set(teacher_probs.keys()) != set(student_probs.keys()):
+        raise ValueError("teacher_probs and student_probs must have identical option key sets")
+    if base_anchor_probs is not None and set(base_anchor_probs.keys()) != set(teacher_probs.keys()):
+        raise ValueError("base_anchor_probs must have the same option key set as teacher_probs")
+    if not math.isfinite(task_weight) or task_weight <= 0.0:
+        raise ValueError(f"task_weight must be finite and > 0, got {task_weight!r}")
+    if not math.isfinite(ordinal_lambda) or ordinal_lambda < 0.0:
+        raise ValueError(f"ordinal_lambda must be finite and >= 0, got {ordinal_lambda!r}")
+    if not math.isfinite(kl_anchor_kappa) or kl_anchor_kappa < 0.0:
+        raise ValueError(f"kl_anchor_kappa must be finite and >= 0, got {kl_anchor_kappa!r}")
+    if not math.isfinite(teacher_temperature) or teacher_temperature <= 0.0:
+        raise ValueError(f"teacher_temperature must be finite and > 0, got {teacher_temperature!r}")
+    if not math.isfinite(anchor_temperature) or anchor_temperature <= 0.0:
+        raise ValueError(f"anchor_temperature must be finite and > 0, got {anchor_temperature!r}")
+
+    eps = 1e-12
+    keys = sorted(teacher_probs.keys())
+
+    def _norm(m: Mapping[str, float], name: str) -> dict[str, float]:
+        tot = 0.0
+        clean: dict[str, float] = {}
+        for k in keys:
+            fv = float(m[k])
+            if not math.isfinite(fv) or fv < 0.0:
+                raise ValueError(f"invalid probability for {k!r} in {name}: {m[k]!r}")
+            clean[k] = fv
+            tot += fv
+        if tot <= 0.0:
+            raise ValueError(f"{name} sums to zero")
+        return {k: max(eps, v / tot) for k, v in clean.items()}
+
+    q_bar = _norm(teacher_probs, "teacher_probs")
+    p_theta = _norm(student_probs, "student_probs")
+    p_0 = _norm(base_anchor_probs, "base_anchor_probs") if base_anchor_probs is not None else p_theta
+
+    ce_loss = -sum(q_bar[k] * math.log(p_theta[k]) for k in keys)
+    kl_anchor = sum(p_0[k] * math.log(p_0[k] / p_theta[k]) for k in keys)
+
+    clean_type = primitive_type.strip().lower()
+    exp_student = 0.0
+    exp_teacher = 0.0
+    ord_loss = 0.0
+    if clean_type in ("score", "ordinal", "ordinal_scoring"):
+        val_map: dict[str, float] = {}
+        for idx, k in enumerate(keys):
+            if ordinal_values is not None and k in ordinal_values:
+                val_map[k] = float(ordinal_values[k])
+            else:
+                try:
+                    val_map[k] = float(k)
+                except ValueError:
+                    val_map[k] = float(idx)
+        exp_student = sum(val_map[k] * p_theta[k] for k in keys)
+        exp_teacher = sum(val_map[k] * q_bar[k] for k in keys)
+        ord_loss = (exp_student - exp_teacher) ** 2
+
+    total = task_weight * (ce_loss + (ordinal_lambda * ord_loss if clean_type in ("score", "ordinal", "ordinal_scoring") else 0.0)) + (
+        kl_anchor_kappa * kl_anchor
+    )
+
+    denom_w = task_weight + kl_anchor_kappa
+    alpha_anchor = kl_anchor_kappa / denom_w if denom_w > 0.0 else 0.0
+    distilled_logits = {
+        k: ((1.0 - alpha_anchor) * (math.log(q_bar[k]) / teacher_temperature))
+        + (alpha_anchor * (math.log(p_0[k]) / anchor_temperature))
+        for k in keys
+    }
+    posterior = _softmax_dict(distilled_logits)
+
+    return ReasoningToReadoutDistillationResult(
+        total_loss=total,
+        cross_entropy_loss=ce_loss,
+        ordinal_score_loss=ord_loss,
+        kl_anchor_loss=kl_anchor,
+        expected_student_score=exp_student,
+        expected_teacher_score=exp_teacher,
+        distilled_posterior=posterior,
+    )
+
+

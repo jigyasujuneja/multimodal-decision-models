@@ -137,8 +137,20 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 go test -race ./pkg/mdm/...
 PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
 PYTHONPATH=src python3 benchmarks/run_mdm_bench.py
+PYTHONPATH=src python3 benchmarks/run_real_public_benchmarks.py
 PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 ```
+
+## Real Public Benchmarks (`DecisionBench`, `TypedDecisions`, and `arXiv:2610.03935` Distillation)
+
+See [`benchmarks/results/real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) for the reproducible real-data benchmark across 7 public decision models (`deem-4b`, `intern-decision-4b`, `karar-4b`, `wahler-4b`, `jev`, `julia-onnx`, `laya`) on `LocalLLaMA/typed-decisions` ($N = 500$ committed slice, $N = 2,000$ full evaluation), `mertkayacs/jevalt-bench` ($N = 19,776$), `Hanno-Labs/decision-bench` ($K \in [2, 255]$), and `marcmagn1/jev-alt-systemone-eval` (`arXiv:2610.03935` reasoning-to-readout distillation):
+
+| Real Public Benchmark Study | Baseline / Single Model | Upgraded / Combined Stack | Verified Empirical Finding |
+| :--- | :---: | :---: | :--- |
+| **7-Model `TypedDecisions` ($N = 500$ slice / $N = 2,000$ full)** | `deem-4b` (`80.83%` acc, `0.2947` Brier) / `jev` (`75.83%` acc, `0.4090` Brier) | **Pre-Gated PoE + TempScaling** (**`82.08%`** slice / **`83.50%`** full, **`0.2449`** Brier) | Beats best single model (`p = 0.043` on $N=1,000$ test) and `jev` (`p = 9.74e-11`); Naive 5-Model Mean drops to `78.75%` due to uncalibrated `laya` / `julia-onnx` |
+| **Simultaneous 5-Slot Workflow Coverage (`TypedDecisions`)** | `60.42%` (`63.50%` on $N=2,000$) independent per-slot RAPS ($\alpha = 0.10$) | **`97.92%`** (`96.50%` on $N=2,000$) (`calibrate_multislot_joint_conformal`) | Eliminates multi-slot FWER compounding across 5 simultaneous slots (`action`, `needs_review`, `outcome`, `risk`, `urgency`) |
+| **Exp A: Extended 255-Code Single-Token Bijection (`arXiv:2610.03935` Sec 6.1)** | Naive `A..Z, AA..IT` has `18` BPE splits on Qwen3, `14` on DeepSeek-V3, `68` on SmolLM2 | **`UNIVERSAL_256_DECISION_CODES`** (**`255/255` = `100%` single-token** across 5 BPE families) | Eliminates first-token logit aliasing (`BQ -> B + Q`); opt-in `allow_extended_255=True` alongside default $K \le 26$ shortlist/trie |
+| **Exp B: `<think>` Leakage Guard + Eq. (12) Distillation (`arXiv:2610.03935` Sec 6.2)** | Default thinking template: `34.67%` acc (`0.9854` Brier); `enable_thinking=False` 27B: `68.00%` acc (`0.5822` KL to humans) | **Eq. (12) Distilled Posterior** (**`70.00%`** slice / **`71.01%`** full, **`0.2499`** KL, **`0.3761`** ScoreMAE) | Automatic `<think>` leakage detector in `extract_letter_distribution` + `reasoning_to_readout_distillation_loss` cuts human-consensus KL by `-57.1%` |
 
 ## MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark ($N = 400$)
 
