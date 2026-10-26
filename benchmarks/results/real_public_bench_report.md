@@ -1,4 +1,4 @@
-# Real-Data Benchmark Report: DecisionBench 1.0, TypedDecisions, and arXiv:2610.03935 Experiments
+# Real-Data Benchmark Report: DecisionBench 1.0, TypedDecisions, arXiv:2610.03935, and arXiv:2610.21412v1
 
 ## 1. Real 7-Model Evaluation on Multi-Slot TypedDecisions (`N = 500` Real Questions, `250` Held-Out Test)
 
@@ -39,3 +39,37 @@
 | 2. `Kev-4B` Base Student Anchor (`kev4b-traincal.json`) | `0.6533` | `0.4611` | `0.0570` | `0.8259` | `0.2844` | `0.4327` |
 | 3. `Qwen3.8-27B` Clean Readout (`enable_thinking=False`) | `0.6800` | `0.4421` | `0.0992` | `0.8383` | `0.5822` | `0.4583` |
 | 4. **Eq. (12) Distilled Posterior (`27B Teacher + Kev-4B KL Anchor`)** | `0.7000` | `0.4027` | `0.0882` | `0.7336` | `0.2499` | `0.3761` |
+
+## 4. Experiment C: `JevAgentHarness` & `AgentDecisionBench` (`arXiv:2610.21412v1`, `N = 600` Real Agent States)
+
+### 4.1 `L2` Acceptable-Set vs Single-Gold Accuracy, Recovery (`after_off_plan`), and `must_ask` Fatal Irreversible Errors
+
+| Model | Common Acceptable-Set Acc | Common Single-Gold Acc | `on_plan` Acc | `after_off_plan` Recovery Acc | `must_ask` Acc | `must_ask` Fatal Irreversible Error Rate | `DecisionGym-Shift` Acc |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `rl` | `0.9500` | `0.9367` | `1.0000` | `0.8125` | `1.0000` | `0.0000` | `0.9700` |
+| `sft_v1` | `0.9500` | `0.9367` | `1.0000` | `0.8125` | `1.0000` | `0.0000` | `0.9833` |
+| `e14a` | `0.9567` | `0.9433` | `1.0000` | `0.8375` | `1.0000` | `0.0000` | `0.7633` |
+| `jev` | `0.7333` | `0.6833` | `0.9786` | `0.6625` | `0.3750` | `0.6250` | `0.8667` |
+| `oaidec` | `0.7300` | `0.6500` | `0.9643` | `0.6375` | `0.4125` | `0.5875` | `0.8067` |
+| `openjevhf` | `0.7767` | `0.7133` | `0.9857` | `0.8250` | `0.3625` | `0.6375` | `0.8700` |
+| `sl0.8b` | `0.3800` | `0.3433` | `0.4357` | `0.3000` | `0.3625` | `0.6375` | `0.4633` |
+| `sl4b` | `0.7633` | `0.7000` | `0.9143` | `0.7125` | `0.5500` | `0.4500` | `0.7967` |
+| `sl9b` | `0.7767` | `0.7133` | `0.9714` | `0.6375` | `0.5750` | `0.4250` | `0.8567` |
+| `sl27b` | `0.7933` | `0.7300` | `1.0000` | `0.8375` | `0.3875` | `0.6125` | `0.9000` |
+| `intern` | `0.6167` | `0.5400` | `0.7929` | `0.5625` | `0.3625` | `0.6375` | `0.7167` |
+| `base` | `0.3933` | `0.3567` | `0.4643` | `0.3000` | `0.3625` | `0.6375` | `0.4833` |
+
+### 4.2 Proposition 1 Scalar Threshold vs Action-Stakes + Irreversibility Guard on `DecisionGym-Shift` (`N = 300`)
+
+| Model | `tau_prop1` (`on_plan`) | Prop. 1 Shift Taken | Prop. 1 Accepted Errors (Irrev) | Action-Stakes Shift Taken | Action-Stakes Accepted Errors (Irrev) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `rl` | `0.9324` | `0.9267` | `4` (`1`) | `0.6800` | **`3` (`0`)** |
+| `e14a` | `0.8016` | `0.9267` | `61` (`44`) | `0.5967` | **`21` (`4`)** |
+| `jev` | `1.0000` | `0.3033` | `4` (`0`) | `0.1700` | **`4` (`0`)** |
+| `sl9b` | `0.9684` | `0.1533` | `0` (`0`) | `0.0500` | **`0` (`0`)** |
+| `sl27b` | `0.9828` | `0.3167` | `0` (`0`) | `0.1567` | **`0` (`0`)** |
+
+### 4.3 Selective Teacher + Brier SFT (`arXiv:2610.21412v1` Eq. 1) & Tango Paired Non-Inferiority Test
+
+- **Unconditional Teacher Distillation (`0.3 * gold + 0.7 * p_Jev`) Corrupted `must_ask` Targets**: `45 / 80`
+- **Eq. (1) Selective Teacher + Brier SFT Corrupted `must_ask` Targets**: **`0 / 80`** (mean SFT loss `0.4294`)

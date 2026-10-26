@@ -44,6 +44,26 @@ UNIVERSAL_256_DECISION_CODES: tuple[str, ...] = (
     "PA", "PC", "PD", "PE", "PF", "PG", "PH", "PI", "PK", "PL", "PM", "PO", "PP", "PR", "PS", "PT",
 )
 
+INTEGRATION_MODES: tuple[str, ...] = (
+    "replace",
+    "cascade",
+    "assist",
+    "guard",
+    "trigger",
+)
+
+HARNESS_DECISION_POINTS: tuple[str, ...] = (
+    "tool_select",
+    "tool_args",
+    "action",
+    "memory_write",
+    "memory_read",
+    "reflection",
+    "stop",
+    "routing",
+)
+
+
 
 class DecisionTerminalState(str, Enum):
     """Closed Level-4 Total-Contract terminal states for a slot or decision request."""

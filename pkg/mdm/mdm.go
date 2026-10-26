@@ -1071,3 +1071,419 @@ func ReasoningToReadoutDistillationLoss(
 	}, nil
 }
 
+// TrajectoryDelegationCalibrationResult holds Proposition 1 trajectory-calibrated deferral thresholds (arXiv:2610.21412v1).
+type TrajectoryDelegationCalibrationResult struct {
+	TauProp1Marginal      float64
+	TauEmpiricalBin       float64
+	TauIrreversibleAction float64
+	TauReversibleAction   float64
+	CostMarginK           float64
+	MeanSystem1Accuracy   float64
+	MeanLLMAccuracy       float64
+	DelegatedCoverage     float64
+}
+
+// FitTrajectoryDelegationThreshold fits trajectory-level confidence deferral thresholds (arXiv:2610.21412v1 Prop. 1).
+func FitTrajectoryDelegationThreshold(
+	calibConfidences []float64,
+	calibSystem1Correct []bool,
+	calibLLMCorrect []bool,
+	deltaCostUSD float64,
+	errorStakesV float64,
+	irreversibleStakesV float64,
+	reversibleStakesV float64,
+	minBinSize int,
+	numBins int,
+) (TrajectoryDelegationCalibrationResult, error) {
+	n := len(calibConfidences)
+	if n == 0 || len(calibSystem1Correct) != n {
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("calibConfidences and calibSystem1Correct must be non-empty of equal length")
+	}
+	if len(calibLLMCorrect) > 0 && len(calibLLMCorrect) != n {
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("calibLLMCorrect length mismatch")
+	}
+	if deltaCostUSD < 0 || math.IsNaN(deltaCostUSD) || math.IsInf(deltaCostUSD, 0) {
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("deltaCostUSD must be finite and >= 0")
+	}
+	if errorStakesV <= 0 || irreversibleStakesV <= 0 || reversibleStakesV <= 0 {
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("stakes V must be > 0")
+	}
+
+	type item struct {
+		conf  float64
+		s1OK  int
+		llmOK int
+	}
+	paired := make([]item, n)
+	sumS1 := 0
+	sumLLM := 0
+	for i := 0; i < n; i++ {
+		c := calibConfidences[i]
+		if math.IsNaN(c) || math.IsInf(c, 0) || c < 0 || c > 1.0+1e-6 {
+			return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("invalid confidence at %d: %v", i, c)
+		}
+		if c < 0 {
+			c = 0
+		} else if c > 1 {
+			c = 1
+		}
+		s1 := 0
+		if calibSystem1Correct[i] {
+			s1 = 1
+		}
+		llm := 1
+		if len(calibLLMCorrect) > 0 && !calibLLMCorrect[i] {
+			llm = 0
+		}
+		paired[i] = item{conf: c, s1OK: s1, llmOK: llm}
+		sumS1 += s1
+		sumLLM += llm
+	}
+
+	meanS1 := float64(sumS1) / float64(n)
+	meanLLM := float64(sumLLM) / float64(n)
+	costMargin := deltaCostUSD / errorStakesV
+	tauProp1 := math.Min(1.0, math.Max(0.0, meanLLM-costMargin))
+
+	sort.Slice(paired, func(i, j int) bool { return paired[i].conf < paired[j].conf })
+	if minBinSize < 1 {
+		minBinSize = 1
+	}
+	if numBins < 1 {
+		numBins = 10
+	}
+	step := n / numBins
+	if step < minBinSize {
+		step = minBinSize
+	}
+	var bins [][]item
+	for i := 0; i < n; i += step {
+		end := i + step
+		if end > n {
+			end = n
+		}
+		bins = append(bins, paired[i:end])
+	}
+	if len(bins) >= 2 && len(bins[len(bins)-1]) < maxInt(1, minBinSize/2) {
+		bins[len(bins)-2] = append(bins[len(bins)-2], bins[len(bins)-1]...)
+		bins = bins[:len(bins)-1]
+	}
+
+	projectThresh := func(stakesVal float64) float64 {
+		marginVal := deltaCostUSD / stakesVal
+		for bIdx := 0; bIdx < len(bins); bIdx++ {
+			allPass := true
+			for _, b := range bins[bIdx:] {
+				s1C, llmC := 0, 0
+				for _, x := range b {
+					s1C += x.s1OK
+					llmC += x.llmOK
+				}
+				gBin := float64(s1C) / float64(len(b))
+				qBin := float64(llmC) / float64(len(b))
+				if (gBin - qBin + marginVal) < -1e-12 {
+					allPass = false
+					break
+				}
+			}
+			if allPass {
+				return bins[bIdx][0].conf
+			}
+		}
+		return 1.000001
+	}
+
+	tauEmp := projectThresh(errorStakesV)
+	tauIrrev := projectThresh(irreversibleStakesV)
+	tauRev := projectThresh(reversibleStakesV)
+	delCount := 0
+	for _, x := range paired {
+		if x.conf >= tauEmp {
+			delCount++
+		}
+	}
+
+	return TrajectoryDelegationCalibrationResult{
+		TauProp1Marginal:      tauProp1,
+		TauEmpiricalBin:       tauEmp,
+		TauIrreversibleAction: tauIrrev,
+		TauReversibleAction:   tauRev,
+		CostMarginK:           costMargin,
+		MeanSystem1Accuracy:   meanS1,
+		MeanLLMAccuracy:       meanLLM,
+		DelegatedCoverage:     float64(delCount) / float64(n),
+	}, nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// TriggerGuardUtilityResult holds Proposition 2 Trigger/Guard Youden-J resolution and utility metrics (arXiv:2610.21412v1 Eq. 5).
+type TriggerGuardUtilityResult struct {
+	PrevalencePi               float64
+	TPR                        float64
+	FPR                        float64
+	YoudenJ                    float64
+	Accuracy                   float64
+	FiringRate                 float64
+	OptimalTriggerThreshold    float64
+	DeltaUtilityPerOpportunity float64
+	DeltaUtilityTotal          float64
+}
+
+// EvaluateTriggerGuardUtility evaluates a binary Trigger/Guard gate via Youden's J (arXiv:2610.21412v1 Prop. 2 Eq. 5).
+func EvaluateTriggerGuardUtility(
+	needLabels []bool,
+	gateDecisions []bool,
+	benefitWhenNeeded float64,
+	harmWhenUnneeded float64,
+	moduleCost float64,
+	queryCostKappa float64,
+) (TriggerGuardUtilityResult, error) {
+	n := len(needLabels)
+	if n == 0 || len(gateDecisions) != n {
+		return TriggerGuardUtilityResult{}, fmt.Errorf("needLabels and gateDecisions must be non-empty of equal length")
+	}
+	if (benefitWhenNeeded + harmWhenUnneeded) <= 0 {
+		return TriggerGuardUtilityResult{}, fmt.Errorf("benefitWhenNeeded + harmWhenUnneeded must be > 0")
+	}
+	tp, fp, tn, fn := 0, 0, 0, 0
+	for i := 0; i < n; i++ {
+		if needLabels[i] && gateDecisions[i] {
+			tp++
+		} else if needLabels[i] && !gateDecisions[i] {
+			fn++
+		} else if !needLabels[i] && gateDecisions[i] {
+			fp++
+		} else {
+			tn++
+		}
+	}
+	tpr := float64(tp) / float64(maxInt(1, tp+fn))
+	fpr := float64(fp) / float64(maxInt(1, fp+tn))
+	youdenJ := tpr - fpr
+	pi := float64(tp+fn) / float64(n)
+	acc := float64(tp+tn) / float64(n)
+	fireRate := float64(tp+fp) / float64(n)
+	optTau := math.Min(1.0, math.Max(0.0, (moduleCost+harmWhenUnneeded)/(benefitWhenNeeded+harmWhenUnneeded)))
+	duPerOpp := (benefitWhenNeeded+harmWhenUnneeded)*pi*(1.0-pi)*youdenJ - queryCostKappa
+
+	return TriggerGuardUtilityResult{
+		PrevalencePi:               pi,
+		TPR:                        tpr,
+		FPR:                        fpr,
+		YoudenJ:                    youdenJ,
+		Accuracy:                   acc,
+		FiringRate:                 fireRate,
+		OptimalTriggerThreshold:    optTau,
+		DeltaUtilityPerOpportunity: duPerOpp,
+		DeltaUtilityTotal:          float64(n) * duPerOpp,
+	}, nil
+}
+
+// SelectiveBrierSFTResult holds the breakdown of arXiv:2610.21412v1 Section 5 Eq. (1) SFT loss.
+type SelectiveBrierSFTResult struct {
+	TotalLoss          float64
+	CrossEntropyLoss   float64
+	BrierLoss          float64
+	TeacherAccepted    bool
+	TargetDistribution map[string]float64
+}
+
+// SelectiveTeacherBrierSFTLoss computes the Selective Teacher + Brier SFT loss (arXiv:2610.21412v1 Sec. 5 Eq. 1).
+func SelectiveTeacherBrierSFTLoss(
+	teacherProbs map[string]float64,
+	studentProbs map[string]float64,
+	goldKey string,
+	acceptableKeys []string,
+	goldWeightAlpha float64,
+	brierWeightMu float64,
+) (SelectiveBrierSFTResult, error) {
+	if len(teacherProbs) == 0 || len(studentProbs) == 0 || len(teacherProbs) != len(studentProbs) {
+		return SelectiveBrierSFTResult{}, fmt.Errorf("teacherProbs and studentProbs must be non-empty with identical keys")
+	}
+	if _, ok := teacherProbs[goldKey]; !ok {
+		return SelectiveBrierSFTResult{}, fmt.Errorf("goldKey %q not in teacherProbs", goldKey)
+	}
+	if goldWeightAlpha < 0 || goldWeightAlpha > 1 || brierWeightMu < 0 {
+		return SelectiveBrierSFTResult{}, fmt.Errorf("invalid alpha or mu")
+	}
+	keys := make([]string, 0, len(teacherProbs))
+	for k := range teacherProbs {
+		if _, ok := studentProbs[k]; !ok {
+			return SelectiveBrierSFTResult{}, fmt.Errorf("missing key %q in studentProbs", k)
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	norm := func(m map[string]float64) (map[string]float64, error) {
+		sum := 0.0
+		out := make(map[string]float64, len(keys))
+		for _, k := range keys {
+			v := m[k]
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+				return nil, fmt.Errorf("invalid prob for %q", k)
+			}
+			out[k] = v
+			sum += v
+		}
+		if sum <= 0 {
+			return nil, fmt.Errorf("distribution sums to zero")
+		}
+		for _, k := range keys {
+			p := out[k] / sum
+			if p < 1e-12 {
+				p = 1e-12
+			}
+			out[k] = p
+		}
+		return out, nil
+	}
+	pT, err := norm(teacherProbs)
+	if err != nil {
+		return SelectiveBrierSFTResult{}, err
+	}
+	pS, err := norm(studentProbs)
+	if err != nil {
+		return SelectiveBrierSFTResult{}, err
+	}
+
+	accSet := map[string]bool{goldKey: true}
+	for _, k := range acceptableKeys {
+		accSet[k] = true
+	}
+	winKey := keys[0]
+	for _, k := range keys[1:] {
+		if pT[k] > pT[winKey] || (pT[k] == pT[winKey] && k > winKey) {
+			winKey = k
+		}
+	}
+	teacherOK := accSet[winKey]
+
+	target := make(map[string]float64, len(keys))
+	ceLoss := 0.0
+	brierLoss := 0.0
+	for _, k := range keys {
+		oh := 0.0
+		if k == goldKey {
+			oh = 1.0
+		}
+		if teacherOK {
+			target[k] = goldWeightAlpha*oh + (1.0-goldWeightAlpha)*pT[k]
+		} else {
+			target[k] = oh
+		}
+		ceLoss -= target[k] * math.Log(pS[k])
+		diff := pS[k] - target[k]
+		brierLoss += diff * diff
+	}
+
+	return SelectiveBrierSFTResult{
+		TotalLoss:          ceLoss + brierWeightMu*brierLoss,
+		CrossEntropyLoss:   ceLoss,
+		BrierLoss:          brierLoss,
+		TeacherAccepted:    teacherOK,
+		TargetDistribution: target,
+	}, nil
+}
+
+// NonInferiorityTestResult holds Tango's (1998) one-sided paired score non-inferiority test result (arXiv:2610.21412v1 App. E).
+type NonInferiorityTestResult struct {
+	Wins                  int
+	Losses                int
+	NTotal                int
+	Margin                float64
+	DeltaHat              float64
+	TangoZ                float64
+	PAsymptotic           float64
+	PBergerBoos           float64
+	ZeroDiscordanceLossUB float64
+	NonInferior           bool
+}
+
+// TangoPairedNonInferiorityTest evaluates Tango's (1998) one-sided score test with Berger-Boos bound (arXiv:2610.21412v1 App. E).
+func TangoPairedNonInferiorityTest(wins, losses, nTotal int, margin, alpha, gamma float64) (NonInferiorityTestResult, error) {
+	if nTotal <= 0 || wins < 0 || losses < 0 || (wins+losses) > nTotal {
+		return NonInferiorityTestResult{}, fmt.Errorf("invalid paired counts")
+	}
+	if margin <= 0 || margin >= 1 || alpha <= 0 || alpha >= 1 || gamma <= 0 || gamma >= 0.1 {
+		return NonInferiorityTestResult{}, fmt.Errorf("invalid margin, alpha, or gamma")
+	}
+	d := wins + losses
+	deltaHat := float64(wins-losses) / float64(nTotal)
+	zeroUB := 1.0 - math.Pow(alpha, 1.0/float64(nTotal))
+
+	if d == 0 {
+		pNull := math.Pow(1.0-margin, float64(nTotal))
+		pBB := math.Min(1.0, gamma+pNull)
+		return NonInferiorityTestResult{
+			Wins:                  wins,
+			Losses:                losses,
+			NTotal:                nTotal,
+			Margin:                margin,
+			DeltaHat:              0.0,
+			TangoZ:                math.Inf(1),
+			PAsymptotic:           0.0,
+			PBergerBoos:           pBB,
+			ZeroDiscordanceLossUB: zeroUB,
+			NonInferior:           pBB <= alpha,
+		}, nil
+	}
+
+	bestLL := -1e30
+	bestQ := math.Max(margin+1e-6, math.Min(0.999999, float64(d)/float64(nTotal)))
+	for i := 1; i < 2000; i++ {
+		q := margin + (1.0-margin)*(float64(i)/2001.0)
+		p10 := 0.5 * (q + margin)
+		p01 := 0.5 * (q - margin)
+		pSame := 1.0 - q
+		if p10 <= 0 || p01 <= 0 || pSame <= 0 {
+			continue
+		}
+		ll := float64(losses)*math.Log(p10) + float64(wins)*math.Log(p01) + float64(nTotal-d)*math.Log(pSame)
+		if ll > bestLL {
+			bestLL = ll
+			bestQ = q
+		}
+	}
+	varH0 := float64(nTotal) * math.Max(bestQ-margin*margin, 1e-12)
+	zStat := (float64(wins-losses) + float64(nTotal)*margin) / math.Sqrt(varH0)
+	pAsym := 0.5 * math.Erfc(zStat/math.Sqrt2)
+
+	zGamma := 3.890592
+	phatD := float64(d) / float64(nTotal)
+	rad := zGamma*math.Sqrt(math.Max(phatD*(1.0-phatD)/float64(nTotal), 1e-9)) + 1.0/(2.0*float64(nTotal))
+	qLo := math.Max(margin, phatD-rad)
+	qHi := math.Min(1.0, phatD+rad)
+
+	worstTail := 0.0
+	for idx := 0; idx <= 50; idx++ {
+		qCand := qLo + (qHi-qLo)*(float64(idx)/50.0)
+		varCand := float64(nTotal) * math.Max(qCand-margin*margin, 1e-12)
+		zCand := (float64(wins-losses) + float64(nTotal)*margin) / math.Sqrt(varCand)
+		tailCand := 0.5 * math.Erfc(zCand/math.Sqrt2)
+		if tailCand > worstTail {
+			worstTail = tailCand
+		}
+	}
+	pBB := math.Min(1.0, gamma+worstTail)
+	return NonInferiorityTestResult{
+		Wins:                  wins,
+		Losses:                losses,
+		NTotal:                nTotal,
+		Margin:                margin,
+		DeltaHat:              deltaHat,
+		TangoZ:                zStat,
+		PAsymptotic:           pAsym,
+		PBergerBoos:           pBB,
+		ZeroDiscordanceLossUB: zeroUB,
+		NonInferior:           pBB <= alpha,
+	}, nil
+}
+
+

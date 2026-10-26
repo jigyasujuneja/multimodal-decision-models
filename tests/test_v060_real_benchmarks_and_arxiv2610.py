@@ -29,14 +29,22 @@ if str(SRC_DIR) not in sys.path:
 
 from benchmarks import run_real_public_benchmarks  # noqa: E402
 from multimodal_decision_models import (  # noqa: E402
+    HARNESS_DECISION_POINTS,
+    INTEGRATION_MODES,
     MAX_EXTENDED_OPTIONS_PER_SLOT,
     UNIVERSAL_256_DECISION_CODES,
     DecisionQuestion,
     LogprobAlignmentError,
     OpenAILogprobBackend,
     SchemaContractViolationError,
+    acceptable_set_accuracy,
     build_extended_255_code_bijection,
+    evaluate_trigger_guard_utility,
+    fit_trajectory_delegation_threshold,
+    holm_bonferroni_adjust,
     reasoning_to_readout_distillation_loss,
+    selective_teacher_brier_sft_loss,
+    tango_paired_non_inferiority_test,
 )
 
 
@@ -146,16 +154,22 @@ class TestV060RealPublicBenchmarksAndArxiv2610(unittest.TestCase):
         distill_rows = run_real_public_benchmarks.load_jsonl(
             REPO_ROOT / "benchmarks" / "data" / "real_arxiv2610_distillation_receipts.jsonl"
         )
+        adb_rows = run_real_public_benchmarks.load_jsonl(
+            REPO_ROOT / "benchmarks" / "data" / "real_agentdecisionbench_receipts.jsonl"
+        )
         self.assertEqual(len(typed_rows), 500)
         self.assertEqual(len(distill_rows), 300)
+        self.assertEqual(len(adb_rows), 600)
 
         recomputed_s1 = run_real_public_benchmarks.run_study1_real_7model_benchmark(typed_rows)
         recomputed_exp_a = run_real_public_benchmarks.run_experiment_a_extended_255_bijection_and_think_guard()
         recomputed_exp_b = run_real_public_benchmarks.run_experiment_b_reasoning_to_readout_distillation(distill_rows)
+        recomputed_exp_c = run_real_public_benchmarks.run_experiment_c_jev_agent_harness_and_agentdecisionbench(adb_rows)
 
         self.assertEqual(recomputed_s1, committed["study1_real_7model_benchmark"])
         self.assertEqual(recomputed_exp_a, committed["experiment_a_extended_255_bijection"])
         self.assertEqual(recomputed_exp_b, committed["experiment_b_reasoning_to_readout_distillation"])
+        self.assertEqual(recomputed_exp_c, committed["experiment_c_jev_agent_harness_and_agentdecisionbench"])
 
         # Verify key empirical findings on real data
         ms = recomputed_s1["multislot_joint_conformal_5slot"]
@@ -171,6 +185,83 @@ class TestV060RealPublicBenchmarksAndArxiv2610(unittest.TestCase):
             arms["4_eq12_distilled_posterior"]["brier"],
             arms["3_qwen27b_clean_nothink_teacher"]["brier"],
         )
+
+        # Verify arXiv:2610.21412v1 findings on real AgentDecisionBench
+        self.assertLess(
+            recomputed_exp_c["deferral_shift_eval"]["e14a"]["action_stakes_shift_accepted_irrev_errors"],
+            recomputed_exp_c["deferral_shift_eval"]["e14a"]["prop1_shift_accepted_irrev_errors"],
+        )
+        self.assertEqual(
+            recomputed_exp_c["selective_teacher_brier_sft"]["selective_eq1_corrupted_targets"],
+            0,
+        )
+
+    def test_arxiv_2610_21412_delegation_guard_selective_sft_and_tango(self) -> None:
+        self.assertEqual(INTEGRATION_MODES, ("replace", "cascade", "assist", "guard", "trigger"))
+        self.assertEqual(
+            HARNESS_DECISION_POINTS,
+            ("tool_select", "tool_args", "action", "memory_write", "memory_read", "reflection", "stop", "routing"),
+        )
+
+        # 1. Proposition 1 + Action-Stakes Trajectory Delegation
+        cal_conf = [0.99, 0.97, 0.96, 0.92, 0.85, 0.70]
+        cal_corr = [True, True, True, False, False, False]
+        del_res = fit_trajectory_delegation_threshold(
+            cal_conf,
+            cal_corr,
+            delta_cost_usd=0.049,
+            error_stakes_v=0.15,
+            irreversible_stakes_v=5.0,
+            reversible_stakes_v=0.15,
+            min_bin_size=2,
+            num_bins=3,
+        )
+        self.assertAlmostEqual(del_res.tau_prop1_marginal, 1.0 - 0.049 / 0.15, places=6)
+        self.assertGreaterEqual(del_res.tau_irreversible_action, del_res.tau_reversible_action)
+
+        # 2. Proposition 2 Trigger/Guard Resolution Utility (Eq. 5)
+        y_true = [True, True, False, False, False, False, False, False, False, False]
+        always_no = [False] * 10
+        skilled = [True, True, False, False, False, False, False, False, False, True]
+        u_no = evaluate_trigger_guard_utility(
+            y_true, always_no, benefit_when_needed=0.80, harm_when_unneeded=0.05, module_cost=0.001, query_cost_kappa=0.0001
+        )
+        u_sk = evaluate_trigger_guard_utility(
+            y_true, skilled, benefit_when_needed=0.80, harm_when_unneeded=0.05, module_cost=0.001, query_cost_kappa=0.0001
+        )
+        self.assertAlmostEqual(u_no.youden_j, 0.0, places=6)
+        self.assertLessEqual(u_no.delta_utility_per_opportunity, 0.0)
+        self.assertGreater(u_sk.youden_j, 0.75)
+        self.assertGreater(u_sk.delta_utility_per_opportunity, 0.0)
+
+        # 3. Section 5 Eq. (1) Selective Teacher + Brier SFT
+        student = {"ask_clarification": 0.40, "cancel_order": 0.40, "lookup_order": 0.20}
+        wrong_teacher = {"ask_clarification": 0.05, "cancel_order": 0.90, "lookup_order": 0.05}
+        sft_res = selective_teacher_brier_sft_loss(
+            teacher_probs=wrong_teacher,
+            student_probs=student,
+            gold_key="ask_clarification",
+            acceptable_keys=["ask_clarification"],
+            gold_weight_alpha=0.30,
+            brier_weight_mu=0.50,
+        )
+        self.assertFalse(sft_res.teacher_accepted)
+        self.assertEqual(sft_res.target_distribution["ask_clarification"], 1.0)
+        self.assertEqual(acceptable_set_accuracy(["a", "b"], [["a", "c"], ["x"]]), 0.5)
+
+        # 4. Appendix E Tango Paired Non-Inferiority Test + Holm-Bonferroni
+        ni_pass = tango_paired_non_inferiority_test(
+            wins=3, losses=0, n_total=500, margin=0.02, alpha=0.025
+        )
+        ni_fail = tango_paired_non_inferiority_test(
+            wins=0, losses=12, n_total=200, margin=0.02, alpha=0.025
+        )
+        self.assertTrue(ni_pass.non_inferior)
+        self.assertFalse(ni_fail.non_inferior)
+        adj_ps, rej_flags = holm_bonferroni_adjust([ni_pass.p_berger_boos, ni_fail.p_berger_boos], alpha=0.025)
+        self.assertEqual(len(adj_ps), 2)
+        self.assertTrue(rej_flags[0])
+        self.assertFalse(rej_flags[1])
 
 
 if __name__ == "__main__":

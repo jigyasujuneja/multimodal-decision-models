@@ -523,3 +523,164 @@ def option_permutation_stability(
         mean_tv_distance=tv_sum / float(n),
     )
 
+
+@dataclass(frozen=True)
+class NonInferiorityTestResult:
+    """Tango (1998) one-sided paired score non-inferiority test result (arXiv:2610.21412v1 Appendix E)."""
+
+    wins: int
+    losses: int
+    n_total: int
+    margin: float
+    delta_hat: float
+    tango_z: float
+    p_asymptotic: float
+    p_berger_boos: float
+    zero_discordance_loss_ub: float
+    non_inferior: bool
+
+
+def tango_paired_non_inferiority_test(
+    wins: int,
+    losses: int,
+    n_total: int,
+    *,
+    margin: float = 0.03,
+    alpha: float = 0.05,
+    gamma: float = 1e-4,
+) -> NonInferiorityTestResult:
+    """Evaluate Tango's (1998) one-sided paired score test of H0: Delta <= -margin with Berger-Boos bound.
+
+    Follows the registered statistical protocol of Zhu et al. (arXiv:2610.21412v1 Appendix E):
+    given `wins` (arm succeeds, reference fails), `losses` (arm fails, reference succeeds), and `n_total`
+    paired tasks, tests H0: p_arm - p_ref <= -margin against H1: p_arm - p_ref > -margin, bounding
+    the nuisance discordance parameter over a (1 - gamma) Clopper-Pearson/Wilson interval.
+    """
+    if n_total <= 0 or wins < 0 or losses < 0 or (wins + losses) > n_total:
+        raise ValueError(f"invalid paired counts: wins={wins}, losses={losses}, n_total={n_total}")
+    if not math.isfinite(margin) or margin <= 0.0 or margin >= 1.0:
+        raise ValueError(f"margin must lie in (0, 1), got {margin!r}")
+    if not math.isfinite(alpha) or alpha <= 0.0 or alpha >= 1.0:
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
+    if not math.isfinite(gamma) or gamma <= 0.0 or gamma >= 0.1:
+        raise ValueError(f"gamma must lie in (0, 0.1), got {gamma!r}")
+
+    w = int(wins)
+    l = int(losses)
+    d = w + l
+    delta_hat = float(w - l) / float(n_total)
+    zero_ub = 1.0 - (alpha ** (1.0 / float(n_total)))
+
+    if d == 0:
+        p_null = (1.0 - margin) ** n_total
+        p_bb = min(1.0, gamma + p_null)
+        return NonInferiorityTestResult(
+            wins=w,
+            losses=l,
+            n_total=n_total,
+            margin=margin,
+            delta_hat=0.0,
+            tango_z=float("inf"),
+            p_asymptotic=0.0,
+            p_berger_boos=p_bb,
+            zero_discordance_loss_ub=zero_ub,
+            non_inferior=(p_bb <= alpha),
+        )
+
+    best_ll = -1e30
+    best_q = max(margin + 1e-6, min(0.999999, float(d) / float(n_total)))
+    for i in range(1, 2000):
+        q = margin + (1.0 - margin) * (float(i) / 2001.0)
+        p10 = 0.5 * (q + margin)
+        p01 = 0.5 * (q - margin)
+        p_same = 1.0 - q
+        if p10 <= 0.0 or p01 <= 0.0 or p_same <= 0.0:
+            continue
+        ll = float(l) * math.log(p10) + float(w) * math.log(p01) + float(n_total - d) * math.log(p_same)
+        if ll > best_ll:
+            best_ll = ll
+            best_q = q
+
+    var_h0 = float(n_total) * max(best_q - margin * margin, 1e-12)
+    z_stat = (float(w - l) + float(n_total) * margin) / math.sqrt(var_h0)
+    p_asym = 0.5 * math.erfc(z_stat / math.sqrt(2.0))
+
+    z_gamma = 3.890592
+    phat_d = float(d) / float(n_total)
+    rad = z_gamma * math.sqrt(max(phat_d * (1.0 - phat_d) / float(n_total), 1e-9)) + 1.0 / (2.0 * float(n_total))
+    q_lo = max(margin, phat_d - rad)
+    q_hi = min(1.0, phat_d + rad)
+
+    worst_tail = 0.0
+    for idx in range(51):
+        q_cand = q_lo + (q_hi - q_lo) * (float(idx) / 50.0)
+        var_cand = float(n_total) * max(q_cand - margin * margin, 1e-12)
+        z_cand = (float(w - l) + float(n_total) * margin) / math.sqrt(var_cand)
+        tail_cand = 0.5 * math.erfc(z_cand / math.sqrt(2.0))
+        if tail_cand > worst_tail:
+            worst_tail = tail_cand
+
+    p_bb = min(1.0, gamma + worst_tail)
+    return NonInferiorityTestResult(
+        wins=w,
+        losses=l,
+        n_total=n_total,
+        margin=margin,
+        delta_hat=delta_hat,
+        tango_z=z_stat,
+        p_asymptotic=p_asym,
+        p_berger_boos=p_bb,
+        zero_discordance_loss_ub=zero_ub,
+        non_inferior=(p_bb <= alpha),
+    )
+
+
+def holm_bonferroni_adjust(
+    p_values: Sequence[float],
+    *,
+    alpha: float = 0.05,
+) -> tuple[list[float], list[bool]]:
+    """Apply Holm-Bonferroni step-down family-wise error rate adjustment (Holm 1979; arXiv:2610.21412v1 Sec. 6).
+
+    Returns `(adjusted_p_values, rejected_flags)` in the original input order.
+    """
+    m = len(p_values)
+    if m == 0:
+        raise ValueError("p_values must be non-empty")
+    if not math.isfinite(alpha) or alpha <= 0.0 or alpha >= 1.0:
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
+
+    indexed = sorted(enumerate(float(p) for p in p_values), key=lambda kv: kv[1])
+    adj = [0.0] * m
+    rej = [False] * m
+    running_max = 0.0
+    still_rejecting = True
+    for rank, (orig_idx, p_val) in enumerate(indexed):
+        if not math.isfinite(p_val) or p_val < 0.0 or p_val > 1.0:
+            raise ValueError(f"invalid p-value at index {orig_idx}: {p_val!r}")
+        mult = float(m - rank)
+        running_max = max(running_max, min(1.0, p_val * mult))
+        adj[orig_idx] = running_max
+        if still_rejecting and running_max <= alpha:
+            rej[orig_idx] = True
+        else:
+            still_rejecting = False
+            rej[orig_idx] = False
+    return adj, rej
+
+
+def acceptable_set_accuracy(
+    predictions: Sequence[str],
+    acceptable_sets: Sequence[Sequence[str]],
+) -> float:
+    """Compute step-level acceptable-set accuracy P(y_hat in A_acceptable(s)) (arXiv:2610.21412v1 Sec. 3 L2)."""
+    n = len(predictions)
+    if n == 0 or len(acceptable_sets) != n:
+        raise ValueError("predictions and acceptable_sets must be non-empty sequences of equal length")
+    hits = 0
+    for pred, acc_seq in zip(predictions, acceptable_sets):
+        if str(pred) in {str(x) for x in acc_seq}:
+            hits += 1
+    return float(hits) / float(n)
+
+

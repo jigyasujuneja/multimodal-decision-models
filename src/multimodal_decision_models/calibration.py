@@ -1102,3 +1102,267 @@ def reasoning_to_readout_distillation_loss(
     )
 
 
+@dataclass(frozen=True)
+class TrajectoryDelegationCalibrationResult:
+    """Proposition 1 trajectory-calibrated deferral threshold result (Zhu et al., arXiv:2610.21412v1)."""
+
+    tau_prop1_marginal: float
+    tau_empirical_bin: float
+    tau_irreversible_action: float
+    tau_reversible_action: float
+    cost_margin_k: float
+    mean_system1_accuracy: float
+    mean_llm_accuracy: float
+    delegated_coverage: float
+
+
+def fit_trajectory_delegation_threshold(
+    calib_confidences: Sequence[float],
+    calib_system1_correct: Sequence[bool | int],
+    *,
+    calib_llm_correct: Sequence[bool | int] | None = None,
+    delta_cost_usd: float = 0.0057,
+    error_stakes_v: float = 1.0,
+    irreversible_stakes_v: float = 5.0,
+    reversible_stakes_v: float = 0.15,
+    min_bin_size: int = 20,
+    num_bins: int = 10,
+) -> TrajectoryDelegationCalibrationResult:
+    """Fit trajectory-level confidence deferral thresholds per decision point (arXiv:2610.21412v1 Prop. 1).
+
+    Implements both the calibrated marginal rule:
+      tau* = max(0, q_L - delta_C / V)
+    and the general empirical equal-mass bin projection:
+      accept iff g_d(c) - q_L(c) >= -delta_C / V
+    alongside action-stakes-aware thresholds (`tau_irreversible_action` vs `tau_reversible_action`)
+    that protect `must_ask` and state-mutating tool choices under distribution shift.
+    """
+    n_items = len(calib_confidences)
+    if n_items == 0 or len(calib_system1_correct) != n_items:
+        raise ValueError("calib_confidences and calib_system1_correct must be non-empty sequences of equal length")
+    if calib_llm_correct is not None and len(calib_llm_correct) != n_items:
+        raise ValueError("calib_llm_correct must match length of calib_confidences")
+    if not math.isfinite(delta_cost_usd) or delta_cost_usd < 0.0:
+        raise ValueError(f"delta_cost_usd must be finite and >= 0, got {delta_cost_usd!r}")
+    if not math.isfinite(error_stakes_v) or error_stakes_v <= 0.0:
+        raise ValueError(f"error_stakes_v must be finite and > 0, got {error_stakes_v!r}")
+    if not math.isfinite(irreversible_stakes_v) or irreversible_stakes_v <= 0.0:
+        raise ValueError(f"irreversible_stakes_v must be finite and > 0, got {irreversible_stakes_v!r}")
+    if not math.isfinite(reversible_stakes_v) or reversible_stakes_v <= 0.0:
+        raise ValueError(f"reversible_stakes_v must be finite and > 0, got {reversible_stakes_v!r}")
+
+    paired: list[tuple[float, int, int]] = []
+    for idx in range(n_items):
+        c = float(calib_confidences[idx])
+        if not math.isfinite(c) or c < 0.0 or c > 1.0 + 1e-6:
+            raise ValueError(f"invalid confidence at index {idx}: {calib_confidences[idx]!r}")
+        c_clamped = min(max(c, 0.0), 1.0)
+        s1_ok = 1 if bool(calib_system1_correct[idx]) else 0
+        llm_ok = (1 if bool(calib_llm_correct[idx]) else 0) if calib_llm_correct is not None else 1
+        paired.append((c_clamped, s1_ok, llm_ok))
+
+    mean_s1 = sum(x[1] for x in paired) / float(n_items)
+    mean_llm = sum(x[2] for x in paired) / float(n_items)
+    cost_margin = delta_cost_usd / error_stakes_v
+    tau_prop1 = min(1.0, max(0.0, mean_llm - cost_margin))
+
+    paired.sort(key=lambda t: t[0])
+    step = max(max(1, int(min_bin_size)), n_items // max(1, int(num_bins)))
+    bins: list[list[tuple[float, int, int]]] = [
+        paired[i : i + step] for i in range(0, n_items, step)
+    ]
+    if len(bins) >= 2 and len(bins[-1]) < max(1, int(min_bin_size) // 2):
+        bins[-2].extend(bins[-1])
+        bins.pop()
+
+    def _project_bin_threshold(stakes_val: float) -> float:
+        margin_val = delta_cost_usd / stakes_val
+        for b_idx in range(len(bins)):
+            all_pass = True
+            for b in bins[b_idx:]:
+                g_bin = sum(x[1] for x in b) / float(len(b))
+                q_bin = sum(x[2] for x in b) / float(len(b))
+                if (g_bin - q_bin + margin_val) < -1e-12:
+                    all_pass = False
+                    break
+            if all_pass:
+                return bins[b_idx][0][0]
+        return 1.000001
+
+    tau_emp = _project_bin_threshold(error_stakes_v)
+    tau_irrev = _project_bin_threshold(irreversible_stakes_v)
+    tau_rev = _project_bin_threshold(reversible_stakes_v)
+    delegated_cov = sum(1 for x in paired if x[0] >= tau_emp) / float(n_items)
+
+    return TrajectoryDelegationCalibrationResult(
+        tau_prop1_marginal=tau_prop1,
+        tau_empirical_bin=tau_emp,
+        tau_irreversible_action=tau_irrev,
+        tau_reversible_action=tau_rev,
+        cost_margin_k=cost_margin,
+        mean_system1_accuracy=mean_s1,
+        mean_llm_accuracy=mean_llm,
+        delegated_coverage=delegated_cov,
+    )
+
+
+@dataclass(frozen=True)
+class TriggerGuardUtilityResult:
+    """Proposition 2 binary Trigger/Guard resolution and utility breakdown (arXiv:2610.21412v1 Eq. 5)."""
+
+    prevalence_pi: float
+    tpr: float
+    fpr: float
+    youden_j: float
+    accuracy: float
+    firing_rate: float
+    optimal_trigger_threshold: float
+    delta_utility_per_opportunity: float
+    delta_utility_total: float
+
+
+def evaluate_trigger_guard_utility(
+    need_labels: Sequence[bool | int],
+    gate_decisions: Sequence[bool | int],
+    *,
+    benefit_when_needed: float = 0.836,
+    harm_when_unneeded: float = 0.050,
+    module_cost: float = 0.0042,
+    query_cost_kappa: float = 0.00011,
+) -> TriggerGuardUtilityResult:
+    """Evaluate a binary Trigger or Guard gate via Youden's J resolution (arXiv:2610.21412v1 Prop. 2, Eq. 5).
+
+    Proposition 2 proves that a gate with need prevalence `pi`, resolution `J = TPR - FPR`, query cost `kappa`,
+    and benefit `B_M` / harm `H_M` achieves expected utility gain over a random gate at the same firing rate:
+      Delta U = n * [ (B_M + H_M) * pi * (1 - pi) * J - kappa ]
+    and optimal calibrated trigger probability threshold:
+      tau_trigger* = (C_M + H_M) / (B_M + H_M).
+    """
+    n_opp = len(need_labels)
+    if n_opp == 0 or len(gate_decisions) != n_opp:
+        raise ValueError("need_labels and gate_decisions must be non-empty sequences of equal length")
+    if (benefit_when_needed + harm_when_unneeded) <= 0.0:
+        raise ValueError("benefit_when_needed + harm_when_unneeded must be > 0")
+
+    tp = fp = tn = fn = 0
+    for need_raw, fire_raw in zip(need_labels, gate_decisions):
+        need = bool(need_raw)
+        fire = bool(fire_raw)
+        if need and fire:
+            tp += 1
+        elif need and not fire:
+            fn += 1
+        elif not need and fire:
+            fp += 1
+        else:
+            tn += 1
+
+    tpr = float(tp) / float(max(1, tp + fn))
+    fpr = float(fp) / float(max(1, fp + tn))
+    youden_j = tpr - fpr
+    pi = float(tp + fn) / float(n_opp)
+    acc = float(tp + tn) / float(n_opp)
+    firing_rate = float(tp + fp) / float(n_opp)
+    opt_tau = min(1.0, max(0.0, (module_cost + harm_when_unneeded) / (benefit_when_needed + harm_when_unneeded)))
+    du_per_opp = (benefit_when_needed + harm_when_unneeded) * pi * (1.0 - pi) * youden_j - query_cost_kappa
+
+    return TriggerGuardUtilityResult(
+        prevalence_pi=pi,
+        tpr=tpr,
+        fpr=fpr,
+        youden_j=youden_j,
+        accuracy=acc,
+        firing_rate=firing_rate,
+        optimal_trigger_threshold=opt_tau,
+        delta_utility_per_opportunity=du_per_opp,
+        delta_utility_total=float(n_opp) * du_per_opp,
+    )
+
+
+@dataclass(frozen=True)
+class SelectiveBrierSFTResult:
+    """Breakdown of the arXiv:2610.21412v1 Section 5 Eq. (1) Selective Teacher + Brier SFT objective."""
+
+    total_loss: float
+    cross_entropy_loss: float
+    brier_loss: float
+    teacher_accepted: bool
+    target_distribution: dict[str, float]
+
+
+def selective_teacher_brier_sft_loss(
+    teacher_probs: Mapping[str, float],
+    student_probs: Mapping[str, float],
+    gold_key: str,
+    *,
+    acceptable_keys: Sequence[str] | None = None,
+    gold_weight_alpha: float = 0.30,
+    brier_weight_mu: float = 0.50,
+) -> SelectiveBrierSFTResult:
+    """Compute the Selective Teacher + Brier SFT loss (Zhu et al., arXiv:2610.21412v1 Sec. 5 Eq. 1).
+
+    Where the teacher ranks an acceptable answer first (`argmax_a p_teacher(a | s) in acceptable_keys`),
+    the target mixes the one-hot gold label with the teacher's probabilities:
+      y_a = alpha * 1[a == a*] + (1 - alpha) * p_teacher(a | s)
+    Otherwise (when the teacher errs, e.g., on `must_ask` or `off_plan` states), the target is the
+    one-hot gold label alone (`y_a = 1[a == a*]`), preventing teacher errors from corrupting the student's argmax.
+    Fits the target with cross-entropy plus multiclass squared-error (Brier) regularization:
+      L_SFT = sum_a [ -y_a * log p_theta(a | s) + mu * (p_theta(a | s) - y_a)^2 ].
+    """
+    if not teacher_probs or not student_probs:
+        raise ValueError("teacher_probs and student_probs must be non-empty mappings")
+    if set(teacher_probs.keys()) != set(student_probs.keys()):
+        raise ValueError("teacher_probs and student_probs must have identical option key sets")
+    if gold_key not in teacher_probs:
+        raise ValueError(f"gold_key {gold_key!r} must be present in teacher_probs")
+    if not math.isfinite(gold_weight_alpha) or gold_weight_alpha < 0.0 or gold_weight_alpha > 1.0:
+        raise ValueError(f"gold_weight_alpha must lie in [0, 1], got {gold_weight_alpha!r}")
+    if not math.isfinite(brier_weight_mu) or brier_weight_mu < 0.0:
+        raise ValueError(f"brier_weight_mu must be finite and >= 0, got {brier_weight_mu!r}")
+
+    eps = 1e-12
+    keys = sorted(teacher_probs.keys())
+
+    def _norm(m: Mapping[str, float], name: str) -> dict[str, float]:
+        tot = 0.0
+        clean: dict[str, float] = {}
+        for k in keys:
+            fv = float(m[k])
+            if not math.isfinite(fv) or fv < 0.0:
+                raise ValueError(f"invalid probability for {k!r} in {name}: {m[k]!r}")
+            clean[k] = fv
+            tot += fv
+        if tot <= 0.0:
+            raise ValueError(f"{name} sums to zero")
+        return {k: max(eps, v / tot) for k, v in clean.items()}
+
+    p_t = _norm(teacher_probs, "teacher_probs")
+    p_s = _norm(student_probs, "student_probs")
+
+    acc_set = set(acceptable_keys) if acceptable_keys is not None else {gold_key}
+    acc_set.add(gold_key)
+    teacher_winner = max(p_t.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    teacher_ok = teacher_winner in acc_set
+
+    target: dict[str, float] = {}
+    for k in keys:
+        one_hot = 1.0 if k == gold_key else 0.0
+        if teacher_ok:
+            target[k] = gold_weight_alpha * one_hot + (1.0 - gold_weight_alpha) * p_t[k]
+        else:
+            target[k] = one_hot
+
+    ce_loss = -sum(target[k] * math.log(p_s[k]) for k in keys)
+    brier_loss = sum((p_s[k] - target[k]) ** 2 for k in keys)
+    total = ce_loss + brier_weight_mu * brier_loss
+
+    return SelectiveBrierSFTResult(
+        total_loss=total,
+        cross_entropy_loss=ce_loss,
+        brier_loss=brier_loss,
+        teacher_accepted=teacher_ok,
+        target_distribution=target,
+    )
+
+
+

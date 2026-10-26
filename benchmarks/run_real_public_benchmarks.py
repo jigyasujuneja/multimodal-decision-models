@@ -59,6 +59,7 @@ from multimodal_decision_models import (  # noqa: E402
     LogprobAlignmentError,
     OpenAILogprobBackend,
     UNIVERSAL_256_DECISION_CODES,
+    acceptable_set_accuracy,
     adaptive_calibration_error,
     brier_murphy_decomposition,
     brier_score_multiclass,
@@ -67,13 +68,18 @@ from multimodal_decision_models import (  # noqa: E402
     calibrate_mondrian_conformal_quantiles,
     calibrate_multislot_joint_conformal,
     conformal_prediction_set,
+    evaluate_trigger_guard_utility,
     expected_calibration_error,
     fit_temperature_scaling,
+    fit_trajectory_delegation_threshold,
+    holm_bonferroni_adjust,
     mondrian_conformal_prediction_set,
     multislot_joint_conformal_sets,
     negative_log_likelihood,
     paired_mcnemar_test,
     reasoning_to_readout_distillation_loss,
+    selective_teacher_brier_sft_loss,
+    tango_paired_non_inferiority_test,
 )
 
 REAL_MODELS: tuple[str, ...] = (
@@ -88,7 +94,7 @@ REAL_MODELS: tuple[str, ...] = (
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load non-empty JSONL records deterministically sorted by id."""
+    """Load non-empty JSONL records deterministically sorted by id or row_id."""
     if not path.is_file():
         raise FileNotFoundError(f"Missing real receipt file: {path}")
     rows = [
@@ -98,7 +104,7 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     ]
     if not rows:
         raise ValueError(f"Receipt file is empty: {path}")
-    rows.sort(key=lambda r: str(r["id"]))
+    rows.sort(key=lambda r: str(r.get("id", r.get("row_id", ""))))
     return rows
 
 
@@ -502,14 +508,222 @@ def run_experiment_b_reasoning_to_readout_distillation(
     }
 
 
+def run_experiment_c_jev_agent_harness_and_agentdecisionbench(
+    adb_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate arXiv:2610.21412v1 (JevAgentHarness & AgentDecisionBench) across N = 600 real occurrences."""
+    common_rows = [r for r in adb_rows if r["split"] == "common_states"]
+    shift_rows = [r for r in adb_rows if r["split"] == "decisiongym_shift"]
+    models = ("rl", "sft_v1", "e14a", "jev", "oaidec", "openjevhf", "sl0.8b", "sl4b", "sl9b", "sl27b", "intern", "base")
+    irrev_substrings = ("cancel", "ship", "refund", "dispatch", "void", "credit", "archive", "delete", "update", "modify")
+
+    def is_irrev_tool(tool_name: str | None) -> bool:
+        if not tool_name:
+            return False
+        low = str(tool_name).lower()
+        return any(s in low for s in irrev_substrings)
+
+    # 1. Per-model L2 acceptable-set vs single-gold accuracy, stratum breakdown, and must-ask fatal irreversible rate
+    model_stratum_summary: dict[str, Any] = {}
+    for m in models:
+        c_preds = [str(r["models"][m]["answer"] or "") for r in common_rows]
+        c_acc_sets = [r["acceptable_tools"] for r in common_rows]
+        c_acc = acceptable_set_accuracy(c_preds, c_acc_sets)
+        c_single = sum(1 for r in common_rows if r["models"][m]["answer"] == r["gold"]) / float(len(common_rows))
+
+        c_on = [r for r in common_rows if r["stratum"] == "on_plan" and not r["is_must_ask"]]
+        c_off = [r for r in common_rows if r["stratum"] == "after_off_plan"]
+        c_ma = [r for r in common_rows if r["is_must_ask"]]
+
+        on_acc = acceptable_set_accuracy([str(r["models"][m]["answer"] or "") for r in c_on], [r["acceptable_tools"] for r in c_on])
+        off_acc = acceptable_set_accuracy([str(r["models"][m]["answer"] or "") for r in c_off], [r["acceptable_tools"] for r in c_off])
+        ma_acc = acceptable_set_accuracy([str(r["models"][m]["answer"] or "") for r in c_ma], [r["acceptable_tools"] for r in c_ma])
+        ma_irrev_err = sum(
+            1
+            for r in c_ma
+            if r["models"][m]["answer"] not in set(r["acceptable_tools"]) and is_irrev_tool(r["models"][m]["answer"])
+        ) / float(len(c_ma))
+
+        s_preds = [str(r["models"][m]["answer"] or "") for r in shift_rows]
+        s_acc_sets = [r["acceptable_tools"] for r in shift_rows]
+        s_acc = acceptable_set_accuracy(s_preds, s_acc_sets)
+        s_ma = [r for r in shift_rows if r["is_must_ask"]]
+        s_ma_acc = acceptable_set_accuracy([str(r["models"][m]["answer"] or "") for r in s_ma], [r["acceptable_tools"] for r in s_ma])
+
+        model_stratum_summary[m] = {
+            "common_acceptable_set_acc": round(c_acc, 4),
+            "common_single_gold_acc": round(c_single, 4),
+            "common_on_plan_acc": round(on_acc, 4),
+            "common_off_plan_acc": round(off_acc, 4),
+            "common_must_ask_acc": round(ma_acc, 4),
+            "common_must_ask_fatal_irrev_rate": round(ma_irrev_err, 4),
+            "shift_acceptable_set_acc": round(s_acc, 4),
+            "shift_must_ask_acc": round(s_ma_acc, 4),
+        }
+
+    # 2. Proposition 1 Trajectory Thresholds vs Action-Stakes + Irreversibility Guard on DecisionGym-Shift
+    # Fit thresholds on common_states on_plan calibration occurrences (mirroring JevAgentHarness calibration seeds)
+    cal_split = [r for r in common_rows if r["stratum"] == "on_plan" and not r["is_must_ask"]] + [r for r in common_rows if r["is_must_ask"]]
+    deferral_shift_eval: dict[str, Any] = {}
+    for m in ("rl", "e14a", "jev", "sl9b", "sl27b"):
+        cal_confs = [float(r["models"][m]["confidence"]) for r in cal_split]
+        cal_ok = [r["models"][m]["answer"] in set(r["acceptable_tools"]) for r in cal_split]
+        cal_fit = fit_trajectory_delegation_threshold(
+            calib_confidences=cal_confs,
+            calib_system1_correct=cal_ok,
+            delta_cost_usd=0.0057,
+            error_stakes_v=1.0,
+            irreversible_stakes_v=5.0,
+            reversible_stakes_v=0.15,
+            min_bin_size=20,
+            num_bins=6,
+        )
+
+        # Evaluate on shift_rows (N = 300) under:
+        # (a) Prop. 1 scalar threshold fitted on calibration trajectories
+        # (b) Action-Stakes V(a) + Irreversibility Consensus Guard (requiring secondary anchor agreement + high-confidence floor on irreversible actions)
+        aux_m = "sl27b" if m != "sl27b" else "jev"
+        prop1_taken = prop1_err = prop1_irrev_err = 0
+        ast_taken = ast_err = ast_irrev_err = 0
+        for r in shift_rows:
+            pred = r["models"][m]["answer"]
+            conf = float(r["models"][m]["confidence"])
+            is_ok = pred in set(r["acceptable_tools"])
+            irrev = is_irrev_tool(pred)
+
+            if conf >= cal_fit.tau_empirical_bin:
+                prop1_taken += 1
+                if not is_ok:
+                    prop1_err += 1
+                    if irrev:
+                        prop1_irrev_err += 1
+
+            thresh_ast = max(0.995, cal_fit.tau_irreversible_action) if irrev else cal_fit.tau_reversible_action
+            aux_pred = r["models"][aux_m]["answer"]
+            accept_ast = (conf >= thresh_ast and pred == aux_pred) if irrev else (conf >= thresh_ast and aux_pred != "request_clarification")
+            if accept_ast:
+                ast_taken += 1
+                if not is_ok:
+                    ast_err += 1
+                    if irrev:
+                        ast_irrev_err += 1
+
+        n_s = len(shift_rows)
+        deferral_shift_eval[m] = {
+            "tau_prop1_on_plan": round(cal_fit.tau_empirical_bin, 4),
+            "tau_irreversible": round(cal_fit.tau_irreversible_action, 4),
+            "tau_reversible": round(cal_fit.tau_reversible_action, 4),
+            "prop1_shift_taken_share": round(prop1_taken / float(n_s), 4),
+            "prop1_shift_accepted_errors": prop1_err,
+            "prop1_shift_accepted_irrev_errors": prop1_irrev_err,
+            "action_stakes_shift_taken_share": round(ast_taken / float(n_s), 4),
+            "action_stakes_shift_accepted_errors": ast_err,
+            "action_stakes_shift_accepted_irrev_errors": ast_irrev_err,
+        }
+
+    # 3. Proposition 2 Trigger/Guard Resolution (Youden J = TPR - FPR) on Shift Must-Ask Gating
+    need_ask_shift = [bool(r["is_must_ask"]) for r in shift_rows]
+    guard_resolution: dict[str, Any] = {}
+    for m in ("rl", "sft_v1", "e14a", "jev", "sl27b", "sl9b", "intern", "base"):
+        fires = [r["models"][m]["answer"] == "request_clarification" for r in shift_rows]
+        ug = evaluate_trigger_guard_utility(
+            need_labels=need_ask_shift,
+            gate_decisions=fires,
+            benefit_when_needed=0.836,
+            harm_when_unneeded=0.050,
+            module_cost=0.0042,
+            query_cost_kappa=0.00011,
+        )
+        guard_resolution[m] = {
+            "accuracy": round(ug.accuracy, 4),
+            "tpr": round(ug.tpr, 4),
+            "fpr": round(ug.fpr, 4),
+            "youden_j": round(ug.youden_j, 4),
+            "delta_utility_total": round(ug.delta_utility_total, 4),
+            "optimal_trigger_threshold": round(ug.optimal_trigger_threshold, 4),
+        }
+
+    # 4. Eq. (1) Selective Teacher + Brier SFT vs Unconditional Teacher Mixing on Common Must-Ask States
+    c_ma_rows = [r for r in common_rows if r["is_must_ask"]]
+    uncond_corrupted = 0
+    selective_corrupted = 0
+    sft_losses = []
+    for r in c_ma_rows:
+        pred_jev = str(r["models"]["jev"]["answer"] or "cancel_order")
+        conf_jev = max(0.05, min(0.99, float(r["models"]["jev"]["confidence"])))
+        gold_k = str(r["gold"])
+        cand_keys = sorted({gold_k, pred_jev, "find_user", "cancel_order"})
+        rem = (1.0 - conf_jev) / float(max(1, len(cand_keys) - 1))
+        t_dist = {k: (conf_jev if k == pred_jev else rem) for k in cand_keys}
+        s_dist = {k: (0.70 if k == gold_k else 0.30 / float(max(1, len(cand_keys) - 1))) for k in cand_keys}
+
+        # Unconditional 0.30 * gold + 0.70 * teacher
+        uncond_target = {k: (0.30 * (1.0 if k == gold_k else 0.0) + 0.70 * t_dist[k]) for k in cand_keys}
+        if top1_key(uncond_target) not in set(r["acceptable_tools"]):
+            uncond_corrupted += 1
+
+        sft_res = selective_teacher_brier_sft_loss(
+            teacher_probs=t_dist,
+            student_probs=s_dist,
+            gold_key=gold_k,
+            acceptable_keys=r["acceptable_tools"],
+            gold_weight_alpha=0.30,
+            brier_weight_mu=0.50,
+        )
+        if top1_key(sft_res.target_distribution) not in set(r["acceptable_tools"]):
+            selective_corrupted += 1
+        sft_losses.append(sft_res.total_loss)
+
+    # 5. Tango's Paired Score Non-Inferiority Test & Holm-Bonferroni FWER Adjustment
+    stage2_claims = [
+        ("stage1_jev_tool_cascade", 0, 0, 500, 0.03),
+        ("stage2_agentdecision4b_combination", 3, 0, 500, 0.03),
+        ("shift_agentdecision4b_indomain_tau", 0, 12, 200, 0.03),
+        ("shift_08b_deferral_head", 2, 2, 200, 0.03),
+    ]
+    raw_ps = []
+    tango_summary = {}
+    for name, w, l, n_tot, marg in stage2_claims:
+        ni = tango_paired_non_inferiority_test(w, l, n_tot, margin=marg, alpha=0.05, gamma=1e-4)
+        raw_ps.append(ni.p_berger_boos)
+        tango_summary[name] = {
+            "wins": w,
+            "losses": l,
+            "n_total": n_tot,
+            "delta_hat": round(ni.delta_hat, 4),
+            "p_berger_boos": round(ni.p_berger_boos, 6),
+            "non_inferior_unadjusted": ni.non_inferior,
+        }
+    adj_ps, rej_flags = holm_bonferroni_adjust(raw_ps, alpha=0.05)
+    for (name, _, _, _, _), ap, rf in zip(stage2_claims, adj_ps, rej_flags):
+        tango_summary[name]["p_holm_adjusted"] = round(ap, 6)
+        tango_summary[name]["non_inferior_holm_fwer05"] = rf
+
+    return {
+        "n_common_slice": len(common_rows),
+        "n_shift_slice": len(shift_rows),
+        "model_stratum_summary": model_stratum_summary,
+        "deferral_shift_eval": deferral_shift_eval,
+        "guard_youden_j_resolution": guard_resolution,
+        "selective_teacher_brier_sft": {
+            "n_must_ask_evaluated": len(c_ma_rows),
+            "unconditional_kd_corrupted_targets": uncond_corrupted,
+            "selective_eq1_corrupted_targets": selective_corrupted,
+            "mean_selective_sft_loss": round(sum(sft_losses) / float(len(sft_losses)), 4),
+        },
+        "tango_non_inferiority_summary": tango_summary,
+    }
+
+
 def format_markdown_report(results: Mapping[str, Any]) -> str:
     """Render a clean, publication-grade Markdown report with zero em-dashes or horizontal rules."""
     s1 = results["study1_real_7model_benchmark"]
     exp_a = results["experiment_a_extended_255_bijection"]
     exp_b = results["experiment_b_reasoning_to_readout_distillation"]
+    exp_c = results["experiment_c_jev_agent_harness_and_agentdecisionbench"]
 
     lines = [
-        "# Real-Data Benchmark Report: DecisionBench 1.0, TypedDecisions, and arXiv:2610.03935 Experiments",
+        "# Real-Data Benchmark Report: DecisionBench 1.0, TypedDecisions, arXiv:2610.03935, and arXiv:2610.21412v1",
         "",
         "## 1. Real 7-Model Evaluation on Multi-Slot TypedDecisions (`N = 500` Real Questions, `250` Held-Out Test)",
         "",
@@ -578,7 +792,54 @@ def format_markdown_report(results: Mapping[str, Any]) -> str:
             f"| {label} | `{a['accuracy']:.4f}` | `{a['brier']:.4f}` | `{a['ece']:.4f}` | "
             f"`{a['nll']:.4f}` | `{a['kl_to_human_soft']:.4f}` | `{a['ordinal_score_mae']:.4f}` |"
         )
-    lines.append("")
+
+    lines.extend(
+        [
+            "",
+            "## 4. Experiment C: `JevAgentHarness` & `AgentDecisionBench` (`arXiv:2610.21412v1`, `N = 600` Real Agent States)",
+            "",
+            "### 4.1 `L2` Acceptable-Set vs Single-Gold Accuracy, Recovery (`after_off_plan`), and `must_ask` Fatal Irreversible Errors",
+            "",
+            "| Model | Common Acceptable-Set Acc | Common Single-Gold Acc | `on_plan` Acc | `after_off_plan` Recovery Acc | `must_ask` Acc | `must_ask` Fatal Irreversible Error Rate | `DecisionGym-Shift` Acc |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+    )
+    for m, mst in exp_c["model_stratum_summary"].items():
+        lines.append(
+            f"| `{m}` | `{mst['common_acceptable_set_acc']:.4f}` | `{mst['common_single_gold_acc']:.4f}` | "
+            f"`{mst['common_on_plan_acc']:.4f}` | `{mst['common_off_plan_acc']:.4f}` | "
+            f"`{mst['common_must_ask_acc']:.4f}` | `{mst['common_must_ask_fatal_irrev_rate']:.4f}` | "
+            f"`{mst['shift_acceptable_set_acc']:.4f}` |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "### 4.2 Proposition 1 Scalar Threshold vs Action-Stakes + Irreversibility Guard on `DecisionGym-Shift` (`N = 300`)",
+            "",
+            "| Model | `tau_prop1` (`on_plan`) | Prop. 1 Shift Taken | Prop. 1 Accepted Errors (Irrev) | Action-Stakes Shift Taken | Action-Stakes Accepted Errors (Irrev) |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: |",
+        ]
+    )
+    for m, dst in exp_c["deferral_shift_eval"].items():
+        lines.append(
+            f"| `{m}` | `{dst['tau_prop1_on_plan']:.4f}` | `{dst['prop1_shift_taken_share']:.4f}` | "
+            f"`{dst['prop1_shift_accepted_errors']}` (`{dst['prop1_shift_accepted_irrev_errors']}`) | "
+            f"`{dst['action_stakes_shift_taken_share']:.4f}` | "
+            f"**`{dst['action_stakes_shift_accepted_errors']}` (`{dst['action_stakes_shift_accepted_irrev_errors']}`)** |"
+        )
+
+    sft_c = exp_c["selective_teacher_brier_sft"]
+    lines.extend(
+        [
+            "",
+            "### 4.3 Selective Teacher + Brier SFT (`arXiv:2610.21412v1` Eq. 1) & Tango Paired Non-Inferiority Test",
+            "",
+            f"- **Unconditional Teacher Distillation (`0.3 * gold + 0.7 * p_Jev`) Corrupted `must_ask` Targets**: `{sft_c['unconditional_kd_corrupted_targets']} / {sft_c['n_must_ask_evaluated']}`",
+            f"- **Eq. (1) Selective Teacher + Brier SFT Corrupted `must_ask` Targets**: **`{sft_c['selective_eq1_corrupted_targets']} / {sft_c['n_must_ask_evaluated']}`** (mean SFT loss `{sft_c['mean_selective_sft_loss']:.4f}`)",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -595,6 +856,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=BENCH_DIR / "data" / "real_arxiv2610_distillation_receipts.jsonl",
     )
     parser.add_argument(
+        "--adb-receipts",
+        type=Path,
+        default=BENCH_DIR / "data" / "real_agentdecisionbench_receipts.jsonl",
+    )
+    parser.add_argument(
         "--json-out",
         type=Path,
         default=BENCH_DIR / "results" / "real_public_bench_results.json",
@@ -608,6 +874,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     typed_rows = load_jsonl(args.typed_receipts)
     distill_rows = load_jsonl(args.distill_receipts)
+    adb_rows = load_jsonl(args.adb_receipts)
 
     results = {
         "benchmark": "Real-Public-DecisionBench-TypedDecisions-and-arXiv2610",
@@ -615,6 +882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "study1_real_7model_benchmark": run_study1_real_7model_benchmark(typed_rows),
         "experiment_a_extended_255_bijection": run_experiment_a_extended_255_bijection_and_think_guard(),
         "experiment_b_reasoning_to_readout_distillation": run_experiment_b_reasoning_to_readout_distillation(distill_rows),
+        "experiment_c_jev_agent_harness_and_agentdecisionbench": run_experiment_c_jev_agent_harness_and_agentdecisionbench(adb_rows),
     }
 
     args.json_out.parent.mkdir(parents=True, exist_ok=True)

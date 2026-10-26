@@ -285,3 +285,44 @@ func TestExtended255CodeBijectionAndReasoningToReadoutDistillation(t *testing.T)
 	}
 }
 
+func TestJevAgentHarnessDelegationGuardSFTAndTango(t *testing.T) {
+	confs := make([]float64, 40)
+	s1OK := make([]bool, 40)
+	for i := 0; i < 40; i++ {
+		confs[i] = 0.60 + 0.01*float64(i)
+		s1OK[i] = i >= 15
+	}
+	calRes, err := FitTrajectoryDelegationThreshold(confs, s1OK, nil, 0.0057, 1.0, 5.0, 0.15, 10, 4)
+	if err != nil {
+		t.Fatalf("unexpected error in FitTrajectoryDelegationThreshold: %v", err)
+	}
+	if calRes.TauIrreversibleAction < calRes.TauReversibleAction {
+		t.Fatalf("expected irreversible threshold >= reversible threshold, got %.4f < %.4f", calRes.TauIrreversibleAction, calRes.TauReversibleAction)
+	}
+
+	need := []bool{true, true, false, false, false, false}
+	fire := []bool{true, false, false, false, false, false}
+	ug, err := EvaluateTriggerGuardUtility(need, fire, 0.836, 0.050, 0.0042, 0.00011)
+	if err != nil || ug.YoudenJ <= 0.49 || ug.DeltaUtilityTotal <= 0.0 {
+		t.Fatalf("unexpected TriggerGuardUtilityResult: %+v, err=%v", ug, err)
+	}
+
+	// Teacher errs on must-ask state -> selective SFT falls back to one-hot gold
+	tWrong := map[string]float64{"cancel_order": 0.85, "ask_user": 0.10, "find_user": 0.05}
+	sProbs := map[string]float64{"cancel_order": 0.20, "ask_user": 0.70, "find_user": 0.10}
+	sftRes, err := SelectiveTeacherBrierSFTLoss(tWrong, sProbs, "ask_user", []string{"ask_user"}, 0.30, 0.50)
+	if err != nil || sftRes.TeacherAccepted || math.Abs(sftRes.TargetDistribution["ask_user"]-1.0) > 1e-12 {
+		t.Fatalf("expected teacher rejected and one-hot ask_user target, got %+v, err=%v", sftRes, err)
+	}
+
+	niPass, err := TangoPairedNonInferiorityTest(3, 0, 500, 0.03, 0.05, 1e-4)
+	if err != nil || !niPass.NonInferior || niPass.PBergerBoos > 0.001 {
+		t.Fatalf("expected non-inferior pass for (3,0,500), got %+v, err=%v", niPass, err)
+	}
+	niFail, err := TangoPairedNonInferiorityTest(0, 12, 200, 0.03, 0.05, 1e-4)
+	if err != nil || niFail.NonInferior {
+		t.Fatalf("expected non-inferior fail for (0,12,200), got %+v, err=%v", niFail, err)
+	}
+}
+
+

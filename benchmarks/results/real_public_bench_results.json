@@ -107,6 +107,303 @@
     "n_test_questions": 150,
     "n_total_questions": 300
   },
+  "experiment_c_jev_agent_harness_and_agentdecisionbench": {
+    "deferral_shift_eval": {
+      "e14a": {
+        "action_stakes_shift_accepted_errors": 21,
+        "action_stakes_shift_accepted_irrev_errors": 4,
+        "action_stakes_shift_taken_share": 0.5967,
+        "prop1_shift_accepted_errors": 61,
+        "prop1_shift_accepted_irrev_errors": 44,
+        "prop1_shift_taken_share": 0.9267,
+        "tau_irreversible": 0.8016,
+        "tau_prop1_on_plan": 0.8016,
+        "tau_reversible": 0.8016
+      },
+      "jev": {
+        "action_stakes_shift_accepted_errors": 4,
+        "action_stakes_shift_accepted_irrev_errors": 0,
+        "action_stakes_shift_taken_share": 0.17,
+        "prop1_shift_accepted_errors": 4,
+        "prop1_shift_accepted_irrev_errors": 0,
+        "prop1_shift_taken_share": 0.3033,
+        "tau_irreversible": 1.0,
+        "tau_prop1_on_plan": 1.0,
+        "tau_reversible": 1.0
+      },
+      "rl": {
+        "action_stakes_shift_accepted_errors": 3,
+        "action_stakes_shift_accepted_irrev_errors": 0,
+        "action_stakes_shift_taken_share": 0.68,
+        "prop1_shift_accepted_errors": 4,
+        "prop1_shift_accepted_irrev_errors": 1,
+        "prop1_shift_taken_share": 0.9267,
+        "tau_irreversible": 0.9324,
+        "tau_prop1_on_plan": 0.9324,
+        "tau_reversible": 0.9324
+      },
+      "sl27b": {
+        "action_stakes_shift_accepted_errors": 0,
+        "action_stakes_shift_accepted_irrev_errors": 0,
+        "action_stakes_shift_taken_share": 0.1567,
+        "prop1_shift_accepted_errors": 0,
+        "prop1_shift_accepted_irrev_errors": 0,
+        "prop1_shift_taken_share": 0.3167,
+        "tau_irreversible": 0.9828,
+        "tau_prop1_on_plan": 0.9828,
+        "tau_reversible": 0.9828
+      },
+      "sl9b": {
+        "action_stakes_shift_accepted_errors": 0,
+        "action_stakes_shift_accepted_irrev_errors": 0,
+        "action_stakes_shift_taken_share": 0.05,
+        "prop1_shift_accepted_errors": 0,
+        "prop1_shift_accepted_irrev_errors": 0,
+        "prop1_shift_taken_share": 0.1533,
+        "tau_irreversible": 0.9684,
+        "tau_prop1_on_plan": 0.9684,
+        "tau_reversible": 0.9684
+      }
+    },
+    "guard_youden_j_resolution": {
+      "base": {
+        "accuracy": 0.74,
+        "delta_utility_total": 18.573,
+        "fpr": 0.095,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.41,
+        "youden_j": 0.315
+      },
+      "e14a": {
+        "accuracy": 0.8433,
+        "delta_utility_total": 38.3603,
+        "fpr": 0.12,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.77,
+        "youden_j": 0.65
+      },
+      "intern": {
+        "accuracy": 0.81,
+        "delta_utility_total": 28.0237,
+        "fpr": 0.045,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.52,
+        "youden_j": 0.475
+      },
+      "jev": {
+        "accuracy": 0.85,
+        "delta_utility_total": 36.293,
+        "fpr": 0.065,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.68,
+        "youden_j": 0.615
+      },
+      "rl": {
+        "accuracy": 0.96,
+        "delta_utility_total": 53.127,
+        "fpr": 0.02,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.92,
+        "youden_j": 0.9
+      },
+      "sft_v1": {
+        "accuracy": 0.9533,
+        "delta_utility_total": 53.7177,
+        "fpr": 0.05,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.96,
+        "youden_j": 0.91
+      },
+      "sl27b": {
+        "accuracy": 0.9033,
+        "delta_utility_total": 42.1997,
+        "fpr": 0.005,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.72,
+        "youden_j": 0.715
+      },
+      "sl9b": {
+        "accuracy": 0.86,
+        "delta_utility_total": 36.5883,
+        "fpr": 0.04,
+        "optimal_trigger_threshold": 0.0612,
+        "tpr": 0.66,
+        "youden_j": 0.62
+      }
+    },
+    "model_stratum_summary": {
+      "base": {
+        "common_acceptable_set_acc": 0.3933,
+        "common_must_ask_acc": 0.3625,
+        "common_must_ask_fatal_irrev_rate": 0.6375,
+        "common_off_plan_acc": 0.3,
+        "common_on_plan_acc": 0.4643,
+        "common_single_gold_acc": 0.3567,
+        "shift_acceptable_set_acc": 0.4833,
+        "shift_must_ask_acc": 0.41
+      },
+      "e14a": {
+        "common_acceptable_set_acc": 0.9567,
+        "common_must_ask_acc": 1.0,
+        "common_must_ask_fatal_irrev_rate": 0.0,
+        "common_off_plan_acc": 0.8375,
+        "common_on_plan_acc": 1.0,
+        "common_single_gold_acc": 0.9433,
+        "shift_acceptable_set_acc": 0.7633,
+        "shift_must_ask_acc": 0.77
+      },
+      "intern": {
+        "common_acceptable_set_acc": 0.6167,
+        "common_must_ask_acc": 0.3625,
+        "common_must_ask_fatal_irrev_rate": 0.6375,
+        "common_off_plan_acc": 0.5625,
+        "common_on_plan_acc": 0.7929,
+        "common_single_gold_acc": 0.54,
+        "shift_acceptable_set_acc": 0.7167,
+        "shift_must_ask_acc": 0.52
+      },
+      "jev": {
+        "common_acceptable_set_acc": 0.7333,
+        "common_must_ask_acc": 0.375,
+        "common_must_ask_fatal_irrev_rate": 0.625,
+        "common_off_plan_acc": 0.6625,
+        "common_on_plan_acc": 0.9786,
+        "common_single_gold_acc": 0.6833,
+        "shift_acceptable_set_acc": 0.8667,
+        "shift_must_ask_acc": 0.68
+      },
+      "oaidec": {
+        "common_acceptable_set_acc": 0.73,
+        "common_must_ask_acc": 0.4125,
+        "common_must_ask_fatal_irrev_rate": 0.5875,
+        "common_off_plan_acc": 0.6375,
+        "common_on_plan_acc": 0.9643,
+        "common_single_gold_acc": 0.65,
+        "shift_acceptable_set_acc": 0.8067,
+        "shift_must_ask_acc": 0.58
+      },
+      "openjevhf": {
+        "common_acceptable_set_acc": 0.7767,
+        "common_must_ask_acc": 0.3625,
+        "common_must_ask_fatal_irrev_rate": 0.6375,
+        "common_off_plan_acc": 0.825,
+        "common_on_plan_acc": 0.9857,
+        "common_single_gold_acc": 0.7133,
+        "shift_acceptable_set_acc": 0.87,
+        "shift_must_ask_acc": 0.68
+      },
+      "rl": {
+        "common_acceptable_set_acc": 0.95,
+        "common_must_ask_acc": 1.0,
+        "common_must_ask_fatal_irrev_rate": 0.0,
+        "common_off_plan_acc": 0.8125,
+        "common_on_plan_acc": 1.0,
+        "common_single_gold_acc": 0.9367,
+        "shift_acceptable_set_acc": 0.97,
+        "shift_must_ask_acc": 0.92
+      },
+      "sft_v1": {
+        "common_acceptable_set_acc": 0.95,
+        "common_must_ask_acc": 1.0,
+        "common_must_ask_fatal_irrev_rate": 0.0,
+        "common_off_plan_acc": 0.8125,
+        "common_on_plan_acc": 1.0,
+        "common_single_gold_acc": 0.9367,
+        "shift_acceptable_set_acc": 0.9833,
+        "shift_must_ask_acc": 0.96
+      },
+      "sl0.8b": {
+        "common_acceptable_set_acc": 0.38,
+        "common_must_ask_acc": 0.3625,
+        "common_must_ask_fatal_irrev_rate": 0.6375,
+        "common_off_plan_acc": 0.3,
+        "common_on_plan_acc": 0.4357,
+        "common_single_gold_acc": 0.3433,
+        "shift_acceptable_set_acc": 0.4633,
+        "shift_must_ask_acc": 0.4
+      },
+      "sl27b": {
+        "common_acceptable_set_acc": 0.7933,
+        "common_must_ask_acc": 0.3875,
+        "common_must_ask_fatal_irrev_rate": 0.6125,
+        "common_off_plan_acc": 0.8375,
+        "common_on_plan_acc": 1.0,
+        "common_single_gold_acc": 0.73,
+        "shift_acceptable_set_acc": 0.9,
+        "shift_must_ask_acc": 0.72
+      },
+      "sl4b": {
+        "common_acceptable_set_acc": 0.7633,
+        "common_must_ask_acc": 0.55,
+        "common_must_ask_fatal_irrev_rate": 0.45,
+        "common_off_plan_acc": 0.7125,
+        "common_on_plan_acc": 0.9143,
+        "common_single_gold_acc": 0.7,
+        "shift_acceptable_set_acc": 0.7967,
+        "shift_must_ask_acc": 0.55
+      },
+      "sl9b": {
+        "common_acceptable_set_acc": 0.7767,
+        "common_must_ask_acc": 0.575,
+        "common_must_ask_fatal_irrev_rate": 0.425,
+        "common_off_plan_acc": 0.6375,
+        "common_on_plan_acc": 0.9714,
+        "common_single_gold_acc": 0.7133,
+        "shift_acceptable_set_acc": 0.8567,
+        "shift_must_ask_acc": 0.66
+      }
+    },
+    "n_common_slice": 300,
+    "n_shift_slice": 300,
+    "selective_teacher_brier_sft": {
+      "mean_selective_sft_loss": 0.4294,
+      "n_must_ask_evaluated": 80,
+      "selective_eq1_corrupted_targets": 0,
+      "unconditional_kd_corrupted_targets": 45
+    },
+    "tango_non_inferiority_summary": {
+      "shift_08b_deferral_head": {
+        "delta_hat": 0.0,
+        "losses": 2,
+        "n_total": 200,
+        "non_inferior_holm_fwer05": false,
+        "non_inferior_unadjusted": true,
+        "p_berger_boos": 0.04188,
+        "p_holm_adjusted": 0.08376,
+        "wins": 2
+      },
+      "shift_agentdecision4b_indomain_tau": {
+        "delta_hat": -0.06,
+        "losses": 12,
+        "n_total": 200,
+        "non_inferior_holm_fwer05": false,
+        "non_inferior_unadjusted": false,
+        "p_berger_boos": 0.99366,
+        "p_holm_adjusted": 0.99366,
+        "wins": 0
+      },
+      "stage1_jev_tool_cascade": {
+        "delta_hat": 0.0,
+        "losses": 0,
+        "n_total": 500,
+        "non_inferior_holm_fwer05": true,
+        "non_inferior_unadjusted": true,
+        "p_berger_boos": 0.0001,
+        "p_holm_adjusted": 0.000401,
+        "wins": 0
+      },
+      "stage2_agentdecision4b_combination": {
+        "delta_hat": 0.006,
+        "losses": 0,
+        "n_total": 500,
+        "non_inferior_holm_fwer05": true,
+        "non_inferior_unadjusted": true,
+        "p_berger_boos": 0.000101,
+        "p_holm_adjusted": 0.000401,
+        "wins": 3
+      }
+    }
+  },
   "study1_real_7model_benchmark": {
     "conformal_by_primitive": {
       "choice": {
