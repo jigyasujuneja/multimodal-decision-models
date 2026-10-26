@@ -1280,6 +1280,86 @@ def evaluate_trigger_guard_utility(
 
 
 @dataclass(frozen=True)
+class SaerensEMPriorResult:
+    """Result of Saerens et al. (2002) EM unlabeled base-rate re-estimation with K-guarded damping."""
+
+    estimated_priors: dict[str, float]
+    prior_logits: dict[str, float]
+    base_priors: dict[str, float]
+    num_classes: int
+    iterations_run: int
+    multiclass_damped_guard_active: bool
+
+
+def estimate_saerens_em_prior_logits(
+    unlabeled_prob_rows: Sequence[Mapping[str, float]],
+    base_priors: Mapping[str, float] | None = None,
+    *,
+    num_steps: int = 5,
+    damping_lambda: float = 0.70,
+    max_effective_classes: int = 2,
+) -> SaerensEMPriorResult:
+    """Estimate target-domain class priors via damped Saerens et al. (2002) EM with EXP-48 K-guard.
+
+    Live EXP-48 (`ghchinoy/decision-lab#94`) demonstrated two empirical regimes:
+      1. Binary suites (`K == 2`): 5-step damped EM (`lambda = 0.70`) combined with
+         `gate_mode="hesitant"` (`w = 1.00`) cuts Brier score by `-19.5%` to `-41.9%` under `5%`
+         and `90%` prevalence shifts with zero adversarial AUROC loss (`+0.0005`).
+      2. Multi-class suites (`K > 2`, e.g., `K = 14` on `intents_systemone`): damped EM spreads
+         residual probability mass across `K - 1` rare classes (`-0.2%` Brier, `0.5 SE`), so
+         unlabeled EM prior adaptation is automatically zeroed out (`prior_logits = 0.0`) when
+         `K > max_effective_classes` unless explicitly overridden.
+    """
+    if not unlabeled_prob_rows:
+        raise ValueError("unlabeled_prob_rows must be non-empty")
+    first = unlabeled_prob_rows[0]
+    if not first:
+        raise ValueError("unlabeled_prob_rows[0] must be non-empty")
+    keys = sorted(first.keys())
+    k_len = len(keys)
+    eps = 1e-9
+
+    norm_rows: list[dict[str, float]] = []
+    for r in unlabeled_prob_rows:
+        tot = sum(max(eps, float(r.get(k, eps))) for k in keys)
+        norm_rows.append({k: max(eps, float(r.get(k, eps))) / tot for k in keys})
+
+    if base_priors is not None:
+        b_tot = sum(max(eps, float(base_priors.get(k, 1.0 / k_len))) for k in keys)
+        pi_0 = {k: max(eps, float(base_priors.get(k, 1.0 / k_len))) / b_tot for k in keys}
+    else:
+        pi_0 = {k: 1.0 / float(k_len) for k in keys}
+
+    pi_t = dict(pi_0)
+    steps = max(1, int(num_steps))
+    lam = min(1.0, max(0.0, float(damping_lambda)))
+    for _ in range(steps):
+        acc = {k: 0.0 for k in keys}
+        for p_row in norm_rows:
+            unnorm = {k: p_row[k] * (pi_t[k] / max(eps, pi_0[k])) for k in keys}
+            z = sum(unnorm.values()) or 1.0
+            for k in keys:
+                acc[k] += unnorm[k] / z
+        m_emp = {k: acc[k] / float(len(norm_rows)) for k in keys}
+        pi_t = {k: lam * m_emp[k] + (1.0 - lam) * pi_0[k] for k in keys}
+
+    guard_active = k_len > max_effective_classes
+    if guard_active:
+        logits = {k: 0.0 for k in keys}
+    else:
+        logits = {k: math.log(max(eps, pi_t[k])) - math.log(max(eps, pi_0[k])) for k in keys}
+
+    return SaerensEMPriorResult(
+        estimated_priors=pi_t,
+        prior_logits=logits,
+        base_priors=pi_0,
+        num_classes=k_len,
+        iterations_run=steps,
+        multiclass_damped_guard_active=guard_active,
+    )
+
+
+@dataclass(frozen=True)
 class SelectiveBrierSFTResult:
     """Breakdown of the arXiv:2610.21412v1 Section 5 Eq. (1) Selective Teacher + Brier SFT objective."""
 

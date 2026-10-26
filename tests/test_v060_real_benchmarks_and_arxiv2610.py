@@ -39,6 +39,7 @@ from multimodal_decision_models import (  # noqa: E402
     SchemaContractViolationError,
     acceptable_set_accuracy,
     build_extended_255_code_bijection,
+    estimate_saerens_em_prior_logits,
     evaluate_trigger_guard_utility,
     fit_trajectory_delegation_threshold,
     holm_bonferroni_adjust,
@@ -262,6 +263,17 @@ class TestV060RealPublicBenchmarksAndArxiv2610(unittest.TestCase):
         self.assertEqual(len(adj_ps), 2)
         self.assertTrue(rej_flags[0])
         self.assertFalse(rej_flags[1])
+
+        # 5. EXP-48 K-Guarded Saerens EM Prior Re-Estimation (K=2 active vs K>2 guarded)
+        skewed_bin = [{"no": 0.12, "yes": 0.88} for _ in range(45)] + [{"no": 0.85, "yes": 0.15} for _ in range(5)]
+        em_bin = estimate_saerens_em_prior_logits(skewed_bin)
+        self.assertFalse(em_bin.multiclass_damped_guard_active)
+        self.assertGreater(em_bin.prior_logits["yes"], 0.40)
+
+        skewed_k4 = [{"a": 0.85, "b": 0.05, "c": 0.05, "d": 0.05} for _ in range(40)]
+        em_k4 = estimate_saerens_em_prior_logits(skewed_k4)
+        self.assertTrue(em_k4.multiclass_damped_guard_active)
+        self.assertEqual(em_k4.prior_logits, {"a": 0.0, "b": 0.0, "c": 0.0, "d": 0.0})
 
 
 if __name__ == "__main__":
