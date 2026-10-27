@@ -58,3 +58,8 @@ Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAP
 | **Upgrade 4: Learn-then-Test (`LTT`) Funnel Calibration** | Target bound $r_{\max} = 0.14$ ($\delta = 0.05$) | Empirical risk `0.0100` (UCB `0.0922`) | Fast-exit rate `47.5%` with finite-sample Hoeffding-Bentkus risk control |
 | **Upgrade 5: Submodular Redundancy-Penalized Context Pruning** | Additive MCKP facet recall `66.7%` | Submodular MCKP facet recall `78.7%` | Retains orthogonal config + interface evidence at `61.2%` token reduction |
 | **Upgrade 6: Transitive Equivalence Polytope Projection** | `50` violated 3-cycles (`71.43%` edge acc) | `0` violated 3-cycles (`91.43%` edge acc) | `0` triangle violations via exact log-odds correlation clustering |
+
+## 4. Scope Boundaries, Trade-Offs, & Limitations
+
+- **Pareto Trade-Off Rationale**: We adopt the `LTT + RAPS Cascade` because it reduces multiclass Brier (`0.1598` vs `0.1613`), NLL (`0.3205` vs `0.3407`), ECE (`0.0390` vs `0.0445`), and AURC (`0.0376` vs `0.0402`) compared to standalone `Gemini-3.8-Flash-Logprob` while cutting p50 latency from `348.9 ms` to `128.4 ms`.
+- **Limitations & Negative Space**: Marginal split conformal under-coverage on rare tail classes (`58.75%`) requires explicit group/rarity partitioning (`calibrate_mondrian_conformal_quantiles`) or likelihood-ratio weighting (`weighted_conformal_prediction_set`) when deployment base rates shift.

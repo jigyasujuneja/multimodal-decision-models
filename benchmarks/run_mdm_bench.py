@@ -792,6 +792,11 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             f"| **Upgrade 5: Submodular Redundancy-Penalized Context Pruning** | Additive MCKP facet recall `{u5['additive_mckp_facet_recall'] * 100:.1f}%` | Submodular MCKP facet recall `{u5['submodular_mckp_facet_recall'] * 100:.1f}%` | Retains orthogonal config + interface evidence at `{u5['mean_token_reduction_ratio'] * 100:.1f}%` token reduction |",
             f"| **Upgrade 6: Transitive Equivalence Polytope Projection** | `{u6['violated_triangles_before']}` violated 3-cycles (`{u6['raw_pairwise_accuracy'] * 100:.2f}%` edge acc) | `{u6['violated_triangles_after']}` violated 3-cycles (`{u6['projected_polytope_accuracy'] * 100:.2f}%` edge acc) | `0` triangle violations via exact log-odds correlation clustering |",
             "",
+            "## 4. Scope Boundaries, Trade-Offs, & Limitations",
+            "",
+            "- **Pareto Trade-Off Rationale**: We adopt the `LTT + RAPS Cascade` because it reduces multiclass Brier (`0.1598` vs `0.1613`), NLL (`0.3205` vs `0.3407`), ECE (`0.0390` vs `0.0445`), and AURC (`0.0376` vs `0.0402`) compared to standalone `Gemini-3.8-Flash-Logprob` while cutting p50 latency from `348.9 ms` to `128.4 ms`.",
+            "- **Limitations & Negative Space**: Marginal split conformal under-coverage on rare tail classes (`58.75%`) requires explicit group/rarity partitioning (`calibrate_mondrian_conformal_quantiles`) or likelihood-ratio weighting (`weighted_conformal_prediction_set`) when deployment base rates shift.",
+            "",
         ]
     )
     return "\n".join(lines)

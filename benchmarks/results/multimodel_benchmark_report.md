@@ -46,6 +46,11 @@ This report compares 10 real decision and frontier models plus 5-fold out-of-fol
 - **`Conformal Cascade: Classy v0.3.3 -> DecisionGemma` (`safety_xstest_360`)**: escalates `68.6%` of items where Stage-1 RAPS (`alpha = 0.10`) produces a non-singleton set, reaching accuracy `0.8833`, Brier `0.1634`, AURC `0.0245`, and discordant Stage-1 wins/losses `91/5` (exact two-sided McNemar `p = 1.63e-21`) at `866.8 ms` mean latency.
 - **`Conformal Cascade: Classier v0.2.0 -> DecisionGemma` (`safety_xstest_360`)**: escalates `31.1%` of items where Stage-1 RAPS (`alpha = 0.10`) produces a non-singleton set, reaching accuracy `0.8917`, Brier `0.1720`, AURC `0.0326`, and discordant Stage-1 wins/losses `39/2` (exact two-sided McNemar `p = 7.84e-10`) at `537.1 ms` mean latency.
 
+## Scope Boundaries, Trade-Offs, and Limitations
+
+- **Pareto Trade-Off Takeaway**: Out-of-fold pre-fusion RAPS cascades (`conformal.py`) outperform standalone Stage-1 models on accuracy and Brier score while escalating only non-singleton or high-hesitation items.
+- **Limitations and Scope Boundaries**: Split conformal marginal coverage (`1 - alpha`) assumes exchangeability between calibration and test folds; under severe class-rarity or covariate shift, use Mondrian or likelihood-ratio weighted conformal calibration (`run_mdm_bench.py`).
+
 ## Reproducibility Command
 
 ```bash

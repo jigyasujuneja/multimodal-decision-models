@@ -756,6 +756,11 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Scope Boundaries, Trade-Offs, and Limitations",
+            "",
+            "- **Pareto Trade-Off Takeaway**: Out-of-fold pre-fusion RAPS cascades (`conformal.py`) outperform standalone Stage-1 models on accuracy and Brier score while escalating only non-singleton or high-hesitation items.",
+            "- **Limitations and Scope Boundaries**: Split conformal marginal coverage (`1 - alpha`) assumes exchangeability between calibration and test folds; under severe class-rarity or covariate shift, use Mondrian or likelihood-ratio weighted conformal calibration (`run_mdm_bench.py`).",
+            "",
             "## Reproducibility Command",
             "",
             "```bash",

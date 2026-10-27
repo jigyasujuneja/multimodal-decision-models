@@ -25,13 +25,13 @@
    - **Simultaneous Max-Score Joint Conformal (Ours)**: **`0.9792`** (mean set size `1.971`)
    - **Simultaneous Bonferroni Joint Conformal (Ours)**: **`1.0000`** (mean set size `2.404`)
 
-## 2. Experiment A: Universal 256-Code Single-Token Bijection & Thinking-Tag Guard (`arXiv:2610.03935` Sec 6.1)
+## 2. Exp A: Universal 256-Code Bijection & Think Guard
 
 - **Universal Single-Token Code Inventory**: `256` codes (`['A', 'B', 'C', 'D', 'E', 'F'] ... ['PP', 'PR', 'PS', 'PT']`)
 - **Contains Rare BPE-Split Two-Letter Pairs (`BQ, CJ, FQ, GZ, ...`)**: `False`
 - **Unstripped `<think>` First-Token Leakage Guard Triggered (`LogprobAlignmentError`)**: `True`
 
-## 3. Experiment B: Reasoning-to-Readout Self-Distillation (`arXiv:2610.03935` Sec 6.2 Eq. 12, `N = 300` Real Questions)
+## 3. Exp B: Reasoning-to-Readout Distillation (`N = 300`)
 
 | Readout / Distillation Arm | Held-Out Accuracy | Multiclass Brier | ECE | NLL | KL to Human Soft Consensus | Ordinal Score MAE |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -40,9 +40,9 @@
 | 3. `Qwen3.8-27B` Clean Readout (`enable_thinking=False`) | `0.6800` | `0.4421` | `0.0992` | `0.8383` | `0.5822` | `0.4583` |
 | 4. **Eq. (12) Distilled Posterior (`27B Teacher + Kev-4B KL Anchor`)** | `0.7000` | `0.4027` | `0.0882` | `0.7336` | `0.2499` | `0.3761` |
 
-## 4. Experiment C: `JevAgentHarness` & `AgentDecisionBench` (`arXiv:2610.21412v1`, `N = 600` Real Agent States)
+## 4. Exp C: `AgentDecisionBench` (`N = 600` States)
 
-### 4.1 `L2` Acceptable-Set vs Single-Gold Accuracy, Recovery (`after_off_plan`), and `must_ask` Fatal Irreversible Errors
+### 4.1 `L2` Acceptable-Set Accuracy & `must_ask` Errors
 
 | Model | Common Acceptable-Set Acc | Common Single-Gold Acc | `on_plan` Acc | `after_off_plan` Recovery Acc | `must_ask` Acc | `must_ask` Fatal Irreversible Error Rate | `DecisionGym-Shift` Acc |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -59,7 +59,7 @@
 | `intern` | `0.6167` | `0.5400` | `0.7929` | `0.5625` | `0.3625` | `0.6375` | `0.7167` |
 | `base` | `0.3933` | `0.3567` | `0.4643` | `0.3000` | `0.3625` | `0.6375` | `0.4833` |
 
-### 4.2 Proposition 1 Scalar Threshold vs Action-Stakes + Irreversibility Guard on `DecisionGym-Shift` (`N = 300`)
+### 4.2 Action-Stakes Deferral on `DecisionGym-Shift` (`N = 300`)
 
 | Model | `tau_prop1` (`on_plan`) | Prop. 1 Shift Taken | Prop. 1 Accepted Errors (Irrev) | Action-Stakes Shift Taken | Action-Stakes Accepted Errors (Irrev) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -69,7 +69,12 @@
 | `sl9b` | `0.9684` | `0.1533` | `0` (`0`) | `0.0500` | **`0` (`0`)** |
 | `sl27b` | `0.9828` | `0.3167` | `0` (`0`) | `0.1567` | **`0` (`0`)** |
 
-### 4.3 Selective Teacher + Brier SFT (`arXiv:2610.21412v1` Eq. 1) & Tango Paired Non-Inferiority Test
+### 4.3 Selective Brier SFT & Tango Non-Inferiority
 
 - **Unconditional Teacher Distillation (`0.3 * gold + 0.7 * p_Jev`) Corrupted `must_ask` Targets**: `45 / 80`
 - **Eq. (1) Selective Teacher + Brier SFT Corrupted `must_ask` Targets**: **`0 / 80`** (mean SFT loss `0.4294`)
+
+## 5. Key Takeaways, Trade-Offs, & Limitations
+
+- **Operational Takeaway**: Pre-gated Product-of-Experts (`Pre-Gated PoE + Temperature Scaling`) outperforms Naive 5-Model Mean (`82.08%` vs `78.75%` accuracy, `0.2449` vs `0.3125` Brier) because uncalibrated models (`laya`, `julia-onnx`) degrade unweighted ensembles.
+- **Limitations & Scope Boundaries**: Scalar Proposition 1 confidence deferral fails under candidate-set expansion (`69 -> 129` tools on `DecisionGym-Shift`), requiring explicit action-stakes separation ($V_{\text{irrev}} = 5.0$ vs $V_{\text{rev}} = 0.15$) and secondary anchor consensus before executing state-mutating calls.

@@ -1,10 +1,23 @@
 # Practical Multimodal Decision Workflows ("How I AI" Cookbook)
 
-This guide documents 8 end-to-end production decision workflows implemented in [`examples/how_i_ai_workflows.py`](../examples/how_i_ai_workflows.py) and evaluated across the 400-item [`MDM-Bench`](../benchmarks/results/mdm_bench_report.md) suite. Every workflow runs with zero external dependencies and supports plug-and-play swapping across `DgemSystemOneBackend` (DecisionGemma / `Microsoft-Decision-1` `/v1/systemone` endpoints), `VertexGeminiBackend`, `OpenAILogprobBackend`, and `BlackBoxSampledBackend`.
+This guide documents 10 end-to-end production decision workflows implemented in [`examples/how_i_ai_workflows.py`](../examples/how_i_ai_workflows.py) and [`benchmarks/run_real_public_benchmarks.py`](../benchmarks/run_real_public_benchmarks.py), and evaluated across the 400-item [`MDM-Bench`](../benchmarks/results/mdm_bench_report.md) and [`Real Public Benchmark`](../benchmarks/results/real_public_bench_report.md) suites. Every workflow runs on 100% real model probability receipts and real decoded PNG fixtures with zero external dependencies and zero synthetic fallbacks.
 
 ```bash
 PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 ```
+
+| Workflow Recipe | Primary Primitives | Core Failure Mode Resolved | Real-Data Verification ($N = 400$ `MDM-Bench` / Public Suites) |
+| :--- | :--- | :--- | :--- |
+| **1. Large-Catalog MCP Tool Routing** | `build_prefix_taxonomy_trie`, `calibrate_mondrian_conformal_quantiles` | $K > 26$ option limit & rare-tool conformal under-coverage | Lifts rare-tail coverage from `58.75%` (marginal RAPS) to **`88.75%`** ($\alpha = 0.10$) |
+| **2. Multi-Hop RAG & IPI Firewall** | `sanitize_untrusted_text`, `wrap_untrusted_state`, `pre_gated_bayesian_poe_fusion` | Indirect prompt injection & retrieval prior over-smoothing | Neutralizes line-leading override payloads (`0.00%` `ASR@1` on $N = 220$) |
+| **3. GUI Set-of-Marks (`SoM`) Grounding** | `assign_box_to_grid_4x4`, `safe_expected_mark_center`, `compute_visual_blink_bounding_box` | Bimodal probability centroid landing in dead UI background | Snaps deterministically to modal button (`18.1, 50.0` on real `1000x1000` PNG) |
+| **4. 10,000-SKU Shelf & Pack Audit** | `compile_dual_buffer_contact_sheet`, `apply_layer5_deterministic_guards` | Stage-2A color distortion & sister multipack confusion (`1x330ml` vs `6x330ml`) | Compiles `12,124`-byte dual-buffer PNG sheet & switches sister SKU (`sku_006`) |
+| **5. 8-Slot Coding Context Compaction** | `build_context_pruning_questions`, `prune_agent_context_blocks` | Duplicate stack traces crowding out orthogonal git-blame & config blocks | Lifts root-cause facet recall from `66.67%` to **`78.67%`** at `61.17%` token reduction |
+| **6. Transitive Entity & Swarm Locks** | `project_triangles_to_transitive_consistency`, `arbitrate_swarm_locks` | Intransitive 3-cycles ($A=B, B=C, A \ne C$) & concurrent worker lock collisions | Eliminates **`50 -> 0`** 3-cycles across 50 real graphs (`71.43% -> 91.43%` edge acc) |
+| **7. `PriDe` Debiased Judge Rubric** | `debiased_cyclic_permutation_probs`, `option_permutation_stability` | `[A-Z]` slot-0 position bias flipping judge winners under permutation | Cuts permutation flip rate from `10.25%` to **`6.50%`** (`0.4286 -> 0.4136` Brier) |
+| **8. `LTT` Safety & Joint Multi-Slot** | `calibrate_ltt_funnel_gates`, `calibrate_multislot_joint_conformal` | Heuristic cascade risk & $S$-slot family-wise error compounding | Bounds risk at $\text{UCB} = 0.0922 \le 0.14$ & restores 4-slot coverage (`68.00% -> 90.25%`) |
+| **9. 255-Code & `<think>` Distillation** | `build_extended_255_code_bijection`, `reasoning_to_readout_distillation_loss` | Multi-token BPE splits (`BQ -> B+Q`) & `<think>` prefix logprob collapse | `255/255` single-token BPE parity & `-57.1%` human-consensus KL (`0.5822 -> 0.2499`) |
+| **10. Action-Stakes Agent Delegation** | `fit_trajectory_delegation_threshold`, `selective_teacher_brier_sft_loss` | Irreversible tool calls on `must_ask` states & teacher-error KD target corruption | `0` irreversible errors on `rl` (`44 -> 4` on `e14a`) & `0 / 80` corrupted `must_ask` targets |
 
 ## 1. Large-Catalog MCP & API Tool Routing (`agent_tool_trie_routing`)
 
@@ -12,7 +25,7 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 * **Solution**:
   1. Pack the tool catalog into a 2-level `<= 26 x <= 26` prefix taxonomy trie via `build_prefix_taxonomy_trie` and decode exact valid root-to-leaf paths via `trie_constrained_joint_decode`.
   2. Calibrate group-conditional Mondrian RAPS thresholds via `calibrate_mondrian_conformal_quantiles` separating frequent read-only tools (`"head"`) from high-privilege mutating/IAM tools (`"tail"`).
-* **MDM-Bench Verification**: Mondrian RAPS raises rare-tail coverage from `62.50%` (marginal RAPS) to `92.50%` at $\alpha = 0.10$.
+* **MDM-Bench Verification**: Mondrian RAPS and weighted conformal prediction raise rare-tail coverage from `58.75%` (marginal RAPS) to `88.75%` (overall `96.00%` and `97.75%`) at $\alpha = 0.10$.
 
 ## 2. Multi-Hop RAG Reranking & Indirect Prompt Injection Firewall (`rag_rerank_and_ipi_firewall`)
 
@@ -42,7 +55,7 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 * **Solution**:
   1. Score up to 8 context blocks per pass over `{"full", "stub", "drop"}` via `build_context_pruning_questions`.
   2. Solve the submodular facility-location Multiple-Choice Knapsack Problem via `prune_agent_context_blocks(..., redundancy_penalty_weight=0.70)`, discounting blocks whose token-shingle Jaccard similarity overlaps already-retained full/stub blocks while respecting `pinned=True` system blocks.
-* **MDM-Bench Verification**: Submodular MCKP raises multi-facet root-cause recall (`{stack_trace, git_blame, config_env}`) from `66.7%` (additive MCKP) to `100.0%` at `43.4%` token reduction.
+* **MDM-Bench Verification**: Submodular MCKP raises multi-facet root-cause recall (`{stack_trace, config_schema, interface_sig}`) across 50 real `EXP-49` trajectories from `66.67%` (additive MCKP) to `78.67%` at `61.17%` token reduction.
 
 ## 6. Transitive Entity Resolution & Multi-Agent File-Lock Arbitration (`relational_entity_and_swarm_locks`)
 
@@ -50,7 +63,7 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 * **Solution**:
   1. Project pairwise equivalence probabilities onto the transitive equivalence polytope via `project_triangles_to_transitive_consistency`, solving exact log-odds correlation clustering on connected components so violated 3-cycles drop to `0`.
   2. Arbitrate concurrent worker file locks in a single pass with `arbitrate_swarm_locks`.
-* **MDM-Bench Verification**: Exact polytope projection eliminates all `50 -> 0` triangle contradictions across 50 noisy entity graphs and improves pairwise edge accuracy from `71.43%` to `100.00%`.
+* **MDM-Bench Verification**: Exact polytope projection eliminates all `50 -> 0` triangle contradictions across 50 real binary receipt entity graphs and improves pairwise edge accuracy from `71.43%` to `91.43%`.
 
 ## 7. Position-Debiased LLM-as-a-Judge Rubric Evaluation (`judge_rubric_calibration`)
 
@@ -58,7 +71,7 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 * **Solution**:
   1. Evaluate cyclic shifts of the candidate option order and factor out the positional prior via `debiased_cyclic_permutation_probs` (`PriDe`, Zheng et al., ICLR 2024).
   2. Audit permutation sensitivity using `option_permutation_stability` (top-1 flip rate, Jensen-Shannon divergence in bits, and total variation distance).
-* **MDM-Bench Verification**: `PriDe` cyclic debiasing reduces option-order top-1 flip rate from `16.25%` to `6.00%` (mean JS divergence from `0.0362` bits to `0.0037` bits) and improves multiclass Brier from `0.2834` to `0.1868`.
+* **MDM-Bench Verification**: `PriDe` cyclic debiasing across 400 real 4-permutation shifts reduces option-order top-1 flip rate from `10.25%` to `6.50%` (mean JS divergence from `0.0525` bits to `0.0225` bits), lifts accuracy from `74.25%` to `75.25%`, and improves multiclass Brier from `0.4286` to `0.4136`.
 
 ## 8. Safety & Policy Guardrails with Learn-then-Test (`LTT`) & Joint Multi-Slot Conformal (`safety_and_policy_guardrail`)
 
@@ -66,7 +79,7 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 * **Solution**:
   1. Jointly calibrate funnel thresholds $(\tau_H, w, T)$ via `calibrate_ltt_funnel_gates`, enforcing the Hoeffding-Bentkus upper confidence bound $\text{UCB}(\lambda) \le r_{\max}$ at confidence $1 - \delta$.
   2. Calibrate simultaneous multi-slot conformal prediction sets via `calibrate_multislot_joint_conformal` and `multislot_joint_conformal_sets`.
-* **MDM-Bench Verification**: Simultaneous 4-slot joint conformal calibration restores family-wise coverage from `66.25%` (uncorrected per-slot RAPS) to `90.50%` (max-score) and `90.75%` (Bonferroni) at $\alpha_{\text{family}} = 0.10$.
+* **MDM-Bench Verification**: Simultaneous 4-slot joint conformal calibration restores family-wise coverage from `68.00%` (uncorrected per-slot RAPS) to `90.25%` (max-score) and `90.50%` (Bonferroni) at $\alpha_{\text{family}} = 0.10$.
 
 ## 9. Universal 255-Code Single-Token Readouts & Reasoning-to-Readout Self-Distillation (`arXiv:2610.03935`)
 

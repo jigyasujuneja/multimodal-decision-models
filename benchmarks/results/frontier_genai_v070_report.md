@@ -44,3 +44,8 @@
 
 - **Effective Ensemble Sample Size ($N_{\text{eff}}$)**: `1.34` (down from nominal $M=6$ due to $4\times$ clone redundancy).
 - **Calibrated Agent Weights**: `intern-decision-4b: 0.0403`, `deem-4b: 0.9597`, each `laya_clone_k: 0.0000`.
+
+## Scope Boundaries, Trade-Offs, & Limitations
+
+- **Mechanism & Trade-Off Takeaway**: Online `BC-ACI` tracks target $1 - \alpha = 0.9000$ coverage under abrupt step-40 distribution shift (`26.0 ms` to `335.0 ms` arm latency envelope), while `PrimalDualParetoBanditRouter` eliminates budget violations (`2.2311 -> 0.0000`) and `covariance_discounted_logit_pool` discounts correlated clones ($N_{\text{eff}} = 1.34$, lifting accuracy from `65.00%` to `77.00%`, $p = 0.0357$).
+- **Limitations**: Inverse-covariance Supra-Bayesian pooling requires a held-out calibration split ($N_{\text{cal}} \ge 30$) to estimate the $M \times M$ logit-residual covariance matrix $\hat{\Sigma}$ before test-time aggregation.
