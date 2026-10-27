@@ -157,25 +157,25 @@ See [`benchmarks/results/real_public_bench_report.md`](benchmarks/results/real_p
 
 ## MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark ($N = 400$)
 
-See [`benchmarks/results/mdm_bench_report.md`](benchmarks/results/mdm_bench_report.md) and [`docs/practical_use_cases.md`](docs/practical_use_cases.md) for the full 8-track breakdown (`agent_tool_trie_routing`, `rag_rerank_and_ipi_firewall`, `gui_som_and_visual_blink`, `visual_catalog_sku_audit`, `coding_context_compaction`, `relational_entity_and_swarm_locks`, `judge_rubric_calibration`, and `safety_and_policy_guardrail`) and out-of-fold ablations for the 6 L8 Research Upgrades:
+See [`benchmarks/results/mdm_bench_report.md`](benchmarks/results/mdm_bench_report.md) and [`docs/practical_use_cases.md`](docs/practical_use_cases.md) for the full 8-track breakdown (`agent_tool_trie_routing`, `rag_rerank_and_ipi_firewall`, `gui_som_and_visual_blink`, `visual_catalog_sku_audit`, `coding_context_compaction`, `relational_entity_and_swarm_locks`, `judge_rubric_calibration`, and `safety_and_policy_guardrail`) and out-of-fold ablations for the 6 Research Upgrades:
 
 | Evaluation Arm | Paradigm | Accuracy | Macro-F1 | Brier (95% Cluster CI) | ECE | AURC | p50 Latency |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **DecisionGemma-2B** | `system1_diffusion_2b` | `84.50%` | `0.8452` | `0.2257` (`[0.1511, 0.2999]`) | `0.0753` | `0.0466` | `14.2 ms` |
-| **Microsoft-Decision-1-Style-9B** | `system1_autoregressive_9b` | `84.75%` | `0.8543` | `0.2121` (`[0.1302, 0.3082]`) | `0.0397` | `0.0463` | `28.7 ms` |
-| **GPT-4o-Mini-Logprob-20Cap** | `frontier_logprob_20cap` | `85.00%` | `0.8547` | `0.2048` (`[0.1175, 0.2992]`) | `0.0589` | `0.0399` | `82.2 ms` |
-| **Claude-3.7-Sonnet-Dirichlet-M5** | `blackbox_dirichlet_m5` | `88.00%` | `0.8849` | `0.1838` (`[0.1201, 0.2544]`) | `0.1466` | `0.0231` | `214.1 ms` |
-| **Gemini-3.8-Flash-Logprob** | `frontier_multimodal_logprob` | `89.00%` | `0.9007` | `0.1490` (`[0.0824, 0.2306]`) | `0.0784` | `0.0187` | `94.1 ms` |
-| **LTT + RAPS Cascade (`DecisionGemma-2B -> Gemini-3.8-Flash`)** | `ltt_conformal_cascade` | **`90.00%`** | **`0.9080`** | **`0.1469`** (`[0.0682, 0.2309]`) | **`0.0309`** | `0.0200` | **`14.7 ms`** |
+| **DecisionGemma-2B** | `system1_diffusion_2b` | `82.50%` | `0.7344` | `0.2463` (`[0.1456, 0.3511]`) | `0.0840` | `0.0459` | `126.7 ms` |
+| **dgem-v0.3.7-SystemOne** | `system1_diffusion_v037` | `79.00%` | `0.6548` | `0.3229` (`[0.2147, 0.4408]`) | `0.1142` | `0.0680` | `220.8 ms` |
+| **Strands-Decider-2B-v19** | `compact_decider_2b` | `66.25%` | `0.5250` | `0.4476` (`[0.3238, 0.5734]`) | `0.0590` | `0.1684` | `128.2 ms` |
+| **Laya-Decision-4B** | `system1_diffusion_4b` | `47.75%` | `0.3283` | `0.6242` (`[0.5255, 0.7279]`) | `0.1398` | `0.3125` | `257.4 ms` |
+| **Gemini-3.8-Flash-Logprob** | `frontier_multimodal_logprob` | `89.00%` | `0.9172` | `0.1613` (`[0.0956, 0.2414]`) | `0.0445` | `0.0402` | `348.9 ms` |
+| **LTT + RAPS Cascade (`DecisionGemma-2B -> Gemini-3.8-Flash`)** | `ltt_conformal_cascade` | **`88.75%`** | **`0.8975`** | **`0.1598`** (`[0.0928, 0.2370]`) | **`0.0390`** | **`0.0376`** | **`128.4 ms`** |
 
-| L8 Research Upgrade (`v0.5.0`) | Baseline Result | Upgraded Result | Verified Guarantee |
+| Research Upgrade (`v0.5.0`) | Baseline Result | Upgraded Result | Verified Guarantee |
 | :--- | :---: | :---: | :--- |
-| **Mondrian & Weighted Conformal (`conformal.py`)** | `62.50%` rare-tail coverage (marginal RAPS) | **`92.50%`** (Mondrian) / **`90.00%`** (Weighted) | Group-conditional & covariate-shift coverage $\ge 1 - \alpha$ |
-| **Multi-Slot Joint Conformal (`conformal.py`)** | `66.25%` 4-slot coverage (independent RAPS) | **`90.50%`** (Max-Score) / **`90.75%`** (Bonferroni) | Simultaneous family-wise coverage across $S=4$ slots |
-| **`PriDe` Cyclic Permutation Debiasing (`calibration.py`)** | `16.25%` flip rate / `0.2834` Brier | **`6.00%` flip rate** / **`0.1868` Brier** (`92.00%` acc) | Removes `[A-Z]` slot-position prior bias across cyclic shifts |
-| **Learn-then-Test (`LTT`) Funnel Gates (`calibration.py`)** | Heuristic threshold ($\tau_H = 0.36$) | **$\text{UCB} = 0.1284 \le 0.14$** (`0.0300` emp risk) | Finite-sample Hoeffding-Bentkus risk control at $67.8\%$ fast-exit |
-| **Submodular Context Pruning (`context_pruner.py`)** | `66.7%` root-cause facet recall (additive MCKP) | **`100.0%` root-cause facet recall** | Token-shingle Jaccard discount suppresses duplicate stack traces |
-| **Transitive Polytope Projection (`consistency.py`)** | `50` violated 3-cycles (`71.43%` edge acc) | **`0` violated 3-cycles** (`100.00%` edge acc) | Exact log-odds correlation clustering on equivalence polytope |
+| **Mondrian & Weighted Conformal (`conformal.py`)** | `58.75%` rare-tail coverage (marginal RAPS) | **`88.75%`** (Mondrian & Weighted; `96.00%` / `97.75%` overall) | Group-conditional & covariate-shift coverage $\ge 1 - \alpha$ |
+| **Multi-Slot Joint Conformal (`conformal.py`)** | `68.00%` 4-slot coverage (independent RAPS) | **`90.25%`** (Max-Score) / **`90.50%`** (Bonferroni) | Simultaneous family-wise coverage across $S=4$ slots |
+| **`PriDe` Cyclic Permutation Debiasing (`calibration.py`)** | `10.25%` flip rate / `0.4286` Brier (`74.25%` acc) | **`6.50%` flip rate** / **`0.4136` Brier** (**`75.25%` acc**) | Removes `[A-Z]` slot-position prior bias across real 4-permutation shifts |
+| **Learn-then-Test (`LTT`) Funnel Gates (`calibration.py`)** | Heuristic threshold ($\tau_H = 0.36$) | **$\text{UCB} = 0.0922 \le 0.14$** (`0.0100` emp risk) | Finite-sample Hoeffding-Bentkus risk control at $47.5\%$ fast-exit |
+| **Submodular Context Pruning (`context_pruner.py`)** | `66.67%` root-cause facet recall (additive MCKP) | **`78.67%` root-cause facet recall** (`61.17%` token reduction) | Token-shingle Jaccard discount suppresses duplicate stack traces on 50 real `EXP-49` trajectories |
+| **Transitive Polytope Projection (`consistency.py`)** | `50` violated 3-cycles (`71.43%` edge acc) | **`0` violated 3-cycles** (**`91.43%` edge acc**) | Exact log-odds correlation clustering on 50 real binary receipt entity graphs |
 
 ## Frontier GenAI Suite (`v0.7.0`, $N = 400$ Deterministic Instances)
 

@@ -15,7 +15,7 @@
 
 """Frontier GenAI v0.7.0 Benchmark Runner (400 Deterministic Instances across 4 Pillars).
 
-Evaluates the four L8 GenAI Frontier upgrades on 100% deterministic instances derived from
+Evaluates the four GenAI Frontier upgrades on 100% deterministic instances derived from
 committed real decision-model receipts (`benchmarks/data/real_public_decisionbench_typed_receipts.jsonl`
 and `benchmarks/data/real_arxiv2610_distillation_receipts.jsonl`):
   - Pillar 1 (100 instances): Online Bias-Corrected Adaptive Conformal Inference (BC-ACI)

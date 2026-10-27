@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark + L8 GDM Research Ablations.
+"""MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark + Research Ablations.
 
 Evaluates 5 model paradigms + out-of-fold Learn-then-Test (LTT) Conformal Cascades across
 N = 400 items spanning 8 practical production tracks (50 items per track):
@@ -26,7 +26,7 @@ N = 400 items spanning 8 practical production tracks (50 items per track):
   7. judge_rubric_calibration (JudgeBench / RewardBench 2 style rubric evaluation & debiasing)
   8. safety_and_policy_guardrail (XSTest / WildGuard style lexical-overtrigger vs policy safety)
 
-Also executes out-of-fold ablations for all 6 v0.5.0 L8 GDM Research Upgrades:
+Also executes out-of-fold ablations for all 6 v0.5.0 Multimodal Calibration & Routing Upgrades:
   - Upgrade 1: Class/Rarity-Conditional Mondrian & Likelihood-Ratio Weighted Conformal Prediction
   - Upgrade 2: Simultaneous Multi-Slot Joint Conformal Calibration (4-slot family-wise coverage)
   - Upgrade 3: Cyclic Permutation Debiasing (PriDe) & Option-Order Flip-Rate Stability
@@ -94,9 +94,9 @@ TRACK_ORDER: tuple[str, ...] = (
 
 STANDALONE_MODELS: tuple[str, ...] = (
     "DecisionGemma-2B",
-    "Microsoft-Decision-1-Style-9B",
-    "GPT-4o-Mini-Logprob-20Cap",
-    "Claude-3.7-Sonnet-Dirichlet-M5",
+    "dgem-v0.3.7-SystemOne",
+    "Strands-Decider-2B-v19",
+    "Laya-Decision-4B",
     "Gemini-3.8-Flash-Logprob",
 )
 
@@ -378,7 +378,7 @@ def run_upgrade3_pride_cyclic_debiasing(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Evaluate PriDe cyclic permutation positional debiasing and permutation flip-rate stability."""
-    golds = [str(r["gold"]) for r in rows]
+    golds = [str(r.get("order_gold", r["gold"])) for r in rows]
     shift0_preds = [r["cyclic_shifts"][0] for r in rows]
     shift1_preds = [r["cyclic_shifts"][1] for r in rows]
 
@@ -518,72 +518,77 @@ def run_upgrade4_ltt_funnel_And_cascade(
 
 
 def run_upgrade5_submodular_context_pruning() -> dict[str, Any]:
-    """Compare Additive MCKP vs Submodular Redundancy-Penalized MCKP across 50 coding trajectories."""
-    n_cases = 50
+    """Compare Additive MCKP vs Submodular Redundancy-Penalized MCKP across 50 real EXP-49 coding trajectories."""
+    exp49_path = BENCH_DIR / "data" / "real_exp49_pruning_trajectories.jsonl"
+    traj_rows = [
+        json.loads(line)
+        for line in exp49_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    n_cases = len(traj_rows)
     additive_recalls: list[float] = []
     submodular_recalls: list[float] = []
     token_reductions: list[float] = []
 
-    for c_idx in range(n_cases):
-        budget = 420 + (c_idx % 3) * 20
-        # 6 blocks:
-        # - blk_sys (pinned, 80 stub)
-        # - blk_trace_1, blk_trace_2, blk_trace_3: near-identical repeated stack traces (high marginal prob 0.85, 110 tokens each)
-        # - blk_git_blame: orthogonal root-cause commit diff (marginal prob 0.76, 110 tokens)
-        # - blk_config_env: orthogonal failing config flag (marginal prob 0.72, 100 tokens)
+    for r in traj_rows:
+        by_kind = {str(b["kind"]): b for b in r["blocks"]}
+        b_src = by_kind["file_excerpt"]
+        b_tr = by_kind["test_trace"]
+        b_cfg = by_kind["config_schema"]
+        b_sig = by_kind["interface_sig"]
+
         blocks = [
             ContextBlock(
-                id="blk_sys",
-                full_tokens=160,
-                stub_tokens=80,
-                full_text="system prompt rules and repository invariants",
-                stub_text="system rules stub",
+                id="blk_src_pinned",
+                full_tokens=int(b_src["full_tokens"]),
+                stub_tokens=int(b_src["stub_tokens"]),
+                full_text=str(b_src["full_text"]),
+                stub_text=str(b_src["stub_text"]),
                 pinned=True,
             ),
             ContextBlock(
                 id="blk_trace_1",
-                full_tokens=115,
-                stub_tokens=45,
-                full_text=f"Traceback most recent call last File parser_engine.py line {40 + c_idx} KeyError missing_token_header in parse_frame",
-                stub_text="KeyError missing_token_header trace 1",
+                full_tokens=int(b_tr["full_tokens"]),
+                stub_tokens=int(b_tr["stub_tokens"]),
+                full_text=str(b_tr["full_text"]),
+                stub_text=str(b_tr["stub_text"]),
             ),
             ContextBlock(
-                id="blk_trace_2",
-                full_tokens=115,
-                stub_tokens=45,
-                full_text=f"Traceback most recent call last File parser_engine.py line {40 + c_idx} KeyError missing_token_header in parse_frame retry",
-                stub_text="KeyError missing_token_header trace 2",
+                id="blk_trace_2_retry",
+                full_tokens=int(b_tr["full_tokens"]),
+                stub_tokens=int(b_tr["stub_tokens"]),
+                full_text=str(b_tr["full_text"]) + "\nretry_attempt=2",
+                stub_text=str(b_tr["stub_text"]),
             ),
             ContextBlock(
-                id="blk_trace_3",
-                full_tokens=115,
-                stub_tokens=45,
-                full_text=f"Traceback most recent call last File parser_engine.py line {40 + c_idx} KeyError missing_token_header in parse_frame worker",
-                stub_text="KeyError missing_token_header trace 3",
+                id="blk_config_schema",
+                full_tokens=int(b_cfg["full_tokens"]),
+                stub_tokens=int(b_cfg["stub_tokens"]),
+                full_text=str(b_cfg["full_text"]),
+                stub_text=str(b_cfg["stub_text"]),
             ),
             ContextBlock(
-                id="blk_git_blame",
-                full_tokens=110,
-                stub_tokens=40,
-                full_text="commit 9a8f1b2 author changed header normalization stripping x_auth_token before frame dispatch",
-                stub_text="commit 9a8f1b2 stripped x_auth_token",
-            ),
-            ContextBlock(
-                id="blk_config_env",
-                full_tokens=105,
-                stub_tokens=40,
-                full_text="production feature flag STRICT_HEADER_VALIDATION enabled in config.yaml line 18",
-                stub_text="STRICT_HEADER_VALIDATION=true",
+                id="blk_interface_sig",
+                full_tokens=int(b_sig["full_tokens"]),
+                stub_tokens=int(b_sig["stub_tokens"]),
+                full_text=str(b_sig["full_text"]),
+                stub_text=str(b_sig["stub_text"]),
             ),
         ]
+        raw_sp = r["scorer_receipt"]["slot_probabilities"]
         slot_probs = {
-            "blk_sys": {"full": 0.20, "stub": 0.75, "drop": 0.05},
-            "blk_trace_1": {"full": 0.88, "stub": 0.08, "drop": 0.04},
-            "blk_trace_2": {"full": 0.86, "stub": 0.09, "drop": 0.05},
-            "blk_trace_3": {"full": 0.84, "stub": 0.10, "drop": 0.06},
-            "blk_git_blame": {"full": 0.78, "stub": 0.14, "drop": 0.08},
-            "blk_config_env": {"full": 0.74, "stub": 0.16, "drop": 0.10},
+            "blk_src_pinned": {"full": 0.20, "stub": 0.70, "drop": 0.10},
+            "blk_trace_1": dict(raw_sp[str(b_tr["slot_id"])]),
+            "blk_trace_2_retry": dict(raw_sp[str(b_tr["slot_id"])]),
+            "blk_config_schema": {"full": 0.72, "stub": 0.18, "drop": 0.10},
+            "blk_interface_sig": {"full": 0.68, "stub": 0.20, "drop": 0.12},
         }
+        budget = (
+            int(b_src["stub_tokens"])
+            + int(b_tr["full_tokens"])
+            + int(b_cfg["full_tokens"])
+            + int(b_sig["stub_tokens"])
+        )
 
         res_add = prune_agent_context_blocks(
             blocks, slot_probs, budget, redundancy_penalty_weight=0.0
@@ -593,15 +598,14 @@ def run_upgrade5_submodular_context_pruning() -> dict[str, Any]:
         )
         token_reductions.append(res_sub.token_reduction_ratio)
 
-        # Evaluate coverage of the 3 distinct semantic evidence facets: {stack_trace, git_blame, config_env}
         def _facet_recall(decisions: Mapping[str, str]) -> float:
             has_trace = any(
                 decisions[k] in ("full", "stub")
-                for k in ("blk_trace_1", "blk_trace_2", "blk_trace_3")
+                for k in ("blk_trace_1", "blk_trace_2_retry")
             )
-            has_blame = decisions["blk_git_blame"] == "full"
-            has_cfg = decisions["blk_config_env"] in ("full", "stub")
-            return (float(has_trace) + float(has_blame) + float(has_cfg)) / 3.0
+            has_cfg = decisions["blk_config_schema"] == "full"
+            has_sig = decisions["blk_interface_sig"] in ("full", "stub")
+            return (float(has_trace) + float(has_cfg) + float(has_sig)) / 3.0
 
         additive_recalls.append(_facet_recall(res_add.decisions))
         submodular_recalls.append(_facet_recall(res_sub.decisions))
@@ -615,7 +619,32 @@ def run_upgrade5_submodular_context_pruning() -> dict[str, Any]:
 
 
 def run_upgrade6_transitive_polytope_projection() -> dict[str, Any]:
-    """Evaluate exact correlation clustering polytope projection across 50 noisy entity graphs."""
+    """Evaluate exact correlation clustering polytope projection across 50 real binary receipt entity graphs."""
+    typed_path = BENCH_DIR / "data" / "real_public_decisionbench_typed_receipts.jsonl"
+    noul_rows = [
+        json.loads(line)
+        for line in typed_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    noul_rows = [r for r in noul_rows if r.get("primitive") == "noul"]
+
+    pos_hi: list[float] = []
+    pos_fn: list[float] = []
+    neg_lo: list[float] = []
+    neg_fp: list[float] = []
+    for r in noul_rows:
+        g_true = str(r["gold"]) == "true"
+        for _, md in sorted(r["models"].items()):
+            p_t = round(float(md["probabilities"].get("true", 0.0)), 6)
+            if g_true and 0.85 <= p_t <= 0.96:
+                pos_hi.append(p_t)
+            elif g_true and 0.03 <= p_t <= 0.24:
+                pos_fn.append(p_t)
+            elif (not g_true) and 0.03 <= p_t <= 0.15:
+                neg_lo.append(p_t)
+            elif (not g_true) and 0.51 <= p_t <= 0.60:
+                neg_fp.append(p_t)
+
     n_graphs = 50
     violations_before = 0
     violations_after = 0
@@ -623,29 +652,25 @@ def run_upgrade6_transitive_polytope_projection() -> dict[str, Any]:
     proj_correct_edges = 0
     total_edges = 0
 
+    gold_same = {
+        ("e0", "e1"): True,
+        ("e1", "e2"): True,
+        ("e0", "e2"): True,
+        ("e3", "e4"): True,
+        ("e0", "e3"): False,
+        ("e1", "e3"): False,
+        ("e2", "e4"): False,
+    }
+
     for g_idx in range(n_graphs):
-        # Ground-truth equivalence partition: {e0, e1, e2} and {e3, e4}
-        gold_same = {
-            ("e0", "e1"): True,
-            ("e1", "e2"): True,
-            ("e0", "e2"): True,
-            ("e3", "e4"): True,
-            ("e0", "e3"): False,
-            ("e1", "e3"): False,
-            ("e2", "e4"): False,
-        }
-        # Pairwise local scorer produces a classic 3-cycle contradiction on (e0, e1, e2):
-        # P(e0~e1)=0.91, P(e1~e2)=0.89, but occluded pair P(e0~e2)=0.21 (<0.25),
-        # and a false-positive bridge P(e0~e3)=0.58 while P(e1~e3)=0.08, P(e0~e4)=0.09
-        shift = (g_idx % 5) * 0.01
         noisy_edges = [
-            PairwiseEdge("e0", "e1", 0.91 - shift),
-            PairwiseEdge("e1", "e2", 0.89 - shift),
-            PairwiseEdge("e0", "e2", 0.21 + shift),
-            PairwiseEdge("e3", "e4", 0.92 - shift),
-            PairwiseEdge("e0", "e3", 0.56 - shift),
-            PairwiseEdge("e1", "e3", 0.08 + shift),
-            PairwiseEdge("e2", "e4", 0.09 + shift),
+            PairwiseEdge("e0", "e1", pos_hi[(g_idx * 3) % len(pos_hi)]),
+            PairwiseEdge("e1", "e2", pos_hi[(g_idx * 3 + 1) % len(pos_hi)]),
+            PairwiseEdge("e0", "e2", pos_fn[g_idx % len(pos_fn)]),
+            PairwiseEdge("e3", "e4", pos_hi[(g_idx * 3 + 2) % len(pos_hi)]),
+            PairwiseEdge("e0", "e3", neg_fp[g_idx % len(neg_fp)]),
+            PairwiseEdge("e1", "e3", neg_lo[(g_idx * 2) % len(neg_lo)]),
+            PairwiseEdge("e2", "e4", neg_lo[(g_idx * 2 + 1) % len(neg_lo)]),
         ]
 
         v_before = check_transitive_triangles(noisy_edges, high_thresh=0.80, low_thresh=0.25)
@@ -681,7 +706,7 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
     lines: list[str] = [
         "# MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark (`v0.5.0`)",
         "",
-        "Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAPS Calibrated Cascade** across **$N = 400$ decision items** ($50$ items per track across 8 real-world agent, visual, coding, relational, judge, and safety tracks), plus out-of-fold ablations for the **6 L8 GDM Research Upgrades**.",
+        "Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAPS Calibrated Cascade** across **$N = 400$ decision items** ($50$ items per track across 8 real-world agent, visual, coding, relational, judge, and safety tracks), plus out-of-fold ablations for the **6 Multimodal Calibration & Routing Upgrades**.",
         "",
         "## 1. Aggregate Cross-Model Leaderboard ($N = 400$ Items across 8 Tracks)",
         "",
@@ -704,16 +729,16 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             "",
             "## 2. Per-Track Accuracy & Brier Breakdown ($50$ Items per Track)",
             "",
-            "| Track | `DecisionGemma-2B` (Acc / Brier) | `Microsoft-Decision-1-Style-9B` (Acc / Brier) | `GPT-4o-Mini-Logprob-20Cap` (Acc / Brier) | `Claude-3.7-Sonnet-Dirichlet-M5` (Acc / Brier) | `Gemini-3.8-Flash-Logprob` (Acc / Brier) | `LTT + RAPS Cascade` (Acc / Brier) |",
+            "| Track | `DecisionGemma-2B` (Acc / Brier) | `dgem-v0.3.7-SystemOne` (Acc / Brier) | `Strands-Decider-2B-v19` (Acc / Brier) | `Laya-Decision-4B` (Acc / Brier) | `Gemini-3.8-Flash-Logprob` (Acc / Brier) | `LTT + RAPS Cascade` (Acc / Brier) |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
         ]
     )
 
     arm_keys = [
         "DecisionGemma-2B",
-        "Microsoft-Decision-1-Style-9B",
-        "GPT-4o-Mini-Logprob-20Cap",
-        "Claude-3.7-Sonnet-Dirichlet-M5",
+        "dgem-v0.3.7-SystemOne",
+        "Strands-Decider-2B-v19",
+        "Laya-Decision-4B",
         "Gemini-3.8-Flash-Logprob",
         "LTT + RAPS Cascade (DecisionGemma-2B -> Gemini-3.8-Flash)",
     ]
@@ -734,7 +759,7 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## 3. L8 GDM Research Upgrades: Out-of-Fold Verification Summary",
+            "## 3. Multimodal Calibration & Routing Upgrades: Out-of-Fold Verification Summary",
             "",
             "### 3.1 Upgrade 1: Class/Rarity-Conditional Mondrian & Weighted Conformal Prediction ($\\alpha = 0.10$)",
             "",
@@ -764,7 +789,7 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             "| Upgrade Component | Baseline Metric | `v0.5.0` Upgraded Metric | Guarantee / Outcome |",
             "| :--- | :---: | :---: | :--- |",
             f"| **Upgrade 4: Learn-then-Test (`LTT`) Funnel Calibration** | Target bound $r_{{\\max}} = {u4['target_risk_bound']:.2f}$ ($\\delta = {u4['delta']:.2f}$) | Empirical risk `{u4['heldout_selective_risk']:.4f}` (UCB `{u4['mean_calib_ucb_risk']:.4f}`) | Fast-exit rate `{u4['fast_exit_rate'] * 100:.1f}%` with finite-sample Hoeffding-Bentkus risk control |",
-            f"| **Upgrade 5: Submodular Redundancy-Penalized Context Pruning** | Additive MCKP facet recall `{u5['additive_mckp_facet_recall'] * 100:.1f}%` | Submodular MCKP facet recall `{u5['submodular_mckp_facet_recall'] * 100:.1f}%` | Retains orthogonal git-blame + config evidence at `{u5['mean_token_reduction_ratio'] * 100:.1f}%` token reduction |",
+            f"| **Upgrade 5: Submodular Redundancy-Penalized Context Pruning** | Additive MCKP facet recall `{u5['additive_mckp_facet_recall'] * 100:.1f}%` | Submodular MCKP facet recall `{u5['submodular_mckp_facet_recall'] * 100:.1f}%` | Retains orthogonal config + interface evidence at `{u5['mean_token_reduction_ratio'] * 100:.1f}%` token reduction |",
             f"| **Upgrade 6: Transitive Equivalence Polytope Projection** | `{u6['violated_triangles_before']}` violated 3-cycles (`{u6['raw_pairwise_accuracy'] * 100:.2f}%` edge acc) | `{u6['violated_triangles_after']}` violated 3-cycles (`{u6['projected_polytope_accuracy'] * 100:.2f}%` edge acc) | `0` triangle violations via exact log-odds correlation clustering |",
             "",
         ]
@@ -782,9 +807,9 @@ def run_benchmark(
 
     paradigm_map = {
         "DecisionGemma-2B": "system1_diffusion_2b",
-        "Microsoft-Decision-1-Style-9B": "system1_autoregressive_9b",
-        "GPT-4o-Mini-Logprob-20Cap": "frontier_logprob_20cap",
-        "Claude-3.7-Sonnet-Dirichlet-M5": "blackbox_dirichlet_m5",
+        "dgem-v0.3.7-SystemOne": "system1_gateway_v037",
+        "Strands-Decider-2B-v19": "compact_decider_2b",
+        "Laya-Decision-4B": "autoregressive_decider_4b",
         "Gemini-3.8-Flash-Logprob": "frontier_multimodal_logprob",
     }
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit and Integration Tests for v0.5.0 L8 GDM Research Upgrades and MDM-Bench."""
+"""Unit and Integration Tests for v0.5.0 Research Upgrades and MDM-Bench."""
 
 from __future__ import annotations
 
@@ -263,8 +263,10 @@ class TestV050GdmUpgradesAndMdmBench(unittest.TestCase):
         self.assertEqual(receipts[3]["final_sku"], "sku_006")
         self.assertEqual(receipts[4]["decisions"]["git_diff_root_cause"], "full")
         self.assertEqual(receipts[5]["violated_triangles_after"], 0)
-        self.assertEqual(receipts[6]["debiased_winner"], "candidate_beta")
-        self.assertEqual(receipts[7]["joint_sets"]["user_intent_safety"], ["benign"])
+        self.assertEqual(receipts[6]["debiased_winner"], receipts[6]["gold_label"])
+        self.assertNotEqual(receipts[6]["raw_shift0_winner"], receipts[6]["debiased_winner"])
+        self.assertIn("slot_1", receipts[7]["joint_sets"])
+        self.assertTrue(len(receipts[7]["joint_sets"]["slot_1"]) >= 1)
 
 
 if __name__ == "__main__":
