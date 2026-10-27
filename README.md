@@ -177,6 +177,17 @@ See [`benchmarks/results/mdm_bench_report.md`](benchmarks/results/mdm_bench_repo
 | **Submodular Context Pruning (`context_pruner.py`)** | `66.7%` root-cause facet recall (additive MCKP) | **`100.0%` root-cause facet recall** | Token-shingle Jaccard discount suppresses duplicate stack traces |
 | **Transitive Polytope Projection (`consistency.py`)** | `50` violated 3-cycles (`71.43%` edge acc) | **`0` violated 3-cycles** (`100.00%` edge acc) | Exact log-odds correlation clustering on equivalence polytope |
 
+## Frontier GenAI Suite (`v0.7.0`, $N = 400$ Deterministic Instances)
+
+See [`benchmarks/results/frontier_genai_v070_report.md`](benchmarks/results/frontier_genai_v070_report.md) and [`benchmarks/run_frontier_genai_v070_bench.py`](benchmarks/run_frontier_genai_v070_bench.py) for the 4-pillar evaluation beyond static single-step decision models (with full Python and Go parity in [`pkg/mdm/frontier_v070.go`](pkg/mdm/frontier_v070.go)):
+
+| Pillar (`N = 100` each) | Frontier Module & Mechanism | Baseline Metric | `v0.7.0` Frontier Metric | Verified Improvement |
+| :--- | :--- | :---: | :---: | :--- |
+| **Pillar 1: Non-Stationary Online Conformal (`BC-ACI`)** | [`OnlineBCACITracker`](src/multimodal_decision_models/conformal.py), [`evaluate_online_bc_aci_stream`](src/multimodal_decision_models/conformal.py) | Static Split RAPS Post-Shift Cov: `1.0000` (Worst 30-step: `0.8000`) | **Online `BC-ACI` Post-Shift Cov: `0.9000`** (Worst 30-step: **`0.8333`**) | Tracks exact $1-\alpha = 0.90$ target under abrupt step-40 shift without exchangeability |
+| **Pillar 2: Primal-Dual Budget-Paced Router (`ParetoBandit`)** | [`PrimalDualParetoBanditRouter`](src/multimodal_decision_models/bandit_router.py), [`evaluate_pareto_bandit_stream`](src/multimodal_decision_models/bandit_router.py) | Static Entropy Cascade Cost: `$0.00582` (`2.2311` budget viol.) | **`ParetoBandit` Cost: `$0.00080`** (**`0.0000`** budget viol.) | **`-86.2%` per-query cost** under discounted LinUCB + Bradley-Terry dueling updates |
+| **Pillar 3: Calibrated `PRM` + Conformal `PUCT` Search** | [`calibrate_prm_horizon_discount`](src/multimodal_decision_models/prm_tree_search.py), [`run_calibrated_prm_puct_search`](src/multimodal_decision_models/prm_tree_search.py) | Unpruned Exhaustive PUCT: `13.00` nodes/tree (`100.0%` acc) | **Conformal Branch-and-Bound PUCT: `7.31` nodes/tree** (**`100.0%`** acc) | **`-43.8%` verifier node evaluations pruned** with `0.0%` accuracy drop |
+| **Pillar 4: Covariance-Discounted Supra-Bayesian Pooling** | [`calibrate_correlated_ensemble_weights`](src/multimodal_decision_models/consistency.py), [`covariance_discounted_logit_pool`](src/multimodal_decision_models/consistency.py) | Naive PoE (`4x` Clone Attack): `65.00%` acc, `1.3044` NLL, `0.2227` ECE | **Supra-Bayesian Pool: `77.00%` acc**, **`0.5773` NLL**, **`0.0893` ECE** | **`+12.0` pts accuracy (`p = 0.0357`)** & **`-55.7%` NLL** ($N_{\text{eff}} = 1.34$ from $M=6$) |
+
 ## Citation
 
 If you use `multimodal-decision-models` in your research or engineering systems, please cite:
