@@ -1,0 +1,132 @@
+{
+  "benchmark_version": "0.7.0",
+  "pillar1_online_bc_aci": {
+    "alpha_target": 0.1,
+    "n_instances": 100,
+    "online_bc_aci": {
+      "empirical_coverage": 0.89,
+      "final_alpha_t": 0.0358,
+      "mean_set_size": 2.94,
+      "post_shift_coverage": 0.9,
+      "rolling_window_worst_coverage": 0.8333,
+      "singleton_rate": 0.02
+    },
+    "standard_aci_no_bias_correction": {
+      "empirical_coverage": 0.89,
+      "final_alpha_t": 0.07,
+      "mean_set_size": 2.84,
+      "post_shift_coverage": 0.9167,
+      "rolling_window_worst_coverage": 0.8333
+    },
+    "static_split_raps": {
+      "empirical_coverage": 0.93,
+      "mean_set_size": 2.99,
+      "post_shift_coverage": 1.0,
+      "rolling_window_worst_coverage": 0.8
+    },
+    "target_coverage": 0.9
+  },
+  "pillar2_primal_dual_pareto_bandit": {
+    "always_heavy_jev": {
+      "mean_cost_usd": 0.0065,
+      "mean_latency_ms": 335.0,
+      "mean_quality": 0.8252
+    },
+    "budget_per_query_usd": 0.0018,
+    "n_instances": 100,
+    "primal_dual_pareto_bandit": {
+      "arm_pull_counts": {
+        "deem-4b": 100,
+        "intern-decision-4b": 0,
+        "julia-onnx": 0,
+        "oracle-poe-27b": 0
+      },
+      "budget_violation_ratio": 0.0,
+      "cumulative_regret": 13.1968,
+      "final_dual_lambda": 0.0,
+      "mean_cost_usd": 0.0008,
+      "mean_latency_ms": 65.0,
+      "mean_quality": 0.7714
+    },
+    "static_entropy_cascade": {
+      "mean_cost_usd": 0.005816,
+      "mean_quality": 0.8241
+    },
+    "unpaced_contextual_linucb": {
+      "arm_pull_counts": {
+        "deem-4b": 100,
+        "intern-decision-4b": 0,
+        "julia-onnx": 0,
+        "oracle-poe-27b": 0
+      },
+      "budget_violation_ratio": 0.0,
+      "mean_cost_usd": 0.0008,
+      "mean_quality": 0.7714
+    }
+  },
+  "pillar3_calibrated_prm_puct_search": {
+    "calibrated_conformal_puct": {
+      "leaf_accuracy": 1.0,
+      "mean_evaluated_nodes": 7.31,
+      "mean_pruned_nodes": 5.69,
+      "pruning_ratio": 0.4377
+    },
+    "calibrated_horizon_discounts": {
+      "1": 1.076858,
+      "2": 1.15,
+      "3": 1.15
+    },
+    "n_instances": 100,
+    "unpruned_exhaustive_puct": {
+      "leaf_accuracy": 1.0,
+      "mean_evaluated_nodes": 13.0,
+      "pruning_ratio": 0.0
+    }
+  },
+  "pillar4_covariance_discounted_ensemble": {
+    "calibrated_weights": {
+      "deem-4b": 0.95973536,
+      "intern-decision-4b": 0.04026464,
+      "laya_clone_1": 0.0,
+      "laya_clone_2": 0.0,
+      "laya_clone_3": 0.0,
+      "laya_clone_4": 0.0
+    },
+    "covariance_discounted_supra_bayesian": {
+      "accuracy": 0.77,
+      "brier": 0.3256,
+      "ece": 0.0893,
+      "nll": 0.5773
+    },
+    "effective_sample_size": 1.337781,
+    "equal_weight_log_pool": {
+      "accuracy": 0.65,
+      "brier": 0.4919,
+      "ece": 0.148,
+      "nll": 0.8499
+    },
+    "mcnemar_vs_naive_poe": {
+      "n01_gains": 8,
+      "n10_losses": 20,
+      "p_value": 0.035698,
+      "significant_at_005": true
+    },
+    "mean_pairwise_correlation": 0.697008,
+    "murphy_skill_scores": {
+      "deem-4b": 4.72741,
+      "intern-decision-4b": 3.91945,
+      "laya_clone_1": 0.89455,
+      "laya_clone_2": 0.89455,
+      "laya_clone_3": 0.89455,
+      "laya_clone_4": 0.89455
+    },
+    "n_instances": 100,
+    "naive_poe_unweighted": {
+      "accuracy": 0.65,
+      "brier": 0.5503,
+      "ece": 0.2227,
+      "nll": 1.3044
+    }
+  },
+  "total_instances": 400
+}

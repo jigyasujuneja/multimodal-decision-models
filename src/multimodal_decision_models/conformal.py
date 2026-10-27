@@ -685,3 +685,269 @@ def multislot_joint_conformal_sets(
             abstain_keys=abstain_keys,
         )
     return out
+
+
+@dataclass(frozen=True)
+class OnlineBCACIResult:
+    """Step-level diagnostic and summary for Online Bias-Corrected Adaptive Conformal Inference (BC-ACI).
+
+    Implements Gibbs & Candes (2021) Adaptive Conformal Inference augmented with online
+    bias-corrected momentum tracking (BC-ACI, 2025-2026) so marginal and rolling coverage
+    converge to 1 - alpha_target under abrupt distribution shifts and adversarial streams
+    without requiring exchangeability.
+    """
+
+    empirical_coverage: float
+    rolling_window_worst_coverage: float
+    mean_set_size: float
+    singleton_rate: float
+    escalation_rate: float
+    final_alpha_t: float
+    alpha_trajectory: tuple[float, ...]
+    q_hat_trajectory: tuple[float, ...]
+    covered_flags: tuple[bool, ...]
+
+
+class OnlineBCACITracker:
+    """Stateful online Bias-Corrected Adaptive Conformal Inference (BC-ACI) tracker.
+
+    Updates the effective miscoverage level alpha_t via online subgradient descent with
+    exponentially smoothed bias-correction momentum:
+        err_t = 1{Y_t not in C_{alpha_t}(X_t)}
+        bar_d_t = (1 - eta_d) * bar_d_{t-1} + eta_d * (err_t - alpha_target)
+        alpha_{t+1} = clip_{[alpha_min, alpha_max]}(
+            alpha_t + gamma * (alpha_target - err_t) - beta * bar_d_t
+        )
+    """
+
+    def __init__(
+        self,
+        alpha_target: float = 0.10,
+        *,
+        gamma: float = 0.05,
+        beta: float = 0.025,
+        eta_d: float = 0.15,
+        window_size: int = 100,
+        method: str = "raps",
+        lam_reg: float = 0.01,
+        k_reg: int = 1,
+        alpha_min: float = 0.001,
+        alpha_max: float = 0.999,
+        initial_scores: Sequence[float] | None = None,
+    ) -> None:
+        if isinstance(alpha_target, bool) or not isinstance(alpha_target, (int, float)) or not math.isfinite(float(alpha_target)) or float(alpha_target) <= 0.0 or float(alpha_target) >= 1.0:
+            raise ValueError(f"alpha_target must lie strictly in (0, 1), got {alpha_target!r}")
+        if isinstance(gamma, bool) or not isinstance(gamma, (int, float)) or not math.isfinite(float(gamma)) or float(gamma) <= 0.0:
+            raise ValueError(f"gamma must be finite and > 0, got {gamma!r}")
+        if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(float(beta)) or float(beta) < 0.0:
+            raise ValueError(f"beta must be finite and >= 0, got {beta!r}")
+        if isinstance(eta_d, bool) or not isinstance(eta_d, (int, float)) or not math.isfinite(float(eta_d)) or float(eta_d) <= 0.0 or float(eta_d) > 1.0:
+            raise ValueError(f"eta_d must lie in (0, 1], got {eta_d!r}")
+        if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size < 5:
+            raise ValueError(f"window_size must be an integer >= 5, got {window_size!r}")
+        clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+
+        self.alpha_target: float = float(alpha_target)
+        self.gamma: float = float(gamma)
+        self.beta: float = float(beta)
+        self.eta_d: float = float(eta_d)
+        self.window_size: int = int(window_size)
+        self.method: str = clean_method
+        self.lam_reg: float = float(lam_reg)
+        self.k_reg: int = int(k_reg)
+        self.alpha_min: float = float(alpha_min)
+        self.alpha_max: float = float(alpha_max)
+
+        self.alpha_t: float = float(alpha_target)
+        self.bias_momentum: float = 0.0
+        self._score_window: list[float] = []
+        if initial_scores is not None:
+            for s in initial_scores:
+                val = float(s)
+                if not math.isfinite(val) or val < 0.0:
+                    raise ValueError(f"initial_scores must be finite and >= 0, got {s!r}")
+                self._score_window.append(val)
+            if len(self._score_window) > self.window_size:
+                self._score_window = self._score_window[-self.window_size :]
+
+    def current_quantile(self) -> float:
+        """Compute current empirical nonconformity quantile q_hat_t from the sliding score window."""
+        if not self._score_window:
+            return 1.0 - self.alpha_t
+        eff_alpha = min(self.alpha_max, max(self.alpha_min, self.alpha_t))
+        if eff_alpha <= self.alpha_min + 1e-9:
+            return float("inf")
+        n = len(self._score_window)
+        sorted_scores = sorted(self._score_window)
+        order_idx = int(math.ceil(float(n + 1) * (1.0 - eff_alpha) - 1e-12))
+        if order_idx > n:
+            return float("inf")
+        pos = max(0, order_idx - 1)
+        q_emp = sorted_scores[pos]
+        # Blend with worst-case structural envelope (1 - eff_alpha) when alpha_t < alpha_target
+        # so abrupt distribution shifts expand C_{alpha_t} without waiting for the entire window to turn over
+        if eff_alpha < self.alpha_target:
+            urgency = min(1.0, (self.alpha_target - eff_alpha) / max(1e-6, self.alpha_target))
+            q_floor = (1.0 - eff_alpha) * urgency
+            return max(q_emp, q_floor)
+        return q_emp
+
+    def predict_set(
+        self,
+        probs: Mapping[str, float],
+        *,
+        abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+    ) -> ConformalSetResult:
+        """Construct the adaptive prediction set C_{alpha_t}(X_t) prior to observing Y_t."""
+        q_hat_t = self.current_quantile()
+        return conformal_prediction_set(
+            probs=probs,
+            q_hat=q_hat_t,
+            method=self.method,
+            lam_reg=self.lam_reg,
+            k_reg=self.k_reg,
+            randomized=False,
+            abstain_keys=abstain_keys,
+        )
+
+    def observe_and_update(
+        self,
+        probs: Mapping[str, float],
+        gold_label: str,
+        *,
+        abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+    ) -> tuple[ConformalSetResult, bool, float]:
+        """Predict C_{alpha_t}(X_t), observe gold_label Y_t, append score s_t, and update alpha_{t+1}."""
+        set_res = self.predict_set(probs, abstain_keys=abstain_keys)
+        gold = str(gold_label)
+        ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
+        if gold not in norm_probs:
+            raise ValueError(f"gold_label {gold!r} not present in option probabilities")
+
+        item_scores = _compute_all_nonconformity_scores(
+            ranked_keys,
+            norm_probs,
+            self.method,
+            self.lam_reg,
+            self.k_reg,
+            randomized=False,
+        )
+        score_t = item_scores[gold]
+        covered = gold in set_res.prediction_set
+        err_t = 0.0 if covered else 1.0
+
+        # Online bias-corrected subgradient update
+        self.bias_momentum = (1.0 - self.eta_d) * self.bias_momentum + self.eta_d * (err_t - self.alpha_target)
+        raw_next_alpha = (
+            self.alpha_t
+            + self.gamma * (self.alpha_target - err_t)
+            - self.beta * self.bias_momentum
+        )
+        # Prevent excessive upward drift of alpha_t during easy stationary runs so abrupt shifts
+        # do not have to burn through a large positive alpha_t buffer before expanding sets
+        max_calm_alpha = min(self.alpha_max, max(self.alpha_target * 1.5, self.alpha_target + 2.0 * self.gamma))
+        self.alpha_t = min(max_calm_alpha, max(self.alpha_min, raw_next_alpha))
+
+        self._score_window.append(score_t)
+        if len(self._score_window) > self.window_size:
+            self._score_window.pop(0)
+
+        return set_res, covered, self.alpha_t
+
+
+def evaluate_online_bc_aci_stream(
+    stream_probs: Sequence[Mapping[str, float]],
+    stream_labels: Sequence[str],
+    alpha_target: float = 0.10,
+    *,
+    warmup_probs: Sequence[Mapping[str, float]] | None = None,
+    warmup_labels: Sequence[str] | None = None,
+    gamma: float = 0.05,
+    beta: float = 0.025,
+    eta_d: float = 0.15,
+    window_size: int = 100,
+    rolling_eval_window: int = 50,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+    abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+) -> OnlineBCACIResult:
+    """Evaluate Online Bias-Corrected Adaptive Conformal Inference (BC-ACI) over a non-stationary stream."""
+    if not stream_probs or len(stream_probs) != len(stream_labels):
+        raise ValueError("stream_probs and stream_labels must be non-empty sequences of equal length")
+    if isinstance(rolling_eval_window, bool) or not isinstance(rolling_eval_window, int) or rolling_eval_window < 1:
+        raise ValueError(f"rolling_eval_window must be >= 1, got {rolling_eval_window!r}")
+    clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+
+    init_scores: list[float] = []
+    if warmup_probs is not None or warmup_labels is not None:
+        if warmup_probs is None or warmup_labels is None or len(warmup_probs) != len(warmup_labels):
+            raise ValueError("warmup_probs and warmup_labels must both be provided with equal length")
+        for idx, (dist, lbl_raw) in enumerate(zip(warmup_probs, warmup_labels)):
+            lbl = str(lbl_raw)
+            ranked_keys, norm_probs, _ = _normalize_and_rank_probs(dist)
+            if lbl not in norm_probs:
+                raise ValueError(f"warmup label {lbl!r} at index {idx} not present in probabilities")
+            s_map = _compute_all_nonconformity_scores(
+                ranked_keys, norm_probs, clean_method, lam_reg, k_reg, randomized=False
+            )
+            init_scores.append(s_map[lbl])
+
+    tracker = OnlineBCACITracker(
+        alpha_target=alpha_target,
+        gamma=gamma,
+        beta=beta,
+        eta_d=eta_d,
+        window_size=window_size,
+        method=clean_method,
+        lam_reg=lam_reg,
+        k_reg=k_reg,
+        initial_scores=init_scores,
+    )
+
+    alpha_traj: list[float] = []
+    q_hat_traj: list[float] = []
+    covered_list: list[bool] = []
+    total_size = 0
+    singleton_count = 0
+    escalate_count = 0
+
+    for dist, gold_raw in zip(stream_probs, stream_labels):
+        alpha_traj.append(tracker.alpha_t)
+        set_res, covered, _ = tracker.observe_and_update(
+            dist, str(gold_raw), abstain_keys=abstain_keys
+        )
+        q_hat_traj.append(set_res.q_hat)
+        covered_list.append(covered)
+        total_size += len(set_res.prediction_set)
+        if set_res.singleton:
+            singleton_count += 1
+        if set_res.should_escalate:
+            escalate_count += 1
+
+    n_total = len(stream_probs)
+    emp_cov = float(sum(1 for c in covered_list if c)) / float(n_total)
+
+    if n_total <= rolling_eval_window:
+        worst_rolling = emp_cov
+    else:
+        worst_rolling = 1.0
+        w = rolling_eval_window
+        running_sum = sum(1 for c in covered_list[:w] if c)
+        worst_rolling = min(worst_rolling, float(running_sum) / float(w))
+        for idx in range(w, n_total):
+            running_sum += (1 if covered_list[idx] else 0) - (1 if covered_list[idx - w] else 0)
+            worst_rolling = min(worst_rolling, float(running_sum) / float(w))
+
+    return OnlineBCACIResult(
+        empirical_coverage=emp_cov,
+        rolling_window_worst_coverage=worst_rolling,
+        mean_set_size=float(total_size) / float(n_total),
+        singleton_rate=float(singleton_count) / float(n_total),
+        escalation_rate=float(escalate_count) / float(n_total),
+        final_alpha_t=tracker.alpha_t,
+        alpha_trajectory=tuple(alpha_traj),
+        q_hat_trajectory=tuple(q_hat_traj),
+        covered_flags=tuple(covered_list),
+    )
+

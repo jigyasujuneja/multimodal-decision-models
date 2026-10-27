@@ -20,8 +20,9 @@ import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
+from .eval_suite import brier_murphy_decomposition
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     PairwiseEdge,
@@ -565,3 +566,234 @@ def arbitrate_swarm_locks(
         winning_agent=winning_agent,
         escalate_to_human=escalate_to_human,
     )
+
+
+@dataclass(frozen=True)
+class CorrelatedEnsembleCalibrationResult:
+    """Covariance-Discounted Supra-Bayesian Multi-Agent Pooling weights and diagnostics.
+
+    Defends against correlated agent errors, model clones, and sycophantic majorities
+    by weighting each agent m using inverse error-correlation matrix R_{reg}^{-1} times
+    Murphy resolution-over-reliability skill s_m = (RES_m + 0.01) / (REL_m + 0.05).
+    """
+
+    agent_ids: tuple[str, ...]
+    weights: dict[str, float]
+    murphy_skill_scores: dict[str, float]
+    effective_sample_size: float
+    mean_pairwise_correlation: float
+    shrinkage_delta: float
+
+
+def _solve_linear_system_dense(matrix: Sequence[Sequence[float]], rhs: Sequence[float]) -> list[float]:
+    m = len(rhs)
+    aug: list[list[float]] = [
+        [float(matrix[i][j]) for j in range(m)] + [float(rhs[i])]
+        for i in range(m)
+    ]
+    for col in range(m):
+        pivot_row = max(range(col, m), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot_row][col]) < 1e-12:
+            aug[col][col] += 1e-6
+            pivot_row = col
+        if pivot_row != col:
+            aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+        piv = aug[col][col]
+        for j in range(col, m + 1):
+            aug[col][j] /= piv
+        for r in range(m):
+            if r == col:
+                continue
+            factor = aug[r][col]
+            if abs(factor) > 1e-15:
+                for j in range(col, m + 1):
+                    aug[r][j] -= factor * aug[col][j]
+    return [aug[i][m] for i in range(m)]
+
+
+def calibrate_correlated_ensemble_weights(
+    calib_agent_probs: Mapping[str, Sequence[Mapping[str, float]]],
+    calib_labels: Sequence[str],
+    *,
+    shrinkage_delta: float = 0.15,
+    num_bins: int = 10,
+) -> CorrelatedEnsembleCalibrationResult:
+    """Calibrate Covariance-Discounted Supra-Bayesian pooling weights across M agents.
+
+    Computes signed error residuals e_{m,i} = 1 - p_{m,i}(y_i^*), estimates the M x M
+    residual correlation matrix R with Ledoit-Wolf shrinkage R_reg = (1 - delta) * R + delta * I,
+    and solves R_reg * u = s where s_m = (RES_m + 0.01) / (REL_m + 0.05).
+    Consequently, K identical clones share weight 1/K rather than multiplying their log-odds by K.
+    """
+    if not calib_agent_probs:
+        raise ValueError("calib_agent_probs must be non-empty")
+    if not calib_labels:
+        raise ValueError("calib_labels must be non-empty")
+    if isinstance(shrinkage_delta, bool) or not isinstance(shrinkage_delta, (int, float)) or not math.isfinite(float(shrinkage_delta)) or float(shrinkage_delta) <= 0.0 or float(shrinkage_delta) > 1.0:
+        raise ValueError(f"shrinkage_delta must lie in (0, 1], got {shrinkage_delta!r}")
+
+    n = len(calib_labels)
+    agent_ids = tuple(sorted(str(k) for k in calib_agent_probs.keys()))
+    m_count = len(agent_ids)
+
+    residuals: dict[str, list[float]] = {}
+    skills: dict[str, float] = {}
+
+    for aid in agent_ids:
+        seq = calib_agent_probs[aid]
+        if len(seq) != n:
+            raise ValueError(f"agent {aid!r} has {len(seq)} calibration items, expected {n}")
+        murphy = brier_murphy_decomposition(seq, calib_labels, num_bins=num_bins)
+        # Higher resolution (RES) and lower reliability error (REL) yield higher skill
+        acc_bonus = sum(
+            1.0
+            for dist, lbl in zip(seq, calib_labels)
+            if sorted(dist.keys(), key=lambda k: (-float(dist[k]), str(k)))[0] == str(lbl)
+        ) / float(n)
+        skill_val = ((murphy.resolution + 0.02 * acc_bonus + 0.005) / (murphy.reliability + 0.04))
+        skills[aid] = max(1e-4, skill_val)
+
+        res_list: list[float] = []
+        for dist, lbl_raw in zip(seq, calib_labels):
+            lbl = str(lbl_raw)
+            p_gold = float(dist.get(lbl, 0.0))
+            res_list.append(1.0 - min(1.0, max(0.0, p_gold)))
+        residuals[aid] = res_list
+
+    # Compute pairwise residual correlation matrix R in [-1, 1]^{M x M}
+    # Combine centered correlation with cosine similarity of raw residual vectors so identical
+    # constant-error clones also exhibit correlation = 1.0.
+    corr_mat: list[list[float]] = [[1.0 if i == j else 0.0 for j in range(m_count)] for i in range(m_count)]
+    off_diag_sum = 0.0
+    off_diag_pairs = 0
+
+    for i in range(m_count):
+        ri = residuals[agent_ids[i]]
+        mean_i = sum(ri) / float(n)
+        var_i = sum((x - mean_i) ** 2 for x in ri)
+        norm_i = math.sqrt(sum(x * x for x in ri))
+        for j in range(i + 1, m_count):
+            rj = residuals[agent_ids[j]]
+            mean_j = sum(rj) / float(n)
+            var_j = sum((x - mean_j) ** 2 for x in rj)
+            norm_j = math.sqrt(sum(x * x for x in rj))
+
+            if var_i > 1e-12 and var_j > 1e-12:
+                cov = sum((ri[k] - mean_i) * (rj[k] - mean_j) for k in range(n))
+                pearson = cov / math.sqrt(var_i * var_j)
+            else:
+                pearson = 0.0
+
+            if norm_i > 1e-12 and norm_j > 1e-12:
+                cos_sim = sum(ri[k] * rj[k] for k in range(n)) / (norm_i * norm_j)
+            else:
+                cos_sim = 0.0
+
+            # Positive error co-movement determines redundancy discounting
+            rho_ij = max(0.0, min(1.0, 0.65 * max(0.0, pearson) + 0.35 * max(0.0, cos_sim)))
+            corr_mat[i][j] = rho_ij
+            corr_mat[j][i] = rho_ij
+            off_diag_sum += rho_ij
+            off_diag_pairs += 1
+
+    delta = float(shrinkage_delta)
+    r_reg: list[list[float]] = [
+        [
+            1.0 if i == j else (1.0 - delta) * corr_mat[i][j]
+            for j in range(m_count)
+        ]
+        for i in range(m_count)
+    ]
+    skill_vec = [skills[aid] for aid in agent_ids]
+    raw_u = _solve_linear_system_dense(r_reg, skill_vec)
+    clipped_u = [max(0.0, val) for val in raw_u]
+    u_sum = sum(clipped_u)
+    if u_sum <= 1e-12:
+        weights_list = [1.0 / float(m_count) for _ in range(m_count)]
+    else:
+        weights_list = [val / u_sum for val in clipped_u]
+
+    weights_map = {aid: round(w, 8) for aid, w in zip(agent_ids, weights_list)}
+    # Normalize rounding residual on largest weight
+    top_aid = max(agent_ids, key=lambda a: weights_map[a])
+    weights_map[top_aid] = round(weights_map[top_aid] + (1.0 - sum(weights_map.values())), 8)
+
+    # Effective sample size N_eff = M / (1 + (M - 1) * mean_corr)
+    mean_corr = (off_diag_sum / float(off_diag_pairs)) if off_diag_pairs > 0 else 0.0
+    n_eff = float(m_count) / (1.0 + float(max(0, m_count - 1)) * mean_corr)
+
+    return CorrelatedEnsembleCalibrationResult(
+        agent_ids=agent_ids,
+        weights=weights_map,
+        murphy_skill_scores={k: round(v, 6) for k, v in skills.items()},
+        effective_sample_size=round(n_eff, 6),
+        mean_pairwise_correlation=round(mean_corr, 6),
+        shrinkage_delta=delta,
+    )
+
+
+def covariance_discounted_logit_pool(
+    agent_probs: Mapping[str, Mapping[str, float]],
+    calibration: CorrelatedEnsembleCalibrationResult | None = None,
+    *,
+    prior_probs: Mapping[str, float] | None = None,
+    prior_weight: float = 0.0,
+    temperature: float = 1.0,
+) -> dict[str, float]:
+    """Pool multi-agent probability distributions via Covariance-Discounted Supra-Bayesian Logit Pooling.
+
+    Computes:
+        log P(y | d_1..d_M) propto (1 / temperature) * sum_{m=1}^M w_m * log p_m(y) + prior_weight * log pi(y)
+    where sum_m w_m = 1 are the covariance-discounted weights. Unlike naive Product-of-Experts
+    (which sums raw log-odds and suffers catastrophic overconfidence under correlated clones),
+    convex covariance-discounted pooling is clone-invariant and resists sycophantic majorities.
+    """
+    if not agent_probs:
+        raise ValueError("agent_probs must be non-empty")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(float(temperature)) or float(temperature) <= 0.0:
+        raise ValueError(f"temperature must be finite and > 0, got {temperature!r}")
+    if isinstance(prior_weight, bool) or not isinstance(prior_weight, (int, float)) or not math.isfinite(float(prior_weight)) or float(prior_weight) < 0.0:
+        raise ValueError(f"prior_weight must be finite and >= 0, got {prior_weight!r}")
+
+    agent_ids = sorted(str(k) for k in agent_probs.keys())
+    first_dist = agent_probs[agent_ids[0]]
+    if not first_dist:
+        raise ValueError("option probability mapping must be non-empty")
+    option_keys = sorted(str(k) for k in first_dist.keys())
+
+    if calibration is None:
+        w_map = {aid: 1.0 / float(len(agent_ids)) for aid in agent_ids}
+    else:
+        raw_w = {aid: float(calibration.weights.get(aid, 0.0)) for aid in agent_ids}
+        w_tot = sum(raw_w.values())
+        if w_tot <= 1e-12:
+            w_map = {aid: 1.0 / float(len(agent_ids)) for aid in agent_ids}
+        else:
+            w_map = {aid: raw_w[aid] / w_tot for aid in agent_ids}
+
+    eps = 1e-9
+    inv_temp = 1.0 / float(temperature)
+    pooled_logits: dict[str, float] = {k: 0.0 for k in option_keys}
+
+    for aid in agent_ids:
+        dist = agent_probs[aid]
+        w_m = w_map[aid]
+        tot = sum(max(0.0, float(dist.get(k, 0.0))) for k in option_keys)
+        if tot <= 0.0:
+            raise ValueError(f"agent {aid!r} probability distribution sum must be > 0")
+        for k in option_keys:
+            p_mk = max(eps, float(dist.get(k, 0.0)) / tot)
+            pooled_logits[k] += inv_temp * w_m * math.log(p_mk)
+
+    if prior_probs is not None and prior_weight > 0.0:
+        p_tot = sum(max(0.0, float(prior_probs.get(k, 0.0))) for k in option_keys)
+        if p_tot > 0.0:
+            for k in option_keys:
+                pi_k = max(eps, float(prior_probs.get(k, 0.0)) / p_tot)
+                pooled_logits[k] += float(prior_weight) * math.log(pi_k)
+
+    max_l = max(pooled_logits.values())
+    exps = {k: math.exp(pooled_logits[k] - max_l) for k in option_keys}
+    z = sum(exps.values())
+    return {k: exps[k] / z for k in option_keys}
+
