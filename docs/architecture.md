@@ -95,7 +95,18 @@ Applying local contrast stretching before dense retrieval distorts brand packagi
 - **Covariance-Discounted Supra-Bayesian Pooling (`calibrate_correlated_ensemble_weights`, `covariance_discounted_logit_pool` in `consistency.py`, `pkg/mdm/frontier_v070.go`)**:
   Estimates the $M \times M$ logit-residual covariance matrix $\hat{\Sigma}$ on a calibration split and weights models by $w \propto (\hat{\Sigma} + \lambda I)^{-1}\mathbf{1}$, neutralizing a $4\times$ correlated clone attack ($N_{\text{eff}} = 1.34$, lifting accuracy from `65.00%` to `77.00%`, $p = 0.0357$, and cutting NLL by $-55.7\%$).
 
-## 9. Scope Boundaries, Failure Modes, and Non-Goals
+## 9. Streaming Audio, Video, and Full-Duplex Decision Architecture (`v0.8.0`)
+
+- **Full-Duplex Voice Activity Projection (`VAP`) & Cost-Sensitive Turn-Taking (`evaluate_duplex_turn_taking_decision`, `compute_vap_prosodic_prior_logits` in `audio_video_decision.py`, `pkg/mdm/audio_video_v080.go`)**:
+  Fuses Stage-1 `/v1/systemone` turn-slot probabilities with prosodic pause duration, RMS energy slope, $f_0$ pitch delta, and syntactic completion probability under an asymmetric interruption loss matrix ($C_{\text{false\_barge}} = 6.0$) and a split-conformal singleton barge-in guard (`100.0%` accuracy and `0.0%` false barge-in on cognitive pauses across $N = 100$ instances).
+- **Anytime-Valid Conformal Test Martingales & Streaming Early-Exit (`ConformalMartingaleTracker`, `evaluate_streaming_early_exit` in `audio_video_decision.py`, `pkg/mdm/audio_video_v080.go`)**:
+  Computes smoothed conformal p-values $p_t \in [0, 1]$ and updates a predictable betting martingale $M_t = \prod_{i=1}^t (1 + \kappa_i (0.5 - p_i))$ bounded by Ville's maximal inequality $\mathbb{P}(\sup_{t \ge 1} M_t \ge 1/\alpha) \le \alpha$, saving `56.0%` of video chunk evaluations with `100.0%` shift anomaly recall and `0.0%` stationary false alarms ($N = 100$).
+- **Cross-Modal `AVEL` Agreement & 3-Slot Triangle Spoof Gating (`evaluate_audiovisual_event_agreement`, `score_audiovisual_triangle_consistency`, `fence_untrusted_audio_transcript` in `audio_video_decision.py`, `pkg/mdm/audio_video_v080.go`)**:
+  Combines normalized Jensen-Shannon divergence $\operatorname{JSD}_{\ln 2}(p^{(A)} \parallel p^{(V)})$ with continuous 3-slot spatio-temporal triangle violation mass $s_{\triangle,\text{AV}}$ and `<untrusted_audio_transcript>` fencing to separate `synchronous_av_event`, `audible_offscreen_event`, `visible_silent_event`, and `cross_modal_spoof_or_conflict` (`100.0%` accuracy and `100.0%` spoof recall, $N = 100$).
+- **Pure-Stdlib RIFF `WAV` Goertzel Spectral Analyzer & Spatio-Temporal Contact Sheets (`extract_wav_acoustic_features`, `select_submodular_spatiotemporal_frames`, `compile_spatiotemporal_contact_sheet` in `audio_video_decision.py`)**:
+  Parses 16-bit PCM RIFF `WAV` waveforms in pure stdlib (`wave`, `struct`), extracts 4-band Goertzel DFT spectral energies (`250 Hz`, `1000 Hz`, `2500 Hz`, `4000 Hz`), selects $B \le 8$ temporally diverse keyframes (`100.0%` facet recall vs `50.0%` strided/additive), and renders a composite `320x102` PNG Spatio-Temporal Contact Sheet (`ST-SoM`).
+
+## 10. Scope Boundaries, Failure Modes, and Non-Goals
 
 - **Non-Goals**: `multimodal-decision-models` does not train foundation model weights or run GPU tensor kernels; it operates purely on model probability readouts, embeddings, and raw RGB/PNG image buffers using zero external runtime dependencies.
 - **Operational Failure Boundaries**:

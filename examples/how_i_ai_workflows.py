@@ -48,6 +48,7 @@ from multimodal_decision_models import (  # noqa: E402
     ContextBlock,
     DecisionQuestion,
     PairwiseEdge,
+    SpatioTemporalFrameCandidate,
     SwarmAgentProposal,
     apply_layer5_deterministic_guards,
     arbitrate_swarm_locks,
@@ -56,13 +57,19 @@ from multimodal_decision_models import (  # noqa: E402
     calibrate_mondrian_conformal_quantiles,
     calibrate_multislot_joint_conformal,
     compile_dual_buffer_contact_sheet,
+    compile_spatiotemporal_contact_sheet,
     debiased_cyclic_permutation_probs,
     decode_png,
+    evaluate_audiovisual_event_agreement,
+    evaluate_duplex_turn_taking_decision,
+    evaluate_streaming_early_exit,
+    extract_wav_acoustic_features,
     mondrian_conformal_prediction_set,
     multislot_joint_conformal_sets,
     normalized_entropy,
     option_permutation_stability,
     pre_gated_bayesian_poe_fusion,
+    select_submodular_spatiotemporal_frames,
     project_triangles_to_transitive_consistency,
     prune_agent_context_blocks,
     safe_expected_mark_center,
@@ -459,9 +466,102 @@ def recipe8_safety_ltt_and_joint_multislot() -> dict[str, Any]:
     }
 
 
-def run_all_workflows() -> list[dict[str, Any]]:
-    """Run all 8 practical 'How I AI' workflows and return structured receipts."""
-    return [
+def recipe9_duplex_voice_turn_taking() -> dict[str, Any]:
+    """Recipe 9: Parse real 16kHz RIFF WAV audio (`duplex_turn_taking_sample.wav`) and arbitrate full-duplex turn-taking."""
+    wav_bytes = (FIXTURES_DIR / "duplex_turn_taking_sample.wav").read_bytes()
+    wav_summary = extract_wav_acoustic_features(wav_bytes, num_windows=8)
+
+    av_rows = _load_jsonl(DATA_DIR / "real_audio_video_decision_receipts.jsonl")
+    vap_row = next(
+        r
+        for r in av_rows
+        if r["track"] == "duplex_vap_turn_taking" and r["item_id"] == "vap-001"
+    )
+    avel_row = next(
+        r
+        for r in av_rows
+        if r["track"] == "audiovisual_event_agreement"
+        and r["ground_truth_regime"] == "audible_offscreen_event"
+    )
+
+    turn_res = evaluate_duplex_turn_taking_decision(
+        stage1_probs=vap_row["stage1_probs"],
+        pause_ms=float(vap_row["pause_ms"]),
+        rms_slope_db=float(vap_row["rms_slope_db"]),
+        f0_delta_hz=float(vap_row["f0_delta_hz"]),
+        semantic_complete_prob=float(vap_row["semantic_complete_prob"]),
+        user_overlap_active=bool(vap_row["user_overlap_active"]),
+    )
+    av_res = evaluate_audiovisual_event_agreement(
+        audio_probs=avel_row["audio_probs"],
+        visual_probs=avel_row["visual_probs"],
+        sync_same_source_prob=float(avel_row["sync_same_source_prob"]),
+        asr_transcript=str(avel_row["asr_transcript"]),
+    )
+    return {
+        "recipe": "9_duplex_voice_turn_taking_and_avel",
+        "wav_duration_sec": round(wav_summary.duration_sec, 2),
+        "wav_peak_dbfs": round(wav_summary.peak_dbfs, 2),
+        "raw_argmax_action": turn_res.raw_argmax_action,
+        "selected_turn_action": turn_res.selected_action,
+        "avel_regime": av_res.regime,
+        "avel_selected_event": av_res.selected_event,
+    }
+
+
+def recipe10_streaming_video_stsom_sheet() -> dict[str, Any]:
+    """Recipe 10: Run Conformal Martingale streaming video early exit and compile a real Spatio-Temporal Contact Sheet (`ST-SoM`)."""
+    av_rows = _load_jsonl(DATA_DIR / "real_audio_video_decision_receipts.jsonl")
+    stream_row = next(r for r in av_rows if r["track"] == "streaming_conformal_early_exit")
+    st_row = next(r for r in av_rows if r["track"] == "submodular_spatiotemporal_selection")
+
+    ee_res = evaluate_streaming_early_exit(
+        chunk_prob_stream=stream_row["chunk_prob_stream"],
+        calib_nonconformity_scores=stream_row["calib_nonconformity_scores"],
+        conformal_q_hat=0.80,
+        hesitation_exit_threshold=0.24,
+    )
+
+    st_cands = [
+        SpatioTemporalFrameCandidate(
+            frame_index=int(c["frame_index"]),
+            timestamp_sec=float(c["timestamp_sec"]),
+            hesitation_score=float(c["hesitation_score"]),
+            acoustic_transient_score=float(c["acoustic_transient_score"]),
+            visual_motion_score=float(c["visual_motion_score"]),
+            feature_vector=tuple(float(x) for x in c["feature_vector"]),
+        )
+        for c in st_row["candidates"]
+    ]
+    sel_res = select_submodular_spatiotemporal_frames(st_cands, budget_b=4)
+
+    ui_frame = decode_png((FIXTURES_DIR / "ui_component.png").read_bytes()).resize_bilinear(80, 60)
+    pcb_frame = decode_png((FIXTURES_DIR / "pcb_board.png").read_bytes()).resize_bilinear(80, 60)
+    frames = [ui_frame if idx < 6 else pcb_frame for idx in range(12)]
+    wav_trans = extract_wav_acoustic_features(
+        (FIXTURES_DIR / "audiovisual_alarm_transient.wav").read_bytes(),
+        num_windows=8,
+    )
+    sheet = compile_spatiotemporal_contact_sheet(
+        frames=frames,
+        selected_indices=sel_res.selected_indices,
+        wav_summary=wav_trans,
+        tile_width=80,
+        tile_height=60,
+    )
+    return {
+        "recipe": "10_streaming_video_early_exit_and_stsom",
+        "early_exit_class": ee_res.selected_class,
+        "exit_step": ee_res.exit_step,
+        "compute_saved_fraction": round(ee_res.compute_saved_fraction, 2),
+        "selected_keyframes": list(sel_res.selected_indices),
+        "stsom_png_bytes": len(sheet.png_bytes),
+    }
+
+
+def run_all_workflows(include_audio_video: bool = False) -> list[dict[str, Any]]:
+    """Run all practical 'How I AI' workflows and return structured receipts."""
+    base = [
         recipe1_mcp_tool_trie_routing(),
         recipe2_rag_rerank_and_ipi_firewall(),
         recipe3_gui_som_and_visual_blink(),
@@ -471,8 +571,11 @@ def run_all_workflows() -> list[dict[str, Any]]:
         recipe7_pride_debiased_judge_rubric(),
         recipe8_safety_ltt_and_joint_multislot(),
     ]
+    if include_audio_video:
+        base.extend([recipe9_duplex_voice_turn_taking(), recipe10_streaming_video_stsom_sheet()])
+    return base
 
 
 if __name__ == "__main__":
-    summary = run_all_workflows()
+    summary = run_all_workflows(include_audio_video=True)
     print(json.dumps(summary, indent=2, sort_keys=True))

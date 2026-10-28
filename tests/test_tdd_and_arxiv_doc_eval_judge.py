@@ -34,11 +34,12 @@ END_TO_END_REPO_DOCS = [
     REPO_ROOT / "benchmarks" / "results" / "mdm_bench_report.md",
     REPO_ROOT / "benchmarks" / "results" / "real_public_bench_report.md",
     REPO_ROOT / "benchmarks" / "results" / "frontier_genai_v070_report.md",
+    REPO_ROOT / "benchmarks" / "results" / "audio_video_v080_report.md",
 ]
 
 
 class TestTddAndArxivDocEvalJudge(unittest.TestCase):
-    """Verify that all 9 end-to-end repository docs score 1 (14/14 gates) and negative cases score 0."""
+    """Verify that all 10 end-to-end repository docs score 1 (14/14 gates) and negative cases score 0."""
 
     def test_all_end_to_end_repo_docs_score_binary_1_across_all_14_gates(self) -> None:
         for doc_path in END_TO_END_REPO_DOCS:
