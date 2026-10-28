@@ -97,14 +97,15 @@ def _normalize_distribution(probs: Mapping[str, float]) -> dict[str, float]:
     cleaned: dict[str, float] = {}
     total = 0.0
     for k, v in probs.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"invalid probability {v!r} for key {k!r}")
         fv = float(v)
         if not math.isfinite(fv) or fv < 0.0:
             raise ValueError(f"invalid probability {v!r} for key {k!r}")
         cleaned[str(k)] = fv
         total += fv
     if total <= 0.0:
-        uniform = 1.0 / float(len(cleaned))
-        return {k: uniform for k in cleaned}
+        raise ValueError("probability sum must be > 0; uniform 1/K fallbacks are prohibited")
     return {k: v / total for k, v in cleaned.items()}
 
 
@@ -373,28 +374,30 @@ class ConformalMartingaleTracker:
         calibration_scores: Sequence[float],
         alpha_alarm: float = 0.05,
         max_betting_fraction: float = 1.65,
-        betting_Adaptation_rate: float = 0.45,
+        betting_adaptation_rate: float = 0.45,
     ) -> None:
         if not calibration_scores:
             raise ValueError("calibration_scores must be non-empty")
         cleaned: list[float] = []
         for s in calibration_scores:
+            if isinstance(s, bool) or not isinstance(s, (int, float)):
+                raise ValueError(f"invalid calibration nonconformity score {s!r}")
             fs = float(s)
             if not math.isfinite(fs) or fs < 0.0:
                 raise ValueError(f"invalid calibration nonconformity score {s!r}")
             cleaned.append(fs)
-        if not (0.0 < alpha_alarm < 1.0) or not math.isfinite(alpha_alarm):
+        if isinstance(alpha_alarm, bool) or not (0.0 < alpha_alarm < 1.0) or not math.isfinite(alpha_alarm):
             raise ValueError(f"alpha_alarm must lie in (0, 1), got {alpha_alarm}")
-        if not (0.0 < max_betting_fraction < 2.0) or not math.isfinite(max_betting_fraction):
+        if isinstance(max_betting_fraction, bool) or not (0.0 < max_betting_fraction < 2.0) or not math.isfinite(max_betting_fraction):
             raise ValueError(f"max_betting_fraction must lie in (0, 2), got {max_betting_fraction}")
-        if not (0.0 < betting_Adaptation_rate <= 1.0) or not math.isfinite(betting_Adaptation_rate):
-            raise ValueError(f"betting_Adaptation_rate must lie in (0, 1], got {betting_Adaptation_rate}")
+        if isinstance(betting_adaptation_rate, bool) or not (0.0 < betting_adaptation_rate <= 1.0) or not math.isfinite(betting_adaptation_rate):
+            raise ValueError(f"betting_adaptation_rate must lie in (0, 1], got {betting_adaptation_rate}")
 
         self._calib_scores: tuple[float, ...] = tuple(sorted(cleaned))
         self.alpha_alarm: float = float(alpha_alarm)
         self.alarm_threshold: float = 1.0 / float(alpha_alarm)
         self.max_betting_fraction: float = float(max_betting_fraction)
-        self.betting_adaptation_rate: float = float(betting_Adaptation_rate)
+        self.betting_adaptation_rate: float = float(betting_adaptation_rate)
 
         self._step_index: int = 0
         self._log_martingale: float = 0.0
@@ -534,10 +537,10 @@ def evaluate_streaming_early_exit(
         martingale_traj.append(m_step.martingale_value)
 
         # Tempered sequential log-odds update weighted by inverse chunk hesitation
-        chunk_Reliability = max(0.15, 1.0 - 0.65 * h_chunk)
+        chunk_reliability = max(0.15, 1.0 - 0.65 * h_chunk)
         for c in classes:
             p_c = max(1e-6, min(1.0 - 1e-6, norm_chunk[c]))
-            accum_log_odds[c] = temporal_decay * accum_log_odds[c] + chunk_Reliability * math.log(p_c)
+            accum_log_odds[c] = temporal_decay * accum_log_odds[c] + chunk_reliability * math.log(p_c)
 
         max_logit = max(accum_log_odds.values())
         exp_scores = {c: math.exp(accum_log_odds[c] - max_logit) for c in classes}
@@ -689,8 +692,8 @@ def evaluate_audiovisual_event_agreement(
     sync_same_source_prob: float = 0.85,
     jsd_conflict_threshold: float = 0.36,
     triangle_violation_threshold: float = 0.30,
-    confident_hesitation_ceiling: float = 0.42,
-    Uncertain_hesitation_floor: float = 0.52,
+    confident_hesitation_ceiling: float = 0.55,
+    uncertain_hesitation_floor: float = 0.58,
     asr_transcript: str | None = None,
 ) -> AudioVisualAgreementResult:
     """Classifies an audio-visual segment into synchronous, off-screen, silent, or spoof/conflict."""
@@ -713,7 +716,7 @@ def evaluate_audiovisual_event_agreement(
     fenced = fence_untrusted_audio_transcript(asr_transcript) if asr_transcript is not None else None
 
     # Case 1: Audible off-screen event (confident active audio + silent/background or highly uncertain video)
-    if not aud_is_bg and h_aud <= confident_hesitation_ceiling and (vis_is_bg or h_vis >= Uncertain_hesitation_floor):
+    if not aud_is_bg and h_aud <= confident_hesitation_ceiling and (vis_is_bg or h_vis >= uncertain_hesitation_floor):
         return AudioVisualAgreementResult(
             regime="audible_offscreen_event",
             selected_event=top_aud,
@@ -727,7 +730,7 @@ def evaluate_audiovisual_event_agreement(
         )
 
     # Case 2: Visible silent event (confident active video + silent/background or highly uncertain audio)
-    if not vis_is_bg and h_vis <= confident_hesitation_ceiling and (aud_is_bg or h_aud >= Uncertain_hesitation_floor):
+    if not vis_is_bg and h_vis <= confident_hesitation_ceiling and (aud_is_bg or h_aud >= uncertain_hesitation_floor):
         return AudioVisualAgreementResult(
             regime="visible_silent_event",
             selected_event=top_vis,
@@ -791,7 +794,7 @@ def evaluate_audiovisual_event_agreement(
         audio_hesitation=h_aud,
         visual_hesitation=h_vis,
         triangle_violation_score=s_tri,
-        escalate_to_stage2=bool(h_fused >= Uncertain_hesitation_floor),
+        escalate_to_stage2=bool(h_fused >= uncertain_hesitation_floor),
         fenced_transcript=fenced,
     )
 
@@ -935,7 +938,7 @@ def extract_wav_acoustic_features(
         ]
         band_sum = sum(raw_bands)
         if band_sum <= 1e-15:
-            norm_bands = (0.25, 0.25, 0.25, 0.25)
+            norm_bands = (0.0, 0.0, 0.0, 0.0)
         else:
             norm_bands = (
                 raw_bands[0] / band_sum,

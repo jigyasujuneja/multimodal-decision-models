@@ -135,4 +135,9 @@ func TestSelectSubmodularSpatioTemporalFrames(t *testing.T) {
 	if !has2 || !has3 || math.IsNaN(res.ObjectiveValue) {
 		t.Fatalf("expected diverse frames 2 and 3 in selection, got %v", res.SelectedIndices)
 	}
+
+	// Zero-sum probability distribution must fail closed (no uniform 1/K fallback)
+	if _, err := JensenShannonDivergenceBits(map[string]float64{"a": 0.0, "b": 0.0}, map[string]float64{"a": 0.5, "b": 0.5}); err == nil {
+		t.Fatalf("expected error on zero-sum distribution")
+	}
 }

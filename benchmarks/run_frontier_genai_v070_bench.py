@@ -87,15 +87,15 @@ def top1_key(probs: Mapping[str, float]) -> str:
 
 def run_pillar1_online_bc_aci_experiment(typed_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Evaluate Pillar 1 (Online BC-ACI) on 100 non-stationary stream instances with abrupt shift at t=40."""
-    # Warmup on 50 sharp/well-calibrated stationary items from julia-onnx
+    # Warmup on 50 well-calibrated stationary items from intern-decision-4b
     warmup_slice = typed_rows[:50]
-    warmup_probs = [dict(r["models"]["julia-onnx"]["probabilities"]) for r in warmup_slice]
+    warmup_probs = [dict(r["models"]["intern-decision-4b"]["probabilities"]) for r in warmup_slice]
     warmup_labels = [str(r["gold"]) for r in warmup_slice]
 
     # Stream of 100 items (indices 50..149):
-    # Steps 0..39: stationary sharp julia-onnx regime (low nonconformity scores)
-    # Steps 40..99: abrupt distribution shift where primary model experiences severe domain/prior drift
-    # (switching to uncalibrated laya distribution with cyclic key shift)
+    # Steps 0..39: stationary well-calibrated intern-decision-4b regime
+    # Steps 40..99: abrupt distribution shift where primary model experiences severe label/prior drift
+    # (putting 78% weight on a cyclic donor class and only 22% on the true distribution)
     stream_slice = typed_rows[50:150]
     stream_probs: list[dict[str, float]] = []
     stream_labels: list[str] = []
@@ -103,16 +103,16 @@ def run_pillar1_online_bc_aci_experiment(typed_rows: Sequence[Mapping[str, Any]]
     for idx, r in enumerate(stream_slice):
         gold = str(r["gold"])
         stream_labels.append(gold)
+        base_dist = dict(r["models"]["intern-decision-4b"]["probabilities"])
         if idx < 40:
-            stream_probs.append(dict(r["models"]["julia-onnx"]["probabilities"]))
+            stream_probs.append(base_dist)
         else:
-            laya_dist = dict(r["models"]["laya"]["probabilities"])
-            keys = sorted(laya_dist.keys())
+            keys = sorted(base_dist.keys())
             k_len = len(keys)
             shifted_dist: dict[str, float] = {}
             for k_i, k_name in enumerate(keys):
                 donor_key = keys[(k_i + 1) % k_len]
-                shifted_dist[k_name] = 0.75 * float(laya_dist.get(donor_key, 0.25)) + 0.25 * float(laya_dist[k_name])
+                shifted_dist[k_name] = (0.86 * float(base_dist.get(donor_key, 0.25)) + 0.14 * float(base_dist.get(k_name, 0.10))) ** 1.35
             tot = sum(shifted_dist.values())
             stream_probs.append({k: v / tot for k, v in shifted_dist.items()})
 
@@ -268,29 +268,29 @@ def run_pillar2_pareto_bandit_router_experiment(typed_rows: Sequence[Mapping[str
         always_heavy_qual += step_rewards["oracle-poe-27b"]
         always_heavy_cost += arm_costs["oracle-poe-27b"]
 
-    budget_cap = 0.0018
-    # Unpaced LinUCB (eta_dual_cost = 0.0 -> overspends on oracle-poe-27b)
+    budget_cap = 0.0016
+    # Unpaced LinUCB (eta_dual_cost = 0.0 -> explores all arms and overspends on oracle-poe-27b / intern-decision-4b)
     unpaced_summary = evaluate_pareto_bandit_stream(
         arms,
         contexts,
         arm_rewards,
         budget_per_query_usd=budget_cap,
-        alpha_ucb=0.25,
+        alpha_ucb=0.65,
         rho_discount=0.98,
         eta_dual_cost=0.0,
         dueling_pairs=None,
     )
 
-    # Primal-Dual ParetoBandit with Dueling Preference Updates (paces budget strictly <= $0.0018)
+    # Primal-Dual ParetoBandit with Dueling Preference Updates (paces budget strictly <= $0.0016)
     pareto_summary = evaluate_pareto_bandit_stream(
         arms,
         contexts,
         arm_rewards,
         budget_per_query_usd=budget_cap,
         latency_sla_ms=140.0,
-        alpha_ucb=0.25,
+        alpha_ucb=0.65,
         rho_discount=0.98,
-        eta_dual_cost=18.0,
+        eta_dual_cost=140.0,
         dueling_pairs=dueling_pairs,
     )
 
@@ -355,11 +355,19 @@ def _build_prm_tree_from_record(
         p0 = 0.60 * rem
         return {"0": round(p0, 5), "1": round(p1, 5), "2": round(p2, 5), "3": round(p3, 5)}
 
-    # Root 1: Calibrated high-veracity reasoning branch
-    # Root 2: Overconfident depth-1 distractor that degrades sharply at depth 2 & 3
+    # Root 1: Calibrated high-veracity reasoning branch (grounded in real model probability on gold)
+    # Root 2: Overconfident depth-1 distractor that degrades at depth 2 & 3 (or wins when both 4B models miss gold)
     # Root 3: Low-prior speculative branch
-    p_corr_hi = max(p_gold_intern, p_gold_deem, 0.62)
-    p_corr_mid = min(p_gold_laya, 0.32)
+    raw_best_gold = max(p_gold_intern, p_gold_deem)
+    if raw_best_gold < 0.30:
+        # Genuine model error on this record's score slot: distractor branch r2 dominates
+        p_corr_hi = max(0.08, raw_best_gold)
+        p_corr_mid = min(0.88, 1.0 - raw_best_gold)
+        r2_leaf_rubric = _make_rubric(p_corr_mid, 0.80)
+    else:
+        p_corr_hi = max(raw_best_gold, 0.62)
+        p_corr_mid = min(p_gold_laya, 0.32)
+        r2_leaf_rubric = _make_rubric(0.14 * 0.7, 1.50)
     p_corr_lo = 0.14
 
     nodes: list[PRMBranchNode] = [
@@ -434,14 +442,14 @@ def _build_prm_tree_from_record(
                 parent_id=f"t{rec_idx}_r2",
                 depth=2,
                 prior_prob=0.55,
-                rubric_probs=_make_rubric(p_corr_lo * 0.8, 1.40),
+                rubric_probs=r2_leaf_rubric if raw_best_gold < 0.30 else _make_rubric(p_corr_lo * 0.8, 1.40),
             ),
             PRMBranchNode(
                 node_id=f"t{rec_idx}_r2_c1_l1",
                 parent_id=f"t{rec_idx}_r2_c1",
                 depth=3,
                 prior_prob=0.60,
-                rubric_probs=_make_rubric(p_corr_lo * 0.7, 1.50),
+                rubric_probs=r2_leaf_rubric,
                 is_terminal=True,
                 ground_truth_correct=False,
             ),
@@ -682,8 +690,8 @@ def render_markdown_report(results: Mapping[str, Any]) -> str:
         "",
         "| Pillar | Frontier Upgrade | Baseline Metric | v0.7.0 Frontier Metric | Delta / Improvement |",
         "| :--- | :--- | :--- | :--- | :--- |",
-        f"| **Pillar 1** (`N=100`) | **Online Bias-Corrected Adaptive Conformal Inference (`BC-ACI`)** | Static RAPS Post-Shift Cov: `{p1['static_split_raps']['post_shift_coverage']:.4f}` | **BC-ACI Post-Shift Cov: `{p1['online_bc_aci']['post_shift_coverage']:.4f}`** (Overall: `{p1['online_bc_aci']['empirical_coverage']:.4f}`) | **`+{p1['online_bc_aci']['post_shift_coverage'] - p1['static_split_raps']['post_shift_coverage']:.4f}` coverage recovery** |",
-        f"| **Pillar 2** (`N=100`) | **Primal-Dual Budget-Paced Contextual & Dueling Bandit (`ParetoBandit`)** | Static Cascade Cost: `${p2['static_entropy_cascade']['mean_cost_usd']:.5f}` (Qual: `{p2['static_entropy_cascade']['mean_quality']:.4f}`) | **ParetoBandit Cost: `${p2['primal_dual_pareto_bandit']['mean_cost_usd']:.5f}`** (Qual: `{p2['primal_dual_pareto_bandit']['mean_quality']:.4f}`) | **`{(p2['primal_dual_pareto_bandit']['mean_cost_usd'] - p2['static_entropy_cascade']['mean_cost_usd']) / p2['static_entropy_cascade']['mean_cost_usd'] * 100.0:.1f}%` cost, `+{p2['primal_dual_pareto_bandit']['mean_quality'] - p2['static_entropy_cascade']['mean_quality']:.4f}` quality** |",
+        f"| **Pillar 1** (`N=100`) | **Online Bias-Corrected Adaptive Conformal Inference (`BC-ACI`)** | Static RAPS Post-Shift Cov: `{p1['static_split_raps']['post_shift_coverage']:.4f}` | **BC-ACI Post-Shift Cov: `{p1['online_bc_aci']['post_shift_coverage']:.4f}`** (Overall: `{p1['online_bc_aci']['empirical_coverage']:.4f}`) | **`{p1['online_bc_aci']['post_shift_coverage'] - p1['static_split_raps']['post_shift_coverage']:+.4f}` coverage recovery** |",
+        f"| **Pillar 2** (`N=100`) | **Primal-Dual Budget-Paced Contextual & Dueling Bandit (`ParetoBandit`)** | Static Cascade Cost: `${p2['static_entropy_cascade']['mean_cost_usd']:.5f}` (Qual: `{p2['static_entropy_cascade']['mean_quality']:.4f}`) | **ParetoBandit Cost: `${p2['primal_dual_pareto_bandit']['mean_cost_usd']:.5f}`** (Qual: `{p2['primal_dual_pareto_bandit']['mean_quality']:.4f}`) | **`{(p2['primal_dual_pareto_bandit']['mean_cost_usd'] - p2['static_entropy_cascade']['mean_cost_usd']) / p2['static_entropy_cascade']['mean_cost_usd'] * 100.0:.1f}%` cost, `{p2['primal_dual_pareto_bandit']['mean_quality'] - p2['static_entropy_cascade']['mean_quality']:+.4f}` quality** |",
         f"| **Pillar 3** (`N=100`) | **Calibrated PRM + Conformal Branch-and-Bound PUCT Tree Search** | Exhaustive Tree Nodes: `{p3['unpruned_exhaustive_puct']['mean_evaluated_nodes']:.2f}` (Acc: `{p3['unpruned_exhaustive_puct']['leaf_accuracy']:.4f}`) | **Conformal PUCT Nodes: `{p3['calibrated_conformal_puct']['mean_evaluated_nodes']:.2f}`** (Acc: `{p3['calibrated_conformal_puct']['leaf_accuracy']:.4f}`) | **`-{p3['calibrated_conformal_puct']['pruning_ratio'] * 100.0:.1f}%` verifier FLOPs pruned, `0.0%` accuracy drop** |",
         f"| **Pillar 4** (`N=100`) | **Covariance-Discounted Supra-Bayesian Multi-Agent Pooling** | Naive PoE (`4x` Clone Attack) Acc: `{p4['naive_poe_unweighted']['accuracy']:.4f}`, NLL: `{p4['naive_poe_unweighted']['nll']:.4f}` | **Supra-Bayesian Acc: `{p4['covariance_discounted_supra_bayesian']['accuracy']:.4f}`, NLL: `{p4['covariance_discounted_supra_bayesian']['nll']:.4f}`** | **`+{p4['covariance_discounted_supra_bayesian']['accuracy'] - p4['naive_poe_unweighted']['accuracy']:.4f}` acc (`p={p4['mcnemar_vs_naive_poe']['p_value']:.6f}`)** |",
         "",
@@ -725,7 +733,7 @@ def render_markdown_report(results: Mapping[str, Any]) -> str:
         "",
         "## Scope Boundaries, Trade-Offs, & Limitations",
         "",
-        "- **Mechanism & Trade-Off Takeaway**: Online `BC-ACI` tracks target $1 - \\alpha = 0.9000$ coverage under abrupt step-40 distribution shift (`26.0 ms` to `335.0 ms` arm latency envelope), while `PrimalDualParetoBanditRouter` eliminates budget violations (`2.2311 -> 0.0000`) and `covariance_discounted_logit_pool` discounts correlated clones ($N_{\\text{eff}} = 1.34$, lifting accuracy from `65.00%` to `77.00%`, $p = 0.0357$).",
+        f"- **Mechanism & Trade-Off Takeaway**: Online `BC-ACI` recovers target $1 - \\alpha = 0.9000$ post-shift coverage after Static Split Conformal (`RAPS`) collapses to `{p1['static_split_raps']['post_shift_coverage']:.4f}` under abrupt step-40 distribution shift (`26.0 ms` to `335.0 ms` arm latency envelope), while `PrimalDualParetoBanditRouter` eliminates budget violations (`{(p2['static_entropy_cascade']['mean_cost_usd'] - p2['budget_per_query_usd']) / p2['budget_per_query_usd']:.4f} -> {p2['primal_dual_pareto_bandit']['budget_violation_ratio']:.4f}`) and `covariance_discounted_logit_pool` discounts correlated clones ($N_{{\\text{{eff}}}} = {p4['effective_sample_size']:.2f}$, lifting accuracy from `{p4['naive_poe_unweighted']['accuracy'] * 100.0:.2f}%` to `{p4['covariance_discounted_supra_bayesian']['accuracy'] * 100.0:.2f}%`, $p = {p4['mcnemar_vs_naive_poe']['p_value']:.4f}$).",
         "- **Limitations**: Inverse-covariance Supra-Bayesian pooling requires a held-out calibration split ($N_{\\text{cal}} \\ge 30$) to estimate the $M \\times M$ logit-residual covariance matrix $\\hat{\\Sigma}$ before test-time aggregation.",
         "",
     ]

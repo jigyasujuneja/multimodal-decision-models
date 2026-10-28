@@ -131,7 +131,7 @@
         "details": {
           "avg_heading_words": 5.6,
           "question_headings": [],
-          "avg_paragraph_words": 26.9,
+          "avg_paragraph_words": 27.4,
           "paragraph_count": 18
         }
       },
@@ -277,7 +277,7 @@
           "unresolved_citation_count": 0,
           "bib_citations_checked": 0,
           "missing_bib_keys": [],
-          "unique_baseline_or_method_count": 31,
+          "unique_baseline_or_method_count": 32,
           "sample_baselines_found": [
             "angelopoulos",
             "aps",
@@ -310,7 +310,7 @@
         "details": {
           "avg_heading_words": 7.7,
           "question_headings": [],
-          "avg_paragraph_words": 46.6,
+          "avg_paragraph_words": 47.4,
           "paragraph_count": 86
         }
       },
@@ -414,7 +414,7 @@
           "double_emdash_hits": [],
           "raw_prose_arrow_count": 0,
           "raw_prose_arrow_hits": [],
-          "passive_voice_pct": 2.4
+          "passive_voice_pct": 2.3
         }
       },
       "G5_factuality_statistical_and_quantitative_rigor": {
@@ -456,7 +456,7 @@
           "unresolved_citation_count": 0,
           "bib_citations_checked": 0,
           "missing_bib_keys": [],
-          "unique_baseline_or_method_count": 13,
+          "unique_baseline_or_method_count": 14,
           "sample_baselines_found": [
             "aps",
             "bentkus",
@@ -466,8 +466,8 @@
             "hoeffding",
             "jeffreys",
             "lac",
-            "mcnemar",
-            "pride"
+            "linucb",
+            "mcnemar"
           ]
         }
       },
@@ -489,8 +489,8 @@
         "details": {
           "avg_heading_words": 9.2,
           "question_headings": [],
-          "avg_paragraph_words": 33.2,
-          "paragraph_count": 42
+          "avg_paragraph_words": 34.2,
+          "paragraph_count": 43
         }
       },
       "G11_formatting_tables_and_math_hygiene": {
@@ -668,7 +668,7 @@
         "details": {
           "avg_heading_words": 9.5,
           "question_headings": [],
-          "avg_paragraph_words": 31.3,
+          "avg_paragraph_words": 31.6,
           "paragraph_count": 49
         }
       },
@@ -1550,7 +1550,7 @@
         "details": {
           "avg_heading_words": 7.6,
           "question_headings": [],
-          "avg_paragraph_words": 23.6,
+          "avg_paragraph_words": 25.8,
           "paragraph_count": 5
         }
       },
@@ -1696,8 +1696,9 @@
           "unresolved_citation_count": 0,
           "bib_citations_checked": 0,
           "missing_bib_keys": [],
-          "unique_baseline_or_method_count": 5,
+          "unique_baseline_or_method_count": 6,
           "sample_baselines_found": [
+            "brier",
             "decisiongemma",
             "gemini",
             "mcnemar",
@@ -1722,10 +1723,10 @@
         "name": "Heading Brevity (<=12 words avg, Zero Wh-Question Headings) & Paragraph Pacing (<=85 words avg)",
         "score": 1,
         "details": {
-          "avg_heading_words": 10.1,
+          "avg_heading_words": 5.6,
           "question_headings": [],
-          "avg_paragraph_words": 61.0,
-          "paragraph_count": 2
+          "avg_paragraph_words": 76.3,
+          "paragraph_count": 3
         }
       },
       "G11_formatting_tables_and_math_hygiene": {

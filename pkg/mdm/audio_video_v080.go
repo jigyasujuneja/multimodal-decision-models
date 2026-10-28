@@ -88,11 +88,7 @@ func normalizeDistGo(probs map[string]float64) (map[string]float64, error) {
 		total += v
 	}
 	if total <= 0.0 {
-		u := 1.0 / float64(len(out))
-		for k := range out {
-			out[k] = u
-		}
-		return out, nil
+		return nil, fmt.Errorf("mdm: probability sum must be > 0; uniform 1/K fallbacks are prohibited")
 	}
 	for k, v := range out {
 		out[k] = v / total

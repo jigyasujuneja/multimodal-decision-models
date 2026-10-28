@@ -243,10 +243,11 @@ class TestV080AudioVideoDecisionModels(unittest.TestCase):
 
         data = json.loads(results_path.read_text(encoding="utf-8"))
         self.assertEqual(data["total_instances"], 400)
-        self.assertEqual(data["pillar_1_duplex_vap_turn_taking"]["calibrated_vap_accuracy"], 1.0)
+        self.assertEqual(data["pillar_1_duplex_vap_turn_taking"]["calibrated_vap_accuracy"], 0.88)
+        self.assertEqual(data["pillar_2_conformal_martingale_early_exit"]["conformal_martingale_exit_accuracy"], 0.96)
         self.assertEqual(data["pillar_2_conformal_martingale_early_exit"]["shift_anomaly_recall"], 1.0)
-        self.assertEqual(data["pillar_3_audiovisual_event_agreement"]["jsd_triangle_avel_accuracy"], 1.0)
-        self.assertEqual(data["pillar_4_submodular_spatiotemporal_sheet"]["submodular_stsom_facet_recall"], 1.0)
+        self.assertEqual(data["pillar_3_audiovisual_event_agreement"]["jsd_triangle_avel_accuracy"], 0.95)
+        self.assertEqual(data["pillar_4_submodular_spatiotemporal_sheet"]["submodular_stsom_facet_recall"], 0.975)
 
         from examples import how_i_ai_workflows
 
@@ -257,6 +258,23 @@ class TestV080AudioVideoDecisionModels(unittest.TestCase):
         self.assertEqual(all_10[8]["avel_regime"], "audible_offscreen_event")
         self.assertEqual(all_10[9]["selected_keyframes"], [2, 5, 8, 11])
         self.assertGreater(all_10[9]["compute_saved_fraction"], 0.5)
+
+    def test_zero_fallback_and_strict_type_contracts(self) -> None:
+        # Zero-sum distributions must fail closed instead of fabricating a uniform 1/K fallback
+        with self.assertRaises(ValueError):
+            jensen_shannon_divergence_bits({"a": 0.0, "b": 0.0}, {"a": 0.5, "b": 0.5})
+
+        # Boolean probabilities must be rejected even though bool subclasses int in Python
+        with self.assertRaises(ValueError):
+            jensen_shannon_divergence_bits({"a": True, "b": False}, {"a": 0.5, "b": 0.5})  # type: ignore[dict-item]
+
+        with self.assertRaises(ValueError):
+            ConformalMartingaleTracker(calibration_scores=[True, False])  # type: ignore[list-item]
+
+        # Digital silence WAV must report 0.0 normalized band energies, not uniform 0.25
+        silent_wav = write_pcm16_wav_bytes([0.0] * 1600, sample_rate_hz=16000)
+        silent_summary = extract_wav_acoustic_features(silent_wav, num_windows=2)
+        self.assertEqual(silent_summary.windows[0].band_energies_norm, (0.0, 0.0, 0.0, 0.0))
 
 
 if __name__ == "__main__":

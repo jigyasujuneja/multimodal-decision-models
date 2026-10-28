@@ -535,9 +535,21 @@ def recipe10_streaming_video_stsom_sheet() -> dict[str, Any]:
     ]
     sel_res = select_submodular_spatiotemporal_frames(st_cands, budget_b=4)
 
-    ui_frame = decode_png((FIXTURES_DIR / "ui_component.png").read_bytes()).resize_bilinear(80, 60)
-    pcb_frame = decode_png((FIXTURES_DIR / "pcb_board.png").read_bytes()).resize_bilinear(80, 60)
-    frames = [ui_frame if idx < 6 else pcb_frame for idx in range(12)]
+    frame_files = [
+        "ui_component.png",
+        "bbox-t1-01-offgrid-cta.png",
+        "bbox-t1-04-ongrid-control.png",
+        "bbox-t2-01a-unoccluded-twin.png",
+        "bbox-t2-01b-right-edge-occluded.png",
+        "bbox-t3-01-detr-dual-buttons.png",
+        "bbox-t3-02-detr-stacked-banner-cta.png",
+        "pcb_board.png",
+    ]
+    decoded_frames = [
+        decode_png((FIXTURES_DIR / fname).read_bytes()).resize_bilinear(80, 60)
+        for fname in frame_files
+    ]
+    frames = [decoded_frames[idx % len(decoded_frames)] for idx in range(12)]
     wav_trans = extract_wav_acoustic_features(
         (FIXTURES_DIR / "audiovisual_alarm_transient.wav").read_bytes(),
         num_windows=8,
