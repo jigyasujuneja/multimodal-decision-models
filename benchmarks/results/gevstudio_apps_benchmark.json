@@ -1,0 +1,743 @@
+{
+  "generated_at": "2026-10-30T20:50:57Z",
+  "endpoint": "https://gevstudio.corp.google.com/api/gev/systemone",
+  "vision_arena": {
+    "total_scenes": 3,
+    "total_questions": 48,
+    "total_branches": 150,
+    "leaderboard_reference_top_score": {
+      "points": 2875,
+      "matched": 46,
+      "total": 48
+    },
+    "models": {
+      "gemini-v4xs-decisions (raw)": {
+        "target": "gemini-v4xs-decisions",
+        "matched": 46,
+        "total": 48,
+        "accuracy": 0.9583333333333334,
+        "arena_points": 704,
+        "p50_latency_ms": 2334.2,
+        "brier": 0.025,
+        "ece": 0.0884,
+        "nll": 0.0954,
+        "scenes": [
+          {
+            "scene_id": "warehouse_amr",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 3050.6,
+            "scene_points": 197,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "cafe_desk",
+            "matched": 14,
+            "total": 16,
+            "latency_ms": 2334.2,
+            "scene_points": 225,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 0,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "ops_dashboard",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2128.6,
+            "scene_points": 282,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          }
+        ]
+      },
+      "gemini-v4xs-decisions?hc=true (raw)": {
+        "target": "beyond-decision:/models/gemini-v4xs-decisions?hc=true",
+        "matched": 46,
+        "total": 48,
+        "accuracy": 0.9583333333333334,
+        "arena_points": 615,
+        "p50_latency_ms": 2748.0,
+        "brier": 0.0961,
+        "ece": 0.2138,
+        "nll": 0.2593,
+        "scenes": [
+          {
+            "scene_id": "warehouse_amr",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2748.0,
+            "scene_points": 218,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "cafe_desk",
+            "matched": 14,
+            "total": 16,
+            "latency_ms": 4068.6,
+            "scene_points": 129,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 0,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "ops_dashboard",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2242.2,
+            "scene_points": 268,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          }
+        ]
+      },
+      "gemini-3.5-flash-lite (raw)": {
+        "target": "gemini-3.5-flash-lite",
+        "matched": 48,
+        "total": 48,
+        "accuracy": 1.0,
+        "arena_points": 667,
+        "p50_latency_ms": 2642.1,
+        "brier": 0.0,
+        "ece": 0.0,
+        "nll": 0.0,
+        "scenes": [
+          {
+            "scene_id": "warehouse_amr",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2642.1,
+            "scene_points": 227,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "cafe_desk",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 3091.1,
+            "scene_points": 194,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "ops_dashboard",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2441.7,
+            "scene_points": 246,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          }
+        ]
+      },
+      "gemini-3.1-flash-lite (raw)": {
+        "target": "gemini-3.1-flash-lite",
+        "matched": 48,
+        "total": 48,
+        "accuracy": 1.0,
+        "arena_points": 626,
+        "p50_latency_ms": 2857.3,
+        "brier": 0.0,
+        "ece": 0.0001,
+        "nll": 0.0001,
+        "scenes": [
+          {
+            "scene_id": "warehouse_amr",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2954.5,
+            "scene_points": 203,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "cafe_desk",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2822.0,
+            "scene_points": 213,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "ops_dashboard",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2857.3,
+            "scene_points": 210,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          }
+        ]
+      },
+      "saturn-moe-3p8b-fst (raw)": {
+        "target": "saturn-moe-3p8b-qat-v0-fst-genmedia",
+        "matched": 46,
+        "total": 48,
+        "accuracy": 0.9583333333333334,
+        "arena_points": 151,
+        "p50_latency_ms": 11604.4,
+        "brier": 0.0778,
+        "ece": 0.0386,
+        "nll": 0.1164,
+        "scenes": [
+          {
+            "scene_id": "warehouse_amr",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 11708.4,
+            "scene_points": 51,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "cafe_desk",
+            "matched": 14,
+            "total": 16,
+            "latency_ms": 10928.5,
+            "scene_points": 48,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 4,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "ops_dashboard",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 11604.4,
+            "scene_points": 52,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          }
+        ]
+      },
+      "MDM Calibrated Stack (v4xs + Visual Compiler + PoE + Cascade)": {
+        "target": "gemini-v4xs-decisions + mdm_stack",
+        "matched": 48,
+        "total": 48,
+        "accuracy": 1.0,
+        "arena_points": 725,
+        "p50_latency_ms": 2130.4,
+        "brier": 0.0,
+        "ece": 0.0013,
+        "nll": 0.0013,
+        "escalated_slots": 31,
+        "scenes": [
+          {
+            "scene_id": "warehouse_amr",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 3832.1,
+            "scene_points": 157,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "cafe_desk",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2094.5,
+            "scene_points": 286,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          },
+          {
+            "scene_id": "ops_dashboard",
+            "matched": 16,
+            "total": 16,
+            "latency_ms": 2130.4,
+            "scene_points": 282,
+            "by_category": {
+              "choice": {
+                "matched": 5,
+                "total": 5
+              },
+              "object": {
+                "matched": 6,
+                "total": 6
+              },
+              "negative": {
+                "matched": 3,
+                "total": 3
+              },
+              "score": {
+                "matched": 2,
+                "total": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    "mcnemar_mdm_vs_raw_v4xs": {
+      "b_mdm_only": 2,
+      "c_raw_only": 0,
+      "p_value": 0.5
+    }
+  },
+  "triage_arena": {
+    "total_cases": 70,
+    "total_slots": 95,
+    "leaderboard_reference_top_score": {
+      "matched_slots": 89,
+      "total_slots": 95,
+      "slot_accuracy": 0.9368,
+      "polysemy_top": "22/25 (88.0%)"
+    },
+    "models": {
+      "gemini-v4xs-decisions (raw)": {
+        "matched_slots": 89,
+        "total_slots": 95,
+        "slot_accuracy": 0.9368,
+        "exact_cases": 64,
+        "total_cases": 70,
+        "case_exact_accuracy": 0.9143,
+        "arena_points": 4950,
+        "p50_latency_ms": 1967.8,
+        "brier": 0.0845,
+        "ece": 0.0469,
+        "nll": 0.1674,
+        "by_suite": {
+          "ops": {
+            "cases": 25,
+            "exact_cases": 20,
+            "matched_slots": 45,
+            "total_slots": 50,
+            "slot_accuracy": 0.9
+          },
+          "polysemy": {
+            "cases": 25,
+            "exact_cases": 25,
+            "matched_slots": 25,
+            "total_slots": 25,
+            "slot_accuracy": 1.0
+          },
+          "guardrails": {
+            "cases": 20,
+            "exact_cases": 19,
+            "matched_slots": 19,
+            "total_slots": 20,
+            "slot_accuracy": 0.95
+          }
+        }
+      },
+      "dgem:vertex (DGemma 26B-A4B NVFP4 raw)": {
+        "matched_slots": 78,
+        "total_slots": 95,
+        "slot_accuracy": 0.8211,
+        "exact_cases": 54,
+        "total_cases": 70,
+        "case_exact_accuracy": 0.7714,
+        "arena_points": 4400,
+        "p50_latency_ms": 2035.3,
+        "brier": 0.2898,
+        "ece": 0.136,
+        "nll": 0.5628,
+        "by_suite": {
+          "ops": {
+            "cases": 25,
+            "exact_cases": 20,
+            "matched_slots": 44,
+            "total_slots": 50,
+            "slot_accuracy": 0.88
+          },
+          "polysemy": {
+            "cases": 25,
+            "exact_cases": 17,
+            "matched_slots": 17,
+            "total_slots": 25,
+            "slot_accuracy": 0.68
+          },
+          "guardrails": {
+            "cases": 20,
+            "exact_cases": 17,
+            "matched_slots": 17,
+            "total_slots": 20,
+            "slot_accuracy": 0.85
+          }
+        }
+      },
+      "gemini-3.5-flash-lite (raw)": {
+        "matched_slots": 82,
+        "total_slots": 95,
+        "slot_accuracy": 0.8632,
+        "exact_cases": 57,
+        "total_cases": 70,
+        "case_exact_accuracy": 0.8143,
+        "arena_points": 4675,
+        "p50_latency_ms": 2318.8,
+        "brier": 0.2721,
+        "ece": 0.1363,
+        "nll": 1.5533,
+        "by_suite": {
+          "ops": {
+            "cases": 25,
+            "exact_cases": 23,
+            "matched_slots": 48,
+            "total_slots": 50,
+            "slot_accuracy": 0.96
+          },
+          "polysemy": {
+            "cases": 25,
+            "exact_cases": 17,
+            "matched_slots": 17,
+            "total_slots": 25,
+            "slot_accuracy": 0.68
+          },
+          "guardrails": {
+            "cases": 20,
+            "exact_cases": 17,
+            "matched_slots": 17,
+            "total_slots": 20,
+            "slot_accuracy": 0.85
+          }
+        }
+      },
+      "MDM Calibrated Cascade (Stage-1 v4xs+dgem -> Stage-2 3.5-flash-lite)": {
+        "matched_slots": 92,
+        "total_slots": 95,
+        "slot_accuracy": 0.9684,
+        "exact_cases": 67,
+        "total_cases": 70,
+        "case_exact_accuracy": 0.9571,
+        "arena_points": 5175,
+        "p50_latency_ms": 1988.0,
+        "brier": 0.0594,
+        "ece": 0.0342,
+        "nll": 0.1342,
+        "by_suite": {
+          "ops": {
+            "cases": 25,
+            "exact_cases": 23,
+            "matched_slots": 48,
+            "total_slots": 50,
+            "slot_accuracy": 0.96
+          },
+          "polysemy": {
+            "cases": 25,
+            "exact_cases": 25,
+            "matched_slots": 25,
+            "total_slots": 25,
+            "slot_accuracy": 1.0
+          },
+          "guardrails": {
+            "cases": 20,
+            "exact_cases": 19,
+            "matched_slots": 19,
+            "total_slots": 20,
+            "slot_accuracy": 0.95
+          }
+        },
+        "escalated_slots": 4,
+        "stage1_fast_exit_rate": 0.9579
+      }
+    },
+    "mcnemar_mdm_vs_v4xs": {
+      "b_mdm_only": 3,
+      "c_v4xs_only": 0,
+      "p_value": 0.25
+    },
+    "mcnemar_mdm_vs_dgem_vertex": {
+      "b_mdm_only": 14,
+      "c_dgem_only": 0,
+      "p_value": 0.0001
+    }
+  },
+  "mdm_multimodal_suites": {
+    "suite_3a_dual_buffer_contact_sheets": {
+      "total": 4,
+      "raw_v4xs_correct": 3,
+      "raw_v4xs_accuracy": 0.75,
+      "mdm_calibrated_correct": 4,
+      "mdm_calibrated_accuracy": 1.0
+    },
+    "suite_3b_set_of_marks_ui_grounding": {
+      "total": 4,
+      "raw_v4xs_correct": 4,
+      "raw_v4xs_accuracy": 1.0,
+      "mdm_calibrated_correct": 4,
+      "mdm_calibrated_accuracy": 1.0
+    },
+    "suite_3c_v080_audio_wav_and_st_som_video": {
+      "total": 4,
+      "raw_v4xs_correct": 2,
+      "raw_v4xs_accuracy": 0.5,
+      "mdm_calibrated_correct": 4,
+      "mdm_calibrated_accuracy": 1.0,
+      "p50_audio_wav_latency_ms": 2645.0
+    }
+  },
+  "exported_csv_rows": 15
+}

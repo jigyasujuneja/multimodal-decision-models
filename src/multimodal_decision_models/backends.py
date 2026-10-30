@@ -40,6 +40,8 @@ import random
 import re
 import socket
 import string
+import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -510,6 +512,422 @@ class DgemSystemOneBackend:
             max_retries=self.max_retries,
             base_backoff_sec=self.base_backoff_sec,
         )
+        dists, ev_map, trace = self.parse_response(data, questions)
+        self.last_evidence = ev_map
+        self.last_trace = trace
+        return dists
+
+
+class GevStudioSystemOneBackend:
+    """Adapter for Gev Studio (/api/gev/systemone) multi-target System 1 decision endpoints.
+
+    Supports all Gev Studio backend targets via `?target=...` (e.g., `gemini-v4xs-decisions`,
+    `beyond-decision:/models/gemini-v4xs-decisions?hc=true`, `gemini-3.5-flash-lite`,
+    `gemini-3.1-flash-lite`, `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`),
+    multimodal `media` payloads (`image/png`, `image/jpeg`, `audio/wav`, `video/mp4`),
+    and all 3 question types (`choice`, `noul`, `score`).
+    """
+
+    def __init__(
+        self,
+        endpoint_url: str = "https://gevstudio.corp.google.com/api/gev/systemone",
+        target: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        api_key: str | None = None,
+        use_sso_client: bool = False,
+        allow_discrete_fallback: bool = True,
+        label_smoothing_eps: float = 1e-4,
+        timeout_sec: float = 30.0,
+        max_retries: int = 2,
+        base_backoff_sec: float = 0.05,
+        name: str | None = None,
+    ) -> None:
+        if not isinstance(endpoint_url, str):
+            raise SchemaContractViolationError(
+                f"endpoint_url must be a string, got {endpoint_url!r}"
+            )
+        clean_url = endpoint_url.rstrip("/")
+        _validate_http_url(clean_url)
+        if target is not None and (not isinstance(target, str) or not target.strip()):
+            raise SchemaContractViolationError(f"target must be a non-empty string or None, got {target!r}")
+        if model is not None and (not isinstance(model, str) or not model.strip()):
+            raise SchemaContractViolationError(f"model must be a non-empty string or None, got {model!r}")
+        if temperature is not None:
+            temperature = _require_nonneg_finite_number(temperature, "temperature")
+        if api_key is not None and not isinstance(api_key, str):
+            raise SchemaContractViolationError(f"api_key must be a string or None, got {api_key!r}")
+        if not isinstance(use_sso_client, bool):
+            raise SchemaContractViolationError("use_sso_client must be a boolean")
+        if not isinstance(allow_discrete_fallback, bool):
+            raise SchemaContractViolationError("allow_discrete_fallback must be a boolean")
+        clean_eps = _require_positive_finite_number(label_smoothing_eps, "label_smoothing_eps")
+        if clean_eps >= 0.5:
+            raise SchemaContractViolationError(
+                f"label_smoothing_eps must be in (0, 0.5), got {label_smoothing_eps!r}"
+            )
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise SchemaContractViolationError(
+                f"GevStudioSystemOneBackend name must be a non-empty string when provided, got {name!r}"
+            )
+        self.endpoint_url = clean_url
+        self.target = target.strip() if target else None
+        self.model = model.strip() if model else None
+        self.temperature = temperature
+        self.api_key = api_key
+        self.use_sso_client = use_sso_client
+        self.allow_discrete_fallback = allow_discrete_fallback
+        self.label_smoothing_eps = clean_eps
+        self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
+        self.max_retries = _require_nonneg_int(max_retries, "max_retries")
+        self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
+        default_suffix = self.target or self.model or "default"
+        self.name = name or f"gev_studio:{default_suffix}"
+        self.last_evidence: dict[str, str] = {}
+        self.last_trace: dict[str, Any] = {}
+
+    @staticmethod
+    def _infer_mime_and_b64(raw_item: str) -> dict[str, str]:
+        """Parse a data URI or raw base64 string into Gev Studio's {mime_type, data} media block."""
+        s = raw_item.strip()
+        if s.startswith("data:"):
+            semi = s.find(";base64,")
+            if semi > 5:
+                mime = s[5:semi].strip() or "image/png"
+                b64 = s[semi + 8 :].strip()
+                return {"mime_type": mime, "data": b64}
+        if s.startswith("/9j/"):
+            return {"mime_type": "image/jpeg", "data": s}
+        if s.startswith("iVBOR"):
+            return {"mime_type": "image/png", "data": s}
+        if s.startswith("R0lGR"):
+            return {"mime_type": "image/webp", "data": s}
+        if s.startswith("UklGR"):
+            return {"mime_type": "audio/wav", "data": s}
+        return {"mime_type": "image/png", "data": s}
+
+    def build_url(self) -> str:
+        """Return the resolved /api/gev/systemone URL with URL-encoded ?target=... query parameter."""
+        parsed = urllib.parse.urlparse(self.endpoint_url)
+        base = (
+            self.endpoint_url
+            if parsed.path.endswith("/api/gev/systemone") or parsed.path.endswith("/v1/systemone")
+            else f"{self.endpoint_url}/api/gev/systemone"
+        )
+        if not self.target:
+            return base
+        encoded_target = urllib.parse.quote(self.target, safe="")
+        sep = "&" if "?" in base else "?"
+        return f"{base}{sep}target={encoded_target}"
+
+    def build_payload(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None = None,
+        media: list[Mapping[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Construct a Gev Studio systemone.Request JSON payload."""
+        clean_state = state
+        extracted_media: list[dict[str, str]] = []
+        if isinstance(state, Mapping) and "__media__" in state:
+            clean_state = {k: v for k, v in state.items() if k != "__media__"}
+            raw_m = state.get("__media__")
+            if isinstance(raw_m, list):
+                for m_item in raw_m:
+                    if isinstance(m_item, Mapping) and m_item.get("data"):
+                        extracted_media.append(
+                            {
+                                "mime_type": str(m_item.get("mime_type") or "image/png"),
+                                "data": str(m_item["data"]),
+                            }
+                        )
+                    elif isinstance(m_item, str) and m_item.strip():
+                        extracted_media.append(self._infer_mime_and_b64(m_item))
+
+        if images:
+            for img in images:
+                if isinstance(img, str) and img.strip():
+                    extracted_media.append(self._infer_mime_and_b64(img))
+
+        if media:
+            for m_item in media:
+                if isinstance(m_item, Mapping) and m_item.get("data"):
+                    extracted_media.append(
+                        {
+                            "mime_type": str(m_item.get("mime_type") or "image/png"),
+                            "data": str(m_item["data"]),
+                        }
+                    )
+
+        q_payload: dict[str, Any] = {}
+        for qid, q in questions.items():
+            if q.type == "score":
+                q_payload[qid] = {
+                    "type": "score",
+                    "instructions": q.instructions,
+                    "criteria": list(q.levels),
+                }
+            elif q.type == "noul":
+                q_payload[qid] = {
+                    "type": "noul",
+                    "instructions": q.instructions,
+                }
+            else:
+                ordered_crit = {k: q.criteria[k] for k in q.option_keys() if k in q.criteria}
+                q_payload[qid] = {
+                    "type": "choice",
+                    "instructions": q.instructions,
+                    "criteria": ordered_crit,
+                }
+
+        payload: dict[str, Any] = {
+            "state": _sanitize_value(clean_state),
+            "questions": q_payload,
+        }
+        if self.model:
+            payload["model"] = self.model
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if extracted_media:
+            payload["media"] = extracted_media
+        return payload
+
+    @staticmethod
+    def _resolve_noul_keys(q: DecisionQuestion) -> tuple[str, str]:
+        """Resolve (negative_key, positive_key) for a noul question."""
+        keys = q.option_keys()
+        if len(keys) == 2:
+            k0, k1 = str(keys[0]), str(keys[1])
+            pos_aliases = {"1", "true", "yes", "positive", "pass", "valid"}
+            neg_aliases = {"0", "false", "no", "negative", "fail", "invalid"}
+            if k0.lower() in pos_aliases and k1.lower() in neg_aliases:
+                return k1, k0
+            return k0, k1
+        return "0", "1"
+
+    @staticmethod
+    def _smoothed_discrete_distribution(
+        chosen_key: str,
+        option_keys: list[str],
+        eps: float,
+    ) -> dict[str, float]:
+        if len(option_keys) < 2:
+            return {chosen_key: 1.0}
+        rem = eps / float(len(option_keys) - 1)
+        return {k: (1.0 - eps if k == chosen_key else rem) for k in option_keys}
+
+    def parse_response(
+        self,
+        data: Mapping[str, Any],
+        questions: Mapping[str, DecisionQuestion],
+    ) -> tuple[dict[str, dict[str, float]], dict[str, str], dict[str, Any]]:
+        """Parse Gev Studio /api/gev/systemone response across choice, noul, and score slots."""
+        if not isinstance(data, Mapping):
+            raise SchemaContractViolationError("invalid Gev Studio /api/gev/systemone response root")
+        if "error" in data and data["error"] and "answers" not in data:
+            raise UpstreamTransientError(f"Gev Studio error response: {data['error']}")
+        answers = data.get("answers")
+        if not isinstance(answers, Mapping):
+            raise SchemaContractViolationError("Gev Studio response missing 'answers' object")
+
+        out: dict[str, dict[str, float]] = {}
+        evidence_map: dict[str, str] = {}
+        discrete_fallback_slots: list[str] = []
+
+        for qid, q in questions.items():
+            ans = answers.get(qid)
+            if not isinstance(ans, Mapping):
+                raise SchemaContractViolationError(f"missing answer object for question {qid!r}")
+            raw_probs = ans.get("probabilities")
+
+            if q.type == "noul":
+                neg_key, pos_key = self._resolve_noul_keys(q)
+                p1: float | None = None
+                if isinstance(raw_probs, Mapping) and raw_probs:
+                    if "1" in raw_probs:
+                        p1 = _require_nonneg_finite_number(raw_probs["1"], f"answers[{qid!r}].probabilities['1']")
+                    elif pos_key in raw_probs:
+                        p1 = _require_nonneg_finite_number(
+                            raw_probs[pos_key], f"answers[{qid!r}].probabilities[{pos_key!r}]"
+                        )
+                    elif "true" in raw_probs:
+                        p1 = _require_nonneg_finite_number(
+                            raw_probs["true"], f"answers[{qid!r}].probabilities['true']"
+                        )
+                if p1 is None and ans.get("noul_prob") is not None:
+                    p1 = _require_nonneg_finite_number(ans["noul_prob"], f"answers[{qid!r}].noul_prob")
+                if p1 is None and isinstance(ans.get("noul"), bool):
+                    if not self.allow_discrete_fallback:
+                        raise LogprobAlignmentError(f"missing noul probabilities for slot {qid!r}")
+                    p1 = (1.0 - self.label_smoothing_eps) if ans["noul"] else self.label_smoothing_eps
+                    discrete_fallback_slots.append(qid)
+                if p1 is None:
+                    raise LogprobAlignmentError(f"unable to extract noul probability for slot {qid!r}")
+                p1_clamped = min(1.0 - 1e-9, max(1e-9, float(p1)))
+                out[qid] = {neg_key: 1.0 - p1_clamped, pos_key: p1_clamped}
+
+            elif q.type == "score":
+                levels = list(q.levels)
+                if not levels:
+                    raise SchemaContractViolationError(f"score question {qid!r} has empty levels")
+                if isinstance(raw_probs, Mapping) and raw_probs:
+                    legend = ans.get("legend")
+                    mapped_probs: dict[str, float] = {}
+                    for idx_key, p_val in raw_probs.items():
+                        idx_str = str(idx_key)
+                        prob = _require_nonneg_finite_number(
+                            p_val, f"answers[{qid!r}].probabilities[{idx_str!r}]"
+                        )
+                        if isinstance(legend, Mapping) and idx_str in legend:
+                            mapped_probs[str(legend[idx_str])] = prob
+                        elif idx_str.isdigit() and int(idx_str) < len(levels):
+                            mapped_probs[levels[int(idx_str)]] = prob
+                        elif idx_str in levels:
+                            mapped_probs[idx_str] = prob
+                    for lvl in levels:
+                        mapped_probs.setdefault(lvl, 1e-9)
+                    total = sum(mapped_probs.values())
+                    out[qid] = {k: v / total for k, v in mapped_probs.items()}
+                elif ans.get("score") is not None and self.allow_discrete_fallback:
+                    s_idx = _require_nonneg_int(ans["score"], f"answers[{qid!r}].score")
+                    chosen_lvl = levels[min(s_idx, len(levels) - 1)]
+                    out[qid] = self._smoothed_discrete_distribution(
+                        chosen_lvl, levels, self.label_smoothing_eps
+                    )
+                    discrete_fallback_slots.append(qid)
+                else:
+                    raise LogprobAlignmentError(f"empty probabilities map for score question {qid!r}")
+
+            else:
+                opt_keys = q.option_keys()
+                if isinstance(raw_probs, Mapping) and raw_probs:
+                    cleaned = _validate_slot_distribution(raw_probs, f"GevStudio slot {qid!r}")
+                    if opt_keys:
+                        aligned: dict[str, float] = {}
+                        for k in opt_keys:
+                            aligned[k] = float(cleaned.get(k, 1e-9))
+                        total = sum(aligned.values())
+                        out[qid] = {k: v / total for k, v in aligned.items()}
+                    else:
+                        total = sum(cleaned.values())
+                        out[qid] = {k: v / total for k, v in cleaned.items()}
+                elif isinstance(ans.get("choice"), str) and ans["choice"] and self.allow_discrete_fallback:
+                    chosen = str(ans["choice"])
+                    if opt_keys and chosen not in opt_keys:
+                        raise SchemaContractViolationError(
+                            f"discrete choice {chosen!r} for slot {qid!r} not in option_keys {opt_keys}"
+                        )
+                    keys_for_dist = opt_keys if opt_keys else [chosen]
+                    out[qid] = self._smoothed_discrete_distribution(
+                        chosen, keys_for_dist, self.label_smoothing_eps
+                    )
+                    discrete_fallback_slots.append(qid)
+                else:
+                    raise LogprobAlignmentError(f"empty probabilities map for choice question {qid!r}")
+
+            ev = ans.get("evidence")
+            if isinstance(ev, str) and ev:
+                evidence_map[qid] = ev
+
+        trace: dict[str, Any] = {
+            "target": self.target or "default",
+            "discrete_fallback_slots": discrete_fallback_slots,
+        }
+        return out, evidence_map, trace
+
+    def _post_via_sso_client(self, url: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Execute POST via Google corp `sso_client` CLI using a /tmp payload file."""
+        try:
+            raw_json = json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise SchemaContractViolationError(f"failed to serialize request payload: {exc}") from exc
+
+        attempts = max(0, int(self.max_retries)) + 1
+        last_err: Exception | None = None
+        timeout_int = max(5, int(math.ceil(self.timeout_sec)))
+
+        for attempt in range(attempts):
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", prefix="gev_req_", dir="/tmp", delete=True
+            ) as tmp_f:
+                tmp_f.write(raw_json)
+                tmp_f.flush()
+                cmd = [
+                    "sso_client",
+                    f"--url={url}",
+                    "--method=POST",
+                    "--headers=Content-Type: application/json",
+                    f"--data_file={tmp_f.name}",
+                    f"--request_timeout={timeout_int}",
+                ]
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.timeout_sec + 5.0,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    last_err = UpstreamTransientError(f"sso_client timed out after {self.timeout_sec}s: {exc}")
+                    proc = None
+
+            if proc is not None:
+                stdout = (proc.stdout or "").strip()
+                if stdout.startswith("{"):
+                    try:
+                        parsed = json.loads(stdout)
+                    except json.JSONDecodeError as exc:
+                        last_err = UpstreamTransientError(f"invalid JSON from sso_client: {exc}")
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        if "error" in parsed and "answers" not in parsed:
+                            last_err = UpstreamTransientError(
+                                f"Gev Studio error from {url}: {parsed.get('error')}"
+                            )
+                        else:
+                            return parsed
+                else:
+                    stderr_snip = (proc.stderr or stdout)[:240]
+                    last_err = UpstreamTransientError(
+                        f"sso_client non-JSON response (rc={proc.returncode}): {stderr_snip}"
+                    )
+
+            if attempt + 1 < attempts:
+                backoff = self.base_backoff_sec * (2**attempt) * (0.75 + 0.5 * random.random())
+                time.sleep(backoff)
+
+        assert last_err is not None
+        if isinstance(last_err, DecisionContractError):
+            raise last_err
+        raise UpstreamTransientError(str(last_err))
+
+    def score_questions(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None = None,
+    ) -> dict[str, dict[str, float]]:
+        if not questions:
+            return {}
+        url = self.build_url()
+        _validate_http_url(url)
+        payload = self.build_payload(state, questions, images)
+        if self.use_sso_client:
+            data = self._post_via_sso_client(url, payload)
+        else:
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            data = _post_json_with_retry(
+                url,
+                payload,
+                headers,
+                timeout_sec=self.timeout_sec,
+                max_retries=self.max_retries,
+                base_backoff_sec=self.base_backoff_sec,
+            )
         dists, ev_map, trace = self.parse_response(data, questions)
         self.last_evidence = ev_map
         self.last_trace = trace
