@@ -371,4 +371,27 @@ func TestJevAgentHarnessDelegationGuardSFTAndTango(t *testing.T) {
 	if sWin != "d1_r1" || math.Abs((sProbs["d1_r1"]+sProbs["d1_r2"])-0.80) > 1e-4 {
 		t.Fatalf("expected Sinkhorn winner d1_r1 and row marginal 0.80, got win=%s probs=%v", sWin, sProbs)
 	}
+
+	// Proposition 4: Combined label-shift and covariate-shift weighted conformal prediction set
+	lsCalProbs := []map[string]float64{
+		{"head": 0.90, "tail": 0.10},
+		{"head": 0.85, "tail": 0.15},
+		{"head": 0.80, "tail": 0.20},
+		{"head": 0.65, "tail": 0.35},
+		{"head": 0.55, "tail": 0.45},
+	}
+	lsCalLabels := []string{"head", "head", "head", "tail", "tail"}
+	lsRes, err := LabelShiftWeightedConformalPredictionSet(
+		lsCalProbs,
+		lsCalLabels,
+		map[string]float64{"head": 0.25, "tail": 4.0},
+		map[string]float64{"head": 0.58, "tail": 0.42},
+		nil,
+		1.0,
+		0.10,
+		ConformalConfig{Method: "raps", LamReg: 0.01, KReg: 1},
+	)
+	if err != nil || len(lsRes.PredictionSet) < 2 {
+		t.Fatalf("expected tail included in label-shift weighted conformal set, got %+v, err=%v", lsRes, err)
+	}
 }

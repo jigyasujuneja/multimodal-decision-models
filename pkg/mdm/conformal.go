@@ -862,6 +862,135 @@ func WeightedConformalPredictionSet(
 	return ConformalPredictionSet(testProbs, qWeighted, resolved)
 }
 
+// LabelShiftWeightedConformalPredictionSet constructs a conformal prediction set under combined
+// label and covariate shift (Proposition 4, Podkopaev & Ramdas UAI 2021; Tibshirani et al. NeurIPS 2019).
+func LabelShiftWeightedConformalPredictionSet(
+	calibProbs []map[string]float64,
+	calibLabels []string,
+	classLikelihoodRatios map[string]float64,
+	testProbs map[string]float64,
+	calibCovariateWeights []float64,
+	testCovariateWeight float64,
+	alpha float64,
+	cfg ConformalConfig,
+) (ConformalSet, error) {
+	if math.IsNaN(alpha) || math.IsInf(alpha, 0) || alpha <= 0 || alpha >= 1 {
+		return ConformalSet{}, fmt.Errorf("mdm: alpha must lie strictly in (0, 1), got %v", alpha)
+	}
+	n := len(calibLabels)
+	if n == 0 || len(calibProbs) != n {
+		return ConformalSet{}, errors.New("mdm: calibProbs and calibLabels must be non-empty slices of equal length")
+	}
+	if len(calibCovariateWeights) != 0 && len(calibCovariateWeights) != n {
+		return ConformalSet{}, errors.New("mdm: calibCovariateWeights must be nil or match calibProbs length")
+	}
+	if math.IsNaN(testCovariateWeight) || math.IsInf(testCovariateWeight, 0) || testCovariateWeight <= 0 {
+		return ConformalSet{}, fmt.Errorf("mdm: testCovariateWeight must be finite and > 0, got %v", testCovariateWeight)
+	}
+	if len(classLikelihoodRatios) == 0 {
+		return ConformalSet{}, errors.New("mdm: classLikelihoodRatios must be non-empty")
+	}
+	for k, rho := range classLikelihoodRatios {
+		if math.IsNaN(rho) || math.IsInf(rho, 0) || rho <= 0 {
+			return ConformalSet{}, fmt.Errorf("mdm: classLikelihoodRatios[%q] must be finite and > 0, got %v", k, rho)
+		}
+	}
+	resolved, err := resolveConformalConfig(cfg)
+	if err != nil {
+		return ConformalSet{}, err
+	}
+
+	type weightedPair struct {
+		score  float64
+		weight float64
+	}
+	pairs := make([]weightedPair, n)
+	calWSum := 0.0
+	for i := 0; i < n; i++ {
+		covW := 1.0
+		if len(calibCovariateWeights) > 0 {
+			covW = calibCovariateWeights[i]
+			if math.IsNaN(covW) || math.IsInf(covW, 0) || covW <= 0 {
+				return ConformalSet{}, fmt.Errorf("mdm: calibCovariateWeights[%d] must be finite and > 0, got %v", i, covW)
+			}
+		}
+		ranked, norm, nErr := normalizeAndRankConformalProbs(calibProbs[i])
+		if nErr != nil {
+			return ConformalSet{}, nErr
+		}
+		gold := calibLabels[i]
+		if _, ok := norm[gold]; !ok {
+			return ConformalSet{}, fmt.Errorf("mdm: calibration label %q at index %d missing from probabilities", gold, i)
+		}
+		groups := partitionConformalTieGroups(ranked, norm)
+		itemScores := computeDeterministicConformalScores(groups, norm, resolved)
+		rhoY := 1.0
+		if rVal, exists := classLikelihoodRatios[gold]; exists {
+			rhoY = rVal
+		}
+		wi := covW * rhoY
+		pairs[i] = weightedPair{score: itemScores[gold], weight: wi}
+		calWSum += wi
+	}
+
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].score < pairs[j].score })
+	target := 1.0 - alpha
+
+	testRanked, testNorm, tErr := normalizeAndRankConformalProbs(testProbs)
+	if tErr != nil {
+		return ConformalSet{}, tErr
+	}
+	testGroups := partitionConformalTieGroups(testRanked, testNorm)
+	testScores := computeDeterministicConformalScores(testGroups, testNorm, resolved)
+
+	abstainSet := make(map[string]bool, len(resolved.AbstainKeys))
+	for _, ak := range resolved.AbstainKeys {
+		trimmed := strings.ToLower(strings.TrimSpace(ak))
+		if trimmed != "" {
+			abstainSet[trimmed] = true
+		}
+	}
+
+	var predSet []string
+	maxQ := 0.0
+	containsAbstain := false
+	for _, cand := range testRanked {
+		rhoCand := 1.0
+		if rVal, exists := classLikelihoodRatios[cand]; exists {
+			rhoCand = rVal
+		}
+		wTestY := testCovariateWeight * rhoCand
+		totW := calWSum + wTestY
+		cum := 0.0
+		qY := math.Inf(1)
+		for _, pr := range pairs {
+			cum += pr.weight / totW
+			if cum >= target-1e-12 {
+				qY = pr.score
+				break
+			}
+		}
+		if !math.IsInf(qY, 0) && qY > maxQ {
+			maxQ = qY
+		}
+		if math.IsInf(qY, 1) || testScores[cand] <= qY+1e-12 {
+			predSet = append(predSet, cand)
+			if abstainSet[strings.ToLower(strings.TrimSpace(cand))] {
+				containsAbstain = true
+			}
+		}
+	}
+	singleton := len(predSet) == 1
+	return ConformalSet{
+		PredictionSet:   predSet,
+		QHat:            maxQ,
+		Singleton:       singleton,
+		ContainsAbstain: containsAbstain,
+		ShouldEscalate:  (!singleton) || containsAbstain,
+		Method:          resolved.Method,
+	}, nil
+}
+
 // CalibrateMultiSlotJointConformal computes simultaneous family-wise conformal thresholds across S slots
 // so P(forall s in 1..S: Y_{n+1,s} in C_s(X_{n+1})) >= 1 - familyAlpha.
 func CalibrateMultiSlotJointConformal(
