@@ -47,6 +47,7 @@ PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
 
 # 3. Regenerate the 400-item 8-track MDM-Bench report and run the 8 practical workflows
 PYTHONPATH=src python3 benchmarks/run_mdm_bench.py
+PYTHONPATH=src python3 benchmarks/run_formal_propositions_v090_bench.py
 PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 ```
 

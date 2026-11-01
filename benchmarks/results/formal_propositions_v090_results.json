@@ -1,0 +1,47 @@
+{
+  "pillar1_top_m_entropy": {
+    "catalog_size_k": 100,
+    "global_entropy_accuracy": 0.58,
+    "global_escalation_rate": 0.0,
+    "hesitation_threshold": 0.16,
+    "mcnemar_p_value": 0.003327,
+    "n": 100,
+    "sibling_tie_recall_global": 0.0,
+    "sibling_tie_recall_top_m": 1.0,
+    "top_m_entropy_accuracy": 0.75,
+    "top_m_escalation_rate": 1.0
+  },
+  "pillar2_cascade_risk_bound": {
+    "cascade_risk": 0.21,
+    "coverage_guarantee_satisfied": true,
+    "empirical_hybrid_coverage": 0.96,
+    "escalation_rate": 0.86,
+    "n": 100,
+    "net_risk_reduction": 0.12,
+    "stage1_risk": 0.33,
+    "strictly_improves": true,
+    "theoretical_coverage_floor": 0.9172
+  },
+  "pillar3_polytope_and_sinkhorn": {
+    "am_gm_facet_bound_13_over_27": 0.481481,
+    "facet_bound_verified_all_100": true,
+    "max_violated_facet_score": 0.424444,
+    "mcnemar_p_value": 0.0,
+    "mean_valid_triangle_score": 0.5955,
+    "n": 100,
+    "naive_marginal_trie_accuracy": 0.0,
+    "sinkhorn_dealiased_trie_accuracy": 1.0
+  },
+  "pillar4_combined_shift_conformal": {
+    "combined_shift_overall_coverage": 0.9825,
+    "combined_shift_tail_coverage": 0.9125,
+    "mcnemar_p_value_vs_unweighted": 0.0,
+    "n": 80,
+    "target_coverage": 0.9,
+    "total_oof_items": 400,
+    "unweighted_overall_coverage": 0.9,
+    "unweighted_tail_coverage": 0.575
+  },
+  "suite": "formal_propositions_v090",
+  "total_instances": 380
+}
