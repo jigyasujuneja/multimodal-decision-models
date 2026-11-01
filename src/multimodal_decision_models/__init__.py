@@ -185,6 +185,7 @@ from .mcp_server import (
 from .prm_tree_search import (
     PRMBranchNode,
     PRMTreeSearchResult,
+    calibrate_prm_conformal_residual_quantile,
     calibrate_prm_horizon_discount,
     run_calibrated_prm_puct_search,
     score_prm_rubric_distribution,
@@ -373,6 +374,7 @@ __all__ = [
     "calibrate_ltt_funnel_gates",
     "calibrate_mondrian_conformal_quantiles",
     "calibrate_multislot_joint_conformal",
+    "calibrate_prm_conformal_residual_quantile",
     "calibrate_prm_horizon_discount",
     "check_transitive_triangles",
     "cluster_bootstrap_ci",

@@ -118,7 +118,7 @@ def calibrate_prm_horizon_discount(
 ) -> dict[int, float]:
     """Calibrate per-depth survival discount factors gamma_d minimizing step-value Brier error.
 
-    Counteracts step-level overconfidence on deep reasoning chains (CondOT-PRM, 2026).
+    Counteracts step-level overconfidence on deep reasoning chains (Lightman et al., ICLR 2024).
     """
     if not calib_depths or len(calib_depths) != len(calib_rubric_probs) or len(calib_depths) != len(calib_outcomes):
         raise ValueError("calib_depths, calib_rubric_probs, and calib_outcomes must be non-empty sequences of equal length")
@@ -149,10 +149,58 @@ def calibrate_prm_horizon_discount(
     return discounts
 
 
+def calibrate_prm_conformal_residual_quantile(
+    calib_predicted_means: Sequence[float],
+    calib_outcomes: Sequence[bool | float],
+    *,
+    alpha: float = 0.10,
+) -> float:
+    """Calibrate finite-sample split-conformal absolute residual quantile q_hat_{1-alpha}.
+
+    Computes the order statistic at index ceil((n + 1) * (1 - alpha)) - 1 over held-out
+    absolute step-value residuals |Y_i - V_hat_i| in [0, 1].
+
+    Args:
+        calib_predicted_means: Predicted step values V_hat_i in [0, 1].
+        calib_outcomes: Realized binary or continuous outcomes Y_i in [0, 1].
+        alpha: Miscoverage target in (0, 1).
+
+    Returns:
+        Finite-sample split-conformal residual quantile q_hat in [0, 1].
+
+    Raises:
+        ValueError: If inputs are empty, mismatched in length, or out of range.
+    """
+    if not calib_predicted_means or len(calib_predicted_means) != len(calib_outcomes):
+        raise ValueError(
+            "calib_predicted_means and calib_outcomes must be non-empty sequences of equal length"
+        )
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not (0.0 < float(alpha) < 1.0):
+        raise ValueError(f"alpha must lie strictly in (0, 1), got {alpha!r}")
+
+    residuals: list[float] = []
+    for pred_raw, out_raw in zip(calib_predicted_means, calib_outcomes):
+        if isinstance(pred_raw, bool) or not isinstance(pred_raw, (int, float)) or not math.isfinite(float(pred_raw)):
+            raise ValueError(f"predicted mean must be finite, got {pred_raw!r}")
+        pred_val = float(pred_raw)
+        if not (0.0 <= pred_val <= 1.0):
+            raise ValueError(f"predicted mean must lie in [0, 1], got {pred_val}")
+        y_val = (1.0 if out_raw else 0.0) if isinstance(out_raw, bool) else float(out_raw)
+        if not math.isfinite(y_val) or not (0.0 <= y_val <= 1.0):
+            raise ValueError(f"outcome must lie in [0, 1], got {out_raw!r}")
+        residuals.append(abs(y_val - pred_val))
+
+    residuals.sort()
+    num_samples = len(residuals)
+    rank = min(num_samples, max(1, math.ceil((num_samples + 1) * (1.0 - float(alpha)))))
+    return float(residuals[rank - 1])
+
+
 def run_calibrated_prm_puct_search(
     nodes: Sequence[PRMBranchNode],
     *,
     conformal_z: float = 1.28155,
+    conformal_q_hat: float | None = None,
     c_puct: float = 0.75,
     horizon_discounts: Mapping[int, float] | None = None,
     enable_conformal_pruning: bool = True,
@@ -160,13 +208,18 @@ def run_calibrated_prm_puct_search(
     """Execute PUCT + Conformal Branch-and-Bound tree search over a candidate reasoning tree.
 
     Scores candidate branches in batched 8-slot verifier passes and prunes any branch (s, a)
-    whose conformal upper bound UCB_alpha(s, a) = V_hat(s, a) + z_alpha * sigma_hat(s, a)
-    is strictly below the best incumbent lower bound LCB_alpha(s^*) = V_hat(s^*) - z_alpha * sigma_hat(s^*).
+    whose conformal upper bound UCB_alpha(s, a) = V_hat(s, a) + half_width(s, a)
+    is strictly below the best incumbent lower bound LCB_alpha(s^*) = V_hat(s^*) - half_width(s^*),
+    where half_width combines empirical rubric standard error z_alpha * sigma_hat(s, a) with an
+    optional split-conformal residual quantile q_hat_{1-alpha} / sqrt(steps).
     """
     if not nodes:
         raise ValueError("nodes must be non-empty")
     if isinstance(conformal_z, bool) or not isinstance(conformal_z, (int, float)) or not math.isfinite(float(conformal_z)) or float(conformal_z) < 0.0:
         raise ValueError(f"conformal_z must be finite and >= 0, got {conformal_z!r}")
+    if conformal_q_hat is not None:
+        if isinstance(conformal_q_hat, bool) or not isinstance(conformal_q_hat, (int, float)) or not math.isfinite(float(conformal_q_hat)) or not (0.0 <= float(conformal_q_hat) <= 1.0):
+            raise ValueError(f"conformal_q_hat must lie in [0, 1], got {conformal_q_hat!r}")
     if isinstance(c_puct, bool) or not isinstance(c_puct, (int, float)) or not math.isfinite(float(c_puct)) or float(c_puct) < 0.0:
         raise ValueError(f"c_puct must be finite and >= 0, got {c_puct!r}")
 
@@ -186,6 +239,7 @@ def run_calibrated_prm_puct_search(
         raise ValueError("reasoning tree must contain at least one root node with parent_id=None")
 
     z_val = float(conformal_z)
+    q_hat_val = None if conformal_q_hat is None else float(conformal_q_hat)
     puct_c = float(c_puct)
 
     # Track evaluated vs pruned nodes via best-first PUCT + Conformal Branch-and-Bound traversal
@@ -231,9 +285,12 @@ def run_calibrated_prm_puct_search(
         new_var_sum = cum_var_sum + (step_std * step_std)
         path_mean = new_val_sum / float(steps)
         path_std = math.sqrt(new_var_sum) / float(steps)
+        half_width = z_val * path_std
+        if q_hat_val is not None:
+            half_width = max(half_width, q_hat_val / math.sqrt(float(steps)))
 
-        node_lcb = max(0.0, path_mean - z_val * path_std)
-        node_ucb = min(1.0, path_mean + z_val * path_std)
+        node_lcb = max(0.0, path_mean - half_width)
+        node_ucb = min(1.0, path_mean + half_width)
         puct_bonus = puct_c * float(node.prior_prob) * (math.sqrt(float(sibling_count + 1)) / float(1 + sibling_rank))
 
         # Conformal Branch-and-Bound pruning condition: UCB_alpha(s, a) < best_incumbent_LCB
@@ -263,7 +320,7 @@ def run_calibrated_prm_puct_search(
         for rank_idx, ch in enumerate(ch_list):
             if enable_conformal_pruning and best_leaf is not None:
                 # Pre-screen child prior upper bound before expanding deep low-prior branches
-                optimistic_child_ucb = (new_val_sum + min(1.0, 0.65 + 0.35 * ch.prior_prob)) / float(steps + 1) + z_val * path_std
+                optimistic_child_ucb = (new_val_sum + min(1.0, 0.65 + 0.35 * ch.prior_prob)) / float(steps + 1) + half_width
                 if optimistic_child_ucb < best_leaf_lcb:
                     for d_id in _count_descendants(ch.node_id):
                         if d_id not in evaluated_ids:
@@ -278,11 +335,12 @@ def run_calibrated_prm_puct_search(
         # Fallback to first root if all branches were non-terminal
         first = roots[0]
         v0, s0 = score_prm_rubric_distribution(first.rubric_probs)
+        hw0 = z_val * s0 if q_hat_val is None else max(z_val * s0, q_hat_val)
         best_leaf = first
         best_leaf_path = (first.node_id,)
         best_leaf_val = v0
-        best_leaf_lcb = max(0.0, v0 - z_val * s0)
-        best_leaf_ucb = min(1.0, v0 + z_val * s0)
+        best_leaf_lcb = max(0.0, v0 - hw0)
+        best_leaf_ucb = min(1.0, v0 + hw0)
 
     total_n = len(nodes)
     eval_n = len(evaluated_ids)

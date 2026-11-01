@@ -14,12 +14,16 @@
 
 """Hierarchical Semantic Taxonomy Readout & Trie-Constrained Decoding.
 
-Translates semantic-ID hierarchy routing (arXiv:2610.15864v1) to zero-shot single-token [A-Z]
-decision models without vocabulary expansion or 52-label OOS entropy degradation:
+Translates semantic-ID hierarchy routing (Rajput et al., NeurIPS 2023, arXiv:2305.05065) to
+zero-shot single-token [A-Z] decision models without vocabulary expansion or 52-label OOS
+entropy degradation:
 
   1. mtp_naive (reads=1): Simultaneous coarse + fine slots decoded via independent marginal argmax.
   2. mtp_trie (reads=1): Simultaneous coarse + fine slots decoded strictly over valid root-to-leaf
-     paths e in T via exact joint log-probability s(e | x) = log P_1(c_1(e) | x) + log P_2(c_2(e) | x).
+     paths e in T via the product-of-marginals pseudo-log-likelihood
+     s(e | x) = log P_1(c_1(e) | x) + log P_2(c_2(e) | x). Under parallel single-pass readout,
+     slot 2 marginalizes over coarse parents; when fine codes alias across coarse domains,
+     hesitation_hybrid and beam_2pass restore exact chain-rule conditioning log P_2(c_2 | c_1, x).
   3. beam_2pass (reads=2): Pass-1 coarse domain readout (<= 26 options) -> Pass-2 fine readout over
      leaves in the top-b coarse domains (<= 26 options), fused with Pass-1 domain log-priors.
   4. hesitation_hybrid (reads ~ 1.2): Runs 1-pass trie decode when coarse normalized entropy

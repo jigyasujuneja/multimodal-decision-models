@@ -247,6 +247,40 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         self.assertFalse(cert_boundary.am_gm_boundary_certified)
         self.assertAlmostEqual(cert_boundary.consistency_score, 13.0 / 27.0, places=9)
 
+        # Split-conformal PRM residual quantile calibration and tree search
+        q_hat = mdm.calibrate_prm_conformal_residual_quantile(
+            [0.85, 0.80, 0.75, 0.20, 0.15],
+            [True, True, True, False, False],
+            alpha=0.20,
+        )
+        self.assertGreaterEqual(q_hat, 0.15)
+        self.assertLessEqual(q_hat, 0.25)
+        tree_res = mdm.run_calibrated_prm_puct_search(
+            [
+                mdm.PRMBranchNode(
+                    node_id="r1",
+                    parent_id=None,
+                    depth=1,
+                    prior_prob=0.70,
+                    rubric_probs={"0": 0.02, "1": 0.03, "2": 0.15, "3": 0.80},
+                    is_terminal=True,
+                    ground_truth_correct=True,
+                ),
+                mdm.PRMBranchNode(
+                    node_id="r2",
+                    parent_id=None,
+                    depth=1,
+                    prior_prob=0.30,
+                    rubric_probs={"0": 0.70, "1": 0.20, "2": 0.05, "3": 0.05},
+                    is_terminal=True,
+                    ground_truth_correct=False,
+                ),
+            ],
+            conformal_q_hat=q_hat,
+        )
+        self.assertEqual(tree_res.selected_leaf_id, "r1")
+        self.assertTrue(tree_res.leaf_correct)
+
 
 if __name__ == "__main__":
     unittest.main()
