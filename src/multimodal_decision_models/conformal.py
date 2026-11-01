@@ -572,6 +572,106 @@ def weighted_conformal_prediction_set(
     )
 
 
+def label_shift_weighted_conformal_prediction_set(
+    calib_probs: Sequence[Mapping[str, float]],
+    calib_labels: Sequence[str],
+    class_likelihood_ratios: Mapping[str, float],
+    test_probs: Mapping[str, float],
+    *,
+    calib_covariate_weights: Sequence[float] | None = None,
+    test_covariate_weight: float = 1.0,
+    alpha: float = 0.10,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+    abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+) -> ConformalSetResult:
+    """Construct a conformal prediction set under combined label and covariate shift (Proposition 4).
+
+    Follows Podkopaev & Ramdas (UAI 2021) and Tibshirani et al. (NeurIPS 2019): each calibration
+    example i receives weight W_i = w_X(X_i) * rho(Y_i) where rho(y) = pi_test(y) / pi_cal(y) > 0,
+    and candidate label y in Y is included in C_alpha(X_{n+1}) iff s(X_{n+1}, y) does not exceed
+    the (1 - alpha)-weighted quantile evaluated with candidate-specific test weight
+    W_{n+1}(y) = w_X(X_{n+1}) * rho(y).
+    """
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or float(alpha) <= 0.0 or float(alpha) >= 1.0:
+        raise ValueError(f"alpha must be finite and strictly in (0, 1), got {alpha!r}")
+    if not calib_probs or len(calib_probs) != len(calib_labels):
+        raise ValueError("calib_probs and calib_labels must be non-empty sequences of equal length")
+    if calib_covariate_weights is not None and len(calib_covariate_weights) != len(calib_probs):
+        raise ValueError("calib_covariate_weights must match length of calib_probs")
+    if isinstance(test_covariate_weight, bool) or not isinstance(test_covariate_weight, (int, float)) or not math.isfinite(float(test_covariate_weight)) or float(test_covariate_weight) <= 0.0:
+        raise ValueError(f"test_covariate_weight must be finite and > 0, got {test_covariate_weight!r}")
+    if not class_likelihood_ratios:
+        raise ValueError("class_likelihood_ratios must be non-empty")
+    clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+
+    rho_map: dict[str, float] = {}
+    for k, raw_rho in class_likelihood_ratios.items():
+        if isinstance(raw_rho, bool) or not isinstance(raw_rho, (int, float)) or not math.isfinite(float(raw_rho)) or float(raw_rho) <= 0.0:
+            raise ValueError(f"class_likelihood_ratios[{k!r}] must be finite and > 0, got {raw_rho!r}")
+        rho_map[str(k)] = float(raw_rho)
+
+    pairs: list[tuple[float, float]] = []
+    cal_w_sum = 0.0
+    for idx, (dist, gold_raw) in enumerate(zip(calib_probs, calib_labels)):
+        cov_w = 1.0
+        if calib_covariate_weights is not None:
+            raw_cw = calib_covariate_weights[idx]
+            if isinstance(raw_cw, bool) or not isinstance(raw_cw, (int, float)) or not math.isfinite(float(raw_cw)) or float(raw_cw) <= 0.0:
+                raise ValueError(f"calib_covariate_weights[{idx}] must be finite and > 0, got {raw_cw!r}")
+            cov_w = float(raw_cw)
+        gold = str(gold_raw)
+        ranked_keys, norm_probs, _ = _normalize_and_rank_probs(dist)
+        if gold not in norm_probs:
+            raise ValueError(f"calibration label {gold!r} at index {idx} not present in option probabilities")
+        item_scores = _compute_all_nonconformity_scores(
+            ranked_keys, norm_probs, clean_method, lam_reg, k_reg, randomized=False
+        )
+        w_i = cov_w * rho_map.get(gold, 1.0)
+        pairs.append((item_scores[gold], w_i))
+        cal_w_sum += w_i
+
+    pairs.sort(key=lambda item: item[0])
+    target_mass = 1.0 - float(alpha)
+
+    test_ranked, test_norm, _ = _normalize_and_rank_probs(test_probs)
+    test_scores = _compute_all_nonconformity_scores(
+        test_ranked, test_norm, clean_method, lam_reg, k_reg, randomized=False
+    )
+
+    pred_set: list[str] = []
+    max_q_used = 0.0
+    for cand_k in test_ranked:
+        w_test_y = float(test_covariate_weight) * rho_map.get(cand_k, 1.0)
+        tot_w = cal_w_sum + w_test_y
+        cum_mass = 0.0
+        q_y = float("inf")
+        for score_i, w_i in pairs:
+            cum_mass += w_i / tot_w
+            if cum_mass >= target_mass - 1e-12:
+                q_y = score_i
+                break
+        if not math.isinf(q_y):
+            max_q_used = max(max_q_used, q_y)
+        if math.isinf(q_y) or test_scores[cand_k] <= q_y + 1e-12:
+            pred_set.append(cand_k)
+
+    effective_abstain = DEFAULT_CONFORMAL_ABSTAIN_KEYS if abstain_keys is None else abstain_keys
+    abstain_lookup = {str(k).strip().lower() for k in effective_abstain if str(k).strip()}
+    singleton = len(pred_set) == 1
+    contains_abstain = any(str(k).strip().lower() in abstain_lookup for k in pred_set)
+    should_escalate = (not singleton) or contains_abstain
+    return ConformalSetResult(
+        prediction_set=pred_set,
+        q_hat=max_q_used,
+        singleton=singleton,
+        contains_abstain=contains_abstain,
+        should_escalate=should_escalate,
+        method=clean_method,
+    )
+
+
 def calibrate_multislot_joint_conformal(
     calib_slot_probs: Sequence[Mapping[str, Mapping[str, float]]],
     calib_slot_labels: Sequence[Mapping[str, str]],

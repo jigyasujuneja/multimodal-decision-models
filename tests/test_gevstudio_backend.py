@@ -321,6 +321,24 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         self.assertEqual(part_res.passes_used, 1)
         self.assertTrue(part_res.guard_applied.startswith("partitioned_1pass_"))
 
+        # Proposition 4: Combined label-shift and covariate-shift weighted conformal prediction set
+        calib_probs = [
+            {"head": 0.90, "tail": 0.10},
+            {"head": 0.85, "tail": 0.15},
+            {"head": 0.80, "tail": 0.20},
+            {"head": 0.65, "tail": 0.35},
+            {"head": 0.55, "tail": 0.45},
+        ]
+        calib_labels = ["head", "head", "head", "tail", "tail"]
+        ls_set = mdm.label_shift_weighted_conformal_prediction_set(
+            calib_probs=calib_probs,
+            calib_labels=calib_labels,
+            class_likelihood_ratios={"head": 0.25, "tail": 4.0},
+            test_probs={"head": 0.58, "tail": 0.42},
+            alpha=0.10,
+        )
+        self.assertIn("tail", ls_set.prediction_set)
+
 
 if __name__ == "__main__":
     unittest.main()
