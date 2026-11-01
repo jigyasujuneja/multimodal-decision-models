@@ -35,7 +35,7 @@ import re
 import sys
 from typing import Any, BinaryIO, Mapping, Sequence
 
-from .calibration import VALID_PRIOR_GATE_MODES, pre_gated_bayesian_poe_fusion
+from .calibration import VALID_PRIOR_GATE_MODES, effective_top_m_entropy, pre_gated_bayesian_poe_fusion
 from .conformal import (
     DEFAULT_CONFORMAL_ABSTAIN_KEYS,
     calibrate_conformal_quantile,
@@ -532,6 +532,7 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         hesitation_threshold=hesitation_threshold,
         gate_mode=prior_gate_mode,
     )
+    h_top_m = effective_top_m_entropy(probs, top_m=2)
     predicted = max(fused_probs.items(), key=lambda kv: (kv[1], kv[0]))[0]
     q_hat_is_inf = math.isinf(q_hat) and q_hat > 0.0
     if not q_hat_is_inf and not math.isfinite(q_hat):
@@ -541,6 +542,7 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         "probabilities": fused_probs,
         "raw_probabilities": probs,
         "h_raw": h_raw,
+        "h_top_m": h_top_m,
         "q_hat": None if q_hat_is_inf else float(q_hat),
         "q_hat_infinite": q_hat_is_inf,
         "prediction_set": conf_res.prediction_set,
