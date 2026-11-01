@@ -16,11 +16,12 @@
 
 Implements online non-stationary multi-LLM routing grounded in:
   - Discounted Contextual LinUCB with geometric forgetting factor rho in (0, 1]
-    (arXiv:2604.00136, ParetoBandit: Multi-Objective Non-Stationary LLM Routing)
-  - Online Primal-Dual Lagrangian budget pacing:
+    (Garivier & Moulines, ALT 2011; Li et al., WWW 2010)
+  - Online Primal-Dual Lagrangian budget pacing (Agrawal & Devanur, EC 2014):
         lambda_{t+1} = max(0, lambda_t + eta_lambda * (c(a_t) - B_max))
-  - Pairwise Bradley-Terry Dueling Bandit preference updates (arXiv:2510.00841)
-    for delayed or weak relative feedback when ground-truth labels are absent.
+  - Pairwise Bradley-Terry Dueling Bandit preference updates (Yue et al., JCSS 2012;
+    Bengs et al., JMLR 2021) for delayed or weak relative feedback when ground-truth
+    labels are absent.
 """
 
 from __future__ import annotations

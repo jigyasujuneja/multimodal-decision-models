@@ -77,6 +77,41 @@ def normalized_entropy(probs: Mapping[str, float]) -> float:
     return min(1.0, max(0.0, h / math.log(float(k))))
 
 
+def effective_top_m_entropy(
+    probs: Mapping[str, float],
+    top_m: int = 5,
+) -> float:
+    """Compute Top-M truncated normalized Shannon entropy H(p_topM) / ln(min(K, M)) in [0, 1].
+
+    Args:
+      probs: Mapping of option keys to non-negative probability weights.
+      top_m: Truncation support size M >= 2 so sibling confusion over m <= M candidates
+        remains invariant as catalog size K grows (Lemma 1).
+
+    Returns:
+      Truncated normalized entropy in [0, 1].
+
+    Raises:
+      ValueError: If top_m < 2.
+    """
+    if isinstance(top_m, bool) or not isinstance(top_m, int) or top_m < 2:
+        raise ValueError(f"top_m must be an integer >= 2, got {top_m!r}")
+    k = len(probs)
+    if k <= 1:
+        return 0.0
+    m_eff = min(k, top_m)
+    ranked_vals = sorted((max(0.0, float(v)) for v in probs.values()), reverse=True)[:m_eff]
+    total_top = sum(ranked_vals)
+    if total_top <= 0.0:
+        return 1.0
+    entropy_val = 0.0
+    for val in ranked_vals:
+        prob_i = val / total_top
+        if prob_i > 1e-12:
+            entropy_val -= prob_i * math.log(prob_i)
+    return min(1.0, max(0.0, entropy_val / math.log(float(m_eff))))
+
+
 def pre_gated_bayesian_poe_fusion(
     raw_probs: Mapping[str, float],
     prior_logits: Mapping[str, float] | None = None,
@@ -144,9 +179,10 @@ def pre_gated_bayesian_poe_fusion(
     # Step 1: Normalize raw probabilities and evaluate H_raw BEFORE touching priors.
     total_raw = sum(max(0.0, float(v)) for v in raw_probs.values())
     if total_raw <= 0.0:
-        norm_raw = {k: 1.0 / len(raw_probs) for k in raw_probs}
-    else:
-        norm_raw = {k: max(0.0, float(v)) / total_raw for k, v in raw_probs.items()}
+        raise SchemaContractViolationError(
+            "raw_probs sum must be > 0; uniform 1/K fallbacks are prohibited"
+        )
+    norm_raw = {k: max(0.0, float(v)) / total_raw for k, v in raw_probs.items()}
 
     temp_f = float(temperature)
     pw_f = float(prior_weight)
@@ -209,7 +245,17 @@ def stage2a_fast_exit_gate(
     if std_v <= 1e-9:
         return False, None
     z_score = (p1 - mean_v) / std_v
-    if z_score >= min_z:
+    # On an M-element shortlist, Cauchy-Schwarz bounds max((p1 - mean) / pstdev) <= sqrt(M - 1).
+    # For M in {2, 3}, sqrt(M - 1) < 1.65, so cap the effective Z-threshold at 0.90 * sqrt(M - 1)
+    # when p1 >= 0.50.
+    m_len = len(vals)
+    if m_len <= 3:
+        if p1 < 0.50:
+            return False, None
+        effective_min_z = min(float(min_z), 0.90 * math.sqrt(float(m_len - 1)))
+    else:
+        effective_min_z = float(min_z)
+    if z_score >= effective_min_z:
         return True, top1_id
     return False, None
 

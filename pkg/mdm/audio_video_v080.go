@@ -64,14 +64,14 @@ func DefaultVoiceActivityProjectionConfig() VoiceActivityProjectionConfig {
 
 // TurnTakingDecisionResult holds the calibrated full-duplex turn-taking decision.
 type TurnTakingDecisionResult struct {
-	SelectedAction           string
-	RawArgmaxAction          string
-	CalibratedProbabilities  map[string]float64
-	ExpectedLosses           map[string]float64
-	ConformalSet             []string
-	NormalizedHesitation     float64
-	BargeInBlockedByGuard    bool
-	EscalateToDeliberative   bool
+	SelectedAction          string
+	RawArgmaxAction         string
+	CalibratedProbabilities map[string]float64
+	ExpectedLosses          map[string]float64
+	ConformalSet            []string
+	NormalizedHesitation    float64
+	BargeInBlockedByGuard   bool
+	EscalateToDeliberative  bool
 }
 
 func normalizeDistGo(probs map[string]float64) (map[string]float64, error) {

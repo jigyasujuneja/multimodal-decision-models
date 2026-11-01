@@ -50,6 +50,10 @@ $$\ln p_{\text{fused}}(k) \propto \frac{1}{T}\ln p_{\text{raw},k} + w_{\text{eff
 
 where $w_{\text{eff}}(\tilde{H}_{\text{raw}})$ equals $w \cdot \mathbb{I}[\tilde{H}_{\text{raw}} \ge \tau_H]$ under `"hesitant"` gating, $w \cdot \tilde{H}_{\text{raw}}$ under `"proportional"` gating, $w \cdot \mathbb{I}[\tilde{H}_{\text{raw}} < \tau_H]$ under `"confident"` gating, and $w$ under `"always"` gating.
 
+**Lemma 1 (Catalog-Size Dilution of Global Normalized Entropy and Top-$M$ Truncation Invariance).** Let $\mathcal{Y} = \{1, \dots, K\}$ be a catalog of $K \ge 3$ classes, and suppose a query $x$ produces a posterior $p \in \Delta^{K-1}$ concentrated purely on $m$ fine-grained sibling classes ($2 \le m \ll K$) with $p_1 = \dots = p_m = 1/m$ and $p_j = 0$ for $j > m$. Under global normalized Shannon entropy, $\tilde{H}_{\text{raw}}(p) = \ln m / \ln K$, which falls strictly below $\tau_H \in (0, 1)$ whenever $K > m^{1/\tau_H}$ and satisfies $\lim_{K \to \infty} \tilde{H}_{\text{raw}}(p) = 0$. Conversely, Top-$M$ truncated normalized entropy (`effective_top_m_entropy` in `calibration.py`, with $M \ge m$ and $\hat{p}_i = p_{(i)} / \sum_{j=1}^M p_{(j)}$) is invariant to catalog size $K$:
+
+$$\tilde{H}_{\text{eff}, M}(p) = -\frac{1}{\ln M}\sum_{i=1}^M \hat{p}_i \ln \hat{p}_i = \frac{\ln m}{\ln M} \ge \frac{\ln 2}{\ln M} > 0 \qquad \forall K \ge M$$
+
 ### 3.2 Pre-Fusion Split Conformal Prediction and RAPS
 
 Let $\{(X_i, Y_i)\}_{i=1}^n$ be exchangeable calibration examples and let $p_{(1)}(x) \ge p_{(2)}(x) \ge \dots \ge p_{(K)}(x)$ denote the sorted raw Stage-1 probabilities for input $x$, with $r(x, y)$ denoting the $1$-based rank of label $y$ (ties broken deterministically by canonical option order). `conformal.py` implements three nonconformity scores:
@@ -65,6 +69,18 @@ Sorting the calibration nonconformity scores $s_{(1)} \le s_{(2)} \le \dots \le 
 $$\mathbb{P}\bigl(Y_{n+1} \in \mathcal{C}_\alpha(X_{n+1})\bigr) \ge 1 - \alpha$$
 
 In `CascadeDecisionOrchestrator`, $\mathcal{C}_\alpha(x)$ is evaluated on $p_{\text{raw}}$ before prior fusion. The orchestrator escalates $x$ to the Stage-2 verifier whenever $|\mathcal{C}_\alpha(x)| \ne 1$, an abstention option (`none_of_the_above` / `abstain`) enters $\mathcal{C}_\alpha(x)$, or $\tilde{H}_{\text{raw}}(p_{\text{raw}}) \ge \tau_H$.
+
+**Proposition 1 (Selective Risk of Hint-Conditioned Two-Stage Cascade).** Let $f_1: \mathcal{X} \to \Delta^{K-1}$ denote the Stage-1 classifier, $G(x) \in \{0, 1\}$ the escalation gate with escalation rate $\pi_{\text{esc}} = \mathbb{P}(G(X) = 1)$, and $f_2(x, \hat{y}_1)$ the Stage-2 verifier conditioned on Stage-1 top-1 candidate $\hat{y}_1$. Let $\varepsilon_{\text{fast}} = \mathbb{P}(\hat{Y}_1 \ne Y \mid G(X) = 0)$ be Stage-1 selective risk on fast-exited inputs, $e_1^{\text{esc}} = \mathbb{P}(\hat{Y}_1 \ne Y \mid G(X) = 1)$ be Stage-1 base error on escalated inputs, $\varepsilon_{2, +} = \mathbb{P}(\hat{Y}_2 \ne Y \mid G(X) = 1, \hat{Y}_1 = Y)$ be the Stage-2 false-flip rate, and $\varepsilon_{2, -} = \mathbb{P}(\hat{Y}_2 \ne Y \mid G(X) = 1, \hat{Y}_1 \ne Y)$ be the Stage-2 unrecovered error rate (`evaluate_two_stage_cascade_risk_bound` in `conformal.py`). Then end-to-end cascade risk is:
+
+$$\mathcal{R}(f_{\text{cas}}) = (1 - \pi_{\text{esc}})\,\varepsilon_{\text{fast}} + \pi_{\text{esc}}\Bigl[(1 - e_1^{\text{esc}})\,\varepsilon_{2, +} + e_1^{\text{esc}}\,\varepsilon_{2, -}\Bigr]$$
+
+The cascade strictly improves over standalone Stage-1 risk $\mathcal{R}(f_1)$ if and only if $(1 - \varepsilon_{2, -}) > \frac{1 - e_1^{\text{esc}}}{e_1^{\text{esc}}}\,\varepsilon_{2, +}$, and a hybrid prediction set $\mathcal{C}_{\text{cas}}(X)$ combining fast-exited singletons ($\varepsilon_{\text{fast}} \le \alpha_1$) with Stage-2 conformal sets ($\alpha_2$) satisfies $\mathbb{P}(Y \notin \mathcal{C}_{\text{cas}}(X)) \le (1 - \pi_{\text{esc}})\alpha_1 + \pi_{\text{esc}}\alpha_2$.
+
+**Proposition 2 (Multilinear Parity Expansion and AM-GM Cut-Polytope Certificate).** For soft equivalence probabilities $(p_{AB}, p_{BC}, p_{AC}) \in [0, 1]^3$ and $x_e = 2p_e - 1 \in [-1, 1]$, the cut-polytope consistency score (`cut_polytope_triangle_consistency_score` in `consistency.py`) satisfies:
+
+$$s_\triangle^{\text{cut}}(p_{AB}, p_{BC}, p_{AC}) = \sum_{c \in \mathcal{V}_{\text{valid}}} \prod_{e} p_e^{c_e}(1 - p_e)^{1 - c_e} = \frac{1 + x_{AB} x_{BC} x_{AC}}{2}$$
+
+where $\mathcal{V}_{\text{valid}} = \{(1,1,1), (0,0,1), (0,1,0), (1,0,0)\}$. On the metric-polytope violation boundary $p_{AB} + p_{BC} + (1 - p_{AC}) = 2$, the AM-GM inequality bounds $(1 - p_{AB})(1 - p_{BC})p_{AC} \le (1/3)^3 = 1/27$ and the dominant valid vertex mass by $8/27 \approx 0.2963$. Requiring both $s_\triangle^{\text{cut}} > 1/2$ and $\max_{c \in \mathcal{V}_{\text{valid}}} \prod_e p_e^{c_e}(1 - p_e)^{1 - c_e} > 8/27$ certifies that the soft assignment lies strictly inside the attraction basin of a single transitive partition vertex.
 
 ### 3.3 Post-Hoc Temperature and Regularized Vector Scaling
 
@@ -179,6 +195,21 @@ Wrapping untrusted retrieval chunks via `sanitize_untrusted_context` (neutralizi
 ### 5.5 Expected-Grade Autorater Tie-Breaking and Cascade Gate Calibration
 
 When using 5-level Likert rubrics (`A..E` mapped to grades $g_k \in \{1.0, 0.75, 0.5, 0.25, 0.0\}$), argmax decoding collapses all items with the same modal token to identical ties. Computing continuous expected grade $\mathbb{E}[g \mid p] = \sum_{k=1}^5 p_k g_k$ resolves 5 discrete levels into 100 unique continuous scores across a 100-item pairwise tie-breaking benchmark, lifting pairwise ranking concordance from $0.540$ to $0.960$. Cross-validated threshold calibration on toxicity autorater cascades (`j4_vs_j1_toxicity_prompt`, $N = 76$) achieves statistical parity with the frontier verifier (exact McNemar $p = 0.1250 > 0.10$) while escalating only $3.95\%$ ($3/76$) of items.
+
+### 5.6 Live Multimodal Cascade Evaluation on Gev Studio (`mdm:cascade`)
+
+We evaluate the production `mdm:cascade` adapter (`GevStudioSystemOneBackend` + `CascadeDecisionOrchestrator`) against standalone `gemini-v4xs-decisions` across four live `gevctl probe` benchmarks spanning 120 rows and 203 decision slots:
+1. **Real Multimodal RefCOCO + 16kHz WAV Audio + UI/KYC Suite ($N = 22$ rows, $35$ slots)**: Combines 16 real COCO 2014 natural photographs (`COCO_train2014_*.jpg`, positive and negative object presence plus 9-way `grid_cell` spatial localization), 4 KYC/PCB/UI/Absent-Gate PNG frames, and 2 recorded 16kHz PCM WAV audio clips.
+2. **Public JEVBench + Ecotone Semiotic Disambiguation ($N = 25$ rows, $25$ slots)**: Combines 15 stratified `JEVBench Public` items (`easy`, `standard`, `hard`) and 10 `Ecotone` TTS phonetic/homograph disambiguation items.
+3. **Gev Studio Vision Arena ($N = 3$ multi-slot scenes, $48$ slots)**: Evaluates 16 simultaneous visual grounding and attribute slots per scene.
+4. **Gev Studio Triage Arena ($N = 70$ cases, $95$ slots)**: Evaluates enterprise incident and routing triage.
+
+| Live Benchmark Suite | `mdm:cascade` Completion | `mdm:cascade` Slot Accuracy | `gemini-v4xs-decisions` Baseline | `mdm:cascade` p50 Latency |
+| :--- | :---: | :---: | :---: | :---: |
+| **Real Multimodal (RefCOCO + 16kHz WAV + UI/KYC)** | **22 / 22 (0 ERROR)** | **31 / 35 (88.6%)** (`4/4` WAV, `7/7` PNG, `8/8` RefCOCO Neg) | 4 / 22 DONE (`18 ERROR`, `0/4` WAV quota failure) | 598 ms |
+| **Public JEVBench + Ecotone (`N = 25`)** | **25 / 25 (0 ERROR)** | **24 / 25 (96.0%)** (`14/15` JEVBench, `10/10` Ecotone) | 23 / 25 (92.0%) | 191 ms |
+| **Gev Studio Vision Arena (`48` slots)** | **3 / 3 (0 ERROR)** | **48 / 48 (100.0% rubric, 97.9% exact)** | 46 / 48 (95.8%) | 612 ms |
+| **Gev Studio Triage Arena (`95` slots)** | **70 / 70 (0 ERROR)** | **92 / 95 (96.8%)** (`95.8%` Stage-1 fast-exit) | 89 / 95 (93.7%) | 186 ms |
 
 ## 6. Non-Exchangeable & Multi-Slot Conformal, `PriDe`, Submodular MCKP, Polytope Projection, and `MDM-Bench`
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -323,6 +324,35 @@ func TestJevAgentHarnessDelegationGuardSFTAndTango(t *testing.T) {
 	if err != nil || niFail.NonInferior {
 		t.Fatalf("expected non-inferior fail for (0,12,200), got %+v, err=%v", niFail, err)
 	}
+
+	// Lemma 1: Top-M truncated entropy invariance on K=100 binary sibling split
+	sib100 := make(map[string]float64, 100)
+	for i := 0; i < 100; i++ {
+		key := strconv.Itoa(i)
+		if i < 2 {
+			sib100[key] = 0.5
+		} else {
+			sib100[key] = 0.0
+		}
+	}
+	hTop5, err := EffectiveTopMEntropy(sib100, 5)
+	if err != nil || math.Abs(hTop5-(math.Log(2.0)/math.Log(5.0))) > 1e-9 {
+		t.Fatalf("expected ln(2)/ln(5) top-5 entropy, got %.9f, err=%v", hTop5, err)
+	}
+
+	// Proposition 1: Two-stage cascade risk bound
+	casBound, err := EvaluateTwoStageCascadeRiskBound(0.20, 0.02, 0.45, 0.04, 0.15, 0.05, 0.10)
+	if err != nil || !casBound.StrictlyImprovesOverStage1 || math.Abs(casBound.HybridConformalMiscoverageUB-0.06) > 1e-9 {
+		t.Fatalf("unexpected TwoStageCascadeRiskBound: %+v, err=%v", casBound, err)
+	}
+
+	// Proposition 2: AM-GM cut-polytope triangle consistency certificate
+	certValid, err := CutPolytopeTriangleConsistencyScore(0.92, 0.90, 0.88)
+	if err != nil || !certValid.AMGMBoundaryCertified || certValid.DominantValidVertex != [3]int{1, 1, 1} {
+		t.Fatalf("expected valid cut-polytope certificate, got %+v, err=%v", certValid, err)
+	}
+	certBoundary, err := CutPolytopeTriangleConsistencyScore(2.0/3.0, 2.0/3.0, 1.0/3.0)
+	if err != nil || certBoundary.AMGMBoundaryCertified || math.Abs(certBoundary.ConsistencyScore-13.0/27.0) > 1e-9 {
+		t.Fatalf("expected boundary 13/27 score and uncertified flag, got %+v, err=%v", certBoundary, err)
+	}
 }
-
-

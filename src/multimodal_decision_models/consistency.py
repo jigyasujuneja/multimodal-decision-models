@@ -110,6 +110,78 @@ def check_transitive_triangles(
     return contradictions
 
 
+@dataclass(frozen=True)
+class CutPolytopeTriangleCertificate:
+    """Multilinear parity expansion and AM-GM cut-polytope vertex certificate (Proposition 2)."""
+
+    consistency_score: float
+    parity_product: float
+    dominant_valid_vertex: tuple[int, int, int]
+    dominant_vertex_mass: float
+    am_gm_boundary_certified: bool
+
+
+def cut_polytope_triangle_consistency_score(
+    p_ab: float,
+    p_bc: float,
+    p_ac: float,
+) -> CutPolytopeTriangleCertificate:
+    """Compute multilinear cut-polytope triangle consistency score and AM-GM certificate (Proposition 2).
+
+    Evaluates:
+      s_triangle(p_AB, p_BC, p_AC) = p_AB*p_BC*p_AC + (1-p_AB)*(1-p_BC)*p_AC
+                                   + (1-p_AB)*p_BC*(1-p_AC) + p_AB*(1-p_BC)*(1-p_AC)
+                                   = (1 + x_AB * x_BC * x_AC) / 2
+    where x_e = 2 * p_e - 1 in [-1, 1]. Certifies that the soft assignment lies strictly inside
+    the attraction basin of a single valid cut-polytope vertex when s_triangle > 1/2 and the
+    dominant valid vertex probability mass exceeds 8/27 (the AM-GM boundary value).
+
+    Args:
+      p_ab: Soft equivalence probability on edge (A, B) in [0, 1].
+      p_bc: Soft equivalence probability on edge (B, C) in [0, 1].
+      p_ac: Soft equivalence probability on edge (A, C) in [0, 1].
+
+    Returns:
+      CutPolytopeTriangleCertificate with exact multilinear score and AM-GM boundary flag.
+
+    Raises:
+      ValueError: If any edge probability is non-finite or outside [0, 1].
+    """
+    for name, val in (("p_ab", p_ab), ("p_bc", p_bc), ("p_ac", p_ac)):
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+            raise ValueError(f"{name} must be a finite number in [0, 1], got {val!r}")
+        fval = float(val)
+        if fval < 0.0 or fval > 1.0:
+            raise ValueError(f"{name} must lie in [0, 1], got {val!r}")
+
+    pa = float(p_ab)
+    pb = float(p_bc)
+    pc = float(p_ac)
+    xa = 2.0 * pa - 1.0
+    xb = 2.0 * pb - 1.0
+    xc = 2.0 * pc - 1.0
+    parity_prod = xa * xb * xc
+
+    valid_vertices: tuple[tuple[tuple[int, int, int], float], ...] = (
+        ((1, 1, 1), pa * pb * pc),
+        ((0, 0, 1), (1.0 - pa) * (1.0 - pb) * pc),
+        ((0, 1, 0), (1.0 - pa) * pb * (1.0 - pc)),
+        ((1, 0, 0), pa * (1.0 - pb) * (1.0 - pc)),
+    )
+    consistency_val = sum(mass for _, mass in valid_vertices)
+    dom_vertex, dom_mass = max(valid_vertices, key=lambda item: item[1])
+    am_gm_bound = 8.0 / 27.0
+    certified = (consistency_val > 0.5) and (dom_mass > am_gm_bound)
+
+    return CutPolytopeTriangleCertificate(
+        consistency_score=consistency_val,
+        parity_product=parity_prod,
+        dominant_valid_vertex=dom_vertex,
+        dominant_vertex_mass=dom_mass,
+        am_gm_boundary_certified=certified,
+    )
+
+
 def probabilistic_triangle_contradiction(
     p_ab: float,
     p_bc: float,

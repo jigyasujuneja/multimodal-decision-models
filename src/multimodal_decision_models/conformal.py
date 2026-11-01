@@ -951,3 +951,88 @@ def evaluate_online_bc_aci_stream(
         covered_flags=tuple(covered_list),
     )
 
+
+@dataclass(frozen=True)
+class TwoStageCascadeRiskBound:
+    """Exact selective risk and hybrid conformal miscoverage bound for a hint-conditioned cascade (Proposition 1)."""
+
+    escalation_rate: float
+    fast_exit_selective_risk: float
+    escalated_stage1_error_rate: float
+    stage2_false_flip_rate: float
+    stage2_unrecovered_error_rate: float
+    stage1_marginal_risk: float
+    cascade_marginal_risk: float
+    strictly_improves_over_stage1: bool
+    hybrid_conformal_miscoverage_ub: float
+
+
+def evaluate_two_stage_cascade_risk_bound(
+    escalation_rate: float,
+    fast_exit_selective_risk: float,
+    escalated_stage1_error_rate: float,
+    stage2_false_flip_rate: float,
+    stage2_unrecovered_error_rate: float,
+    *,
+    alpha_stage1_fast_exit: float = 0.05,
+    alpha_stage2_conformal: float = 0.10,
+) -> TwoStageCascadeRiskBound:
+    """Evaluate exact two-stage hint-conditioned cascade selective risk and miscoverage bound (Proposition 1).
+
+    Args:
+      escalation_rate: Probability pi_esc = P(G(X) = 1) in [0, 1].
+      fast_exit_selective_risk: Stage-1 error rate eps_fast = P(Y_hat_1 != Y | G(X) = 0) in [0, 1].
+      escalated_stage1_error_rate: Stage-1 error rate on escalated slice e_1^{esc} = P(Y_hat_1 != Y | G(X) = 1).
+      stage2_false_flip_rate: Stage-2 flip rate eps_{2,+} = P(Y_hat_2 != Y | G(X) = 1, Y_hat_1 = Y).
+      stage2_unrecovered_error_rate: Stage-2 unrecovered error eps_{2,-} = P(Y_hat_2 != Y | G(X) = 1, Y_hat_1 != Y).
+      alpha_stage1_fast_exit: Target selective risk bound alpha_1 on Stage-1 fast-exits.
+      alpha_stage2_conformal: Target conformal miscoverage level alpha_2 on Stage-2 escalated sets.
+
+    Returns:
+      TwoStageCascadeRiskBound containing exact marginal risk and hybrid miscoverage upper bound.
+
+    Raises:
+      ValueError: If any probability argument lies outside [0, 1].
+    """
+    for name, val in (
+        ("escalation_rate", escalation_rate),
+        ("fast_exit_selective_risk", fast_exit_selective_risk),
+        ("escalated_stage1_error_rate", escalated_stage1_error_rate),
+        ("stage2_false_flip_rate", stage2_false_flip_rate),
+        ("stage2_unrecovered_error_rate", stage2_unrecovered_error_rate),
+        ("alpha_stage1_fast_exit", alpha_stage1_fast_exit),
+        ("alpha_stage2_conformal", alpha_stage2_conformal),
+    ):
+        if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+            raise ValueError(f"{name} must be a finite number in [0, 1], got {val!r}")
+        fval = float(val)
+        if fval < 0.0 or fval > 1.0:
+            raise ValueError(f"{name} must lie in [0, 1], got {val!r}")
+
+    pi_esc = float(escalation_rate)
+    eps_fast = float(fast_exit_selective_risk)
+    e1_esc = float(escalated_stage1_error_rate)
+    eps_2_pos = float(stage2_false_flip_rate)
+    eps_2_neg = float(stage2_unrecovered_error_rate)
+    a1 = float(alpha_stage1_fast_exit)
+    a2 = float(alpha_stage2_conformal)
+
+    stage1_risk = (1.0 - pi_esc) * eps_fast + pi_esc * e1_esc
+    escalated_stage2_risk = (1.0 - e1_esc) * eps_2_pos + e1_esc * eps_2_neg
+    cascade_risk = (1.0 - pi_esc) * eps_fast + pi_esc * escalated_stage2_risk
+    strictly_improves = cascade_risk < stage1_risk - 1e-12
+    hybrid_ub = (1.0 - pi_esc) * a1 + pi_esc * a2
+
+    return TwoStageCascadeRiskBound(
+        escalation_rate=pi_esc,
+        fast_exit_selective_risk=eps_fast,
+        escalated_stage1_error_rate=e1_esc,
+        stage2_false_flip_rate=eps_2_pos,
+        stage2_unrecovered_error_rate=eps_2_neg,
+        stage1_marginal_risk=stage1_risk,
+        cascade_marginal_risk=cascade_risk,
+        strictly_improves_over_stage1=strictly_improves,
+        hybrid_conformal_miscoverage_ub=hybrid_ub,
+    )
+
+

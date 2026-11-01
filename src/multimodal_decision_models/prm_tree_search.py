@@ -17,10 +17,10 @@
 Adapts System-1 8-slot parallel readout into a zero-generation-overhead Process Reward
 Verifier scoring up to 8 candidate reasoning branches simultaneously on {0, 1, 2, 3}
 rubrics, combined with:
-  - Horizon-depth survival discount calibration (CondOT-PRM, 2025-2026)
-  - Conformal Branch-and-Bound PUCT tree search (PATR, 2026) that prunes subtrees
-    whenever their conformal upper bound falls strictly below the current incumbent
-    lower bound: UCB_alpha(s, a) < LCB_alpha(s^*).
+  - Horizon-depth survival discount calibration (Lightman et al., ICLR 2024; Snell et al., 2024)
+  - Conformal Branch-and-Bound PUCT tree search (Rosin, Ann. Math. Artif. Intell. 2011;
+    Silver et al., Nature 2017) that prunes subtrees whenever their conformal upper bound
+    falls strictly below the current incumbent lower bound: UCB_alpha(s, a) < LCB_alpha(s^*).
 """
 
 from __future__ import annotations

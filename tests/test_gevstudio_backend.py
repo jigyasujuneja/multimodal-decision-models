@@ -12,195 +12,241 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for GevStudioSystemOneBackend (/api/gev/systemone adapter)."""
+"""Unit tests for GevStudioSystemOneBackend and formal cascade/calibration propositions."""
 
 from __future__ import annotations
 
+import math
+import unittest
 from unittest.mock import patch
 
-import pytest
-
-from multimodal_decision_models import (
-    CascadeDecisionOrchestrator,
-    DecisionQuestion,
-    DecisionTerminalState,
-    GevStudioSystemOneBackend,
-    LogprobAlignmentError,
-    SchemaContractViolationError,
-)
+import multimodal_decision_models as mdm
 
 
-def test_gevstudio_build_url_encodes_target_query_param() -> None:
-    backend = GevStudioSystemOneBackend(
-        endpoint_url="https://gevstudio.corp.google.com",
-        target="beyond-decision:/models/gemini-v4xs-decisions?hc=true;temp=1.0",
-    )
-    url = backend.build_url()
-    assert url == (
-        "https://gevstudio.corp.google.com/api/gev/systemone"
-        "?target=beyond-decision%3A%2Fmodels%2Fgemini-v4xs-decisions%3Fhc%3Dtrue%3Btemp%3D1.0"
-    )
+class GevStudioBackendAndPropositionsTest(unittest.TestCase):
+    """Verify GevStudioSystemOneBackend wire protocol and Lemma 1 / Prop 1 / Prop 2 invariants."""
 
+    def test_gevstudio_build_url_encodes_target_query_param(self) -> None:
+        backend = mdm.GevStudioSystemOneBackend(
+            endpoint_url="https://gevstudio.corp.google.com",
+            target="beyond-decision:/models/gemini-v4xs-decisions?hc=true;temp=1.0",
+        )
+        url = backend.build_url()
+        self.assertEqual(
+            url,
+            "https://gevstudio.corp.google.com/api/gev/systemone"
+            "?target=beyond-decision%3A%2Fmodels%2Fgemini-v4xs-decisions%3Fhc%3Dtrue%3Btemp%3D1.0",
+        )
 
-def test_gevstudio_build_payload_formats_multimodal_media_and_question_types() -> None:
-    backend = GevStudioSystemOneBackend(
-        target="gemini-v4xs-decisions",
-        model="gemini-v4xs-decisions",
-        temperature=0.0,
-    )
-    questions = {
-        "q_choice": DecisionQuestion(
-            type="choice",
-            instructions="Choose next action.",
-            criteria={"stop": "Full stop", "slow": "Slow down"},
-        ),
-        "q_noul": DecisionQuestion(
-            type="noul",
-            instructions="Is a pedestrian visible?",
-            criteria={"no": "No pedestrian", "yes": "Pedestrian visible"},
-        ),
-        "q_score": DecisionQuestion(
-            type="score",
-            instructions="Rate urgency.",
-            levels=["low", "medium", "high"],
-        ),
-    }
-    state = {
-        "zone": "aisle_4",
-        "__media__": [{"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"}],
-    }
-    payload = backend.build_payload(
-        state=state,
-        questions=questions,
-        images=["data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==", "/9j/4AAQSkZJRg=="],
-    )
-    assert payload["state"] == {"zone": "aisle_4"}
-    assert payload["model"] == "gemini-v4xs-decisions"
-    assert payload["temperature"] == 0.0
-    assert len(payload["media"]) == 3
-    assert payload["media"][0] == {"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"}
-    assert payload["media"][1] == {"mime_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUg=="}
-    assert payload["media"][2] == {"mime_type": "image/jpeg", "data": "/9j/4AAQSkZJRg=="}
-    assert payload["questions"]["q_choice"]["type"] == "choice"
-    assert payload["questions"]["q_noul"] == {
-        "type": "noul",
-        "instructions": "Is a pedestrian visible?",
-    }
-    assert payload["questions"]["q_score"] == {
-        "type": "score",
-        "instructions": "Rate urgency.",
-        "criteria": ["low", "medium", "high"],
-    }
-
-
-def test_gevstudio_parse_response_choice_noul_and_score_probabilities() -> None:
-    backend = GevStudioSystemOneBackend(target="gemini-v4xs-decisions")
-    questions = {
-        "action": DecisionQuestion(
-            type="choice",
-            instructions="Pick action.",
-            criteria={"stop": "Stop", "slow": "Slow", "proceed": "Proceed"},
-        ),
-        "pedestrian": DecisionQuestion(
-            type="noul",
-            instructions="Pedestrian in path?",
-            criteria={"no": "No", "yes": "Yes"},
-        ),
-        "risk": DecisionQuestion(
-            type="score",
-            instructions="Risk level.",
-            levels=["low", "med", "high"],
-        ),
-    }
-    wire_response = {
-        "answers": {
-            "action": {
-                "choice": "stop",
-                "probabilities": {"stop": 0.90, "slow": 0.08, "proceed": 0.02},
-            },
-            "pedestrian": {
-                "noul": True,
-                "noul_prob": 0.96,
-                "probabilities": {"0": 0.04, "1": 0.96},
-            },
-            "risk": {
-                "score": 2,
-                "score_value": 1.88,
-                "probabilities": {"0": 0.02, "1": 0.08, "2": 0.90},
-            },
+    def test_gevstudio_build_payload_formats_multimodal_media_and_question_types(self) -> None:
+        backend = mdm.GevStudioSystemOneBackend(
+            target="gemini-v4xs-decisions",
+            model="gemini-v4xs-decisions",
+            temperature=0.0,
+        )
+        questions = {
+            "q_choice": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Choose next action.",
+                criteria={"stop": "Full stop", "slow": "Slow down"},
+            ),
+            "q_noul": mdm.DecisionQuestion(
+                type="noul",
+                instructions="Is a pedestrian visible?",
+                criteria={"no": "No pedestrian", "yes": "Pedestrian visible"},
+            ),
+            "q_score": mdm.DecisionQuestion(
+                type="score",
+                instructions="Rate urgency.",
+                levels=["low", "medium", "high"],
+            ),
         }
-    }
-    dists, ev, trace = backend.parse_response(wire_response, questions)
-    assert pytest.approx(dists["action"]["stop"], rel=1e-5) == 0.90
-    assert pytest.approx(dists["pedestrian"]["yes"], rel=1e-5) == 0.96
-    assert pytest.approx(dists["pedestrian"]["no"], rel=1e-5) == 0.04
-    assert pytest.approx(dists["risk"]["high"], rel=1e-5) == 0.90
-    assert trace["discrete_fallback_slots"] == []
-    assert ev == {}
-
-
-def test_gevstudio_parse_response_discrete_fallback_and_strict_mode() -> None:
-    questions = {
-        "action": DecisionQuestion(
-            type="choice",
-            instructions="Pick action.",
-            criteria={"stop": "Stop", "proceed": "Proceed"},
+        state = {
+            "zone": "aisle_4",
+            "__media__": [{"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"}],
+        }
+        payload = backend.build_payload(
+            state=state,
+            questions=questions,
+            images=["data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==", "/9j/4AAQSkZJRg=="],
         )
-    }
-    wire_discrete = {"answers": {"action": {"choice": "stop"}}}
-
-    lenient = GevStudioSystemOneBackend(
-        target="gemini-3.6-flash",
-        allow_discrete_fallback=True,
-        label_smoothing_eps=1e-3,
-    )
-    dists, _, trace = lenient.parse_response(wire_discrete, questions)
-    assert dists["action"]["stop"] > 0.998
-    assert trace["discrete_fallback_slots"] == ["action"]
-
-    strict = GevStudioSystemOneBackend(
-        target="gemini-3.6-flash",
-        allow_discrete_fallback=False,
-    )
-    with pytest.raises(LogprobAlignmentError):
-        strict.parse_response(wire_discrete, questions)
-
-
-def test_gevstudio_cascade_orchestrator_end_to_end() -> None:
-    backend = GevStudioSystemOneBackend(
-        endpoint_url="https://gevstudio.corp.google.com/api/gev/systemone",
-        target="gemini-v4xs-decisions",
-    )
-    questions = {
-        "sku": DecisionQuestion(
-            type="choice",
-            instructions="Select matching SKU.",
-            criteria={"sku_a": "SKU A", "sku_b": "SKU B"},
-            prior_logits={"sku_a": 1.2, "sku_b": -0.4},
+        self.assertEqual(payload["state"], {"zone": "aisle_4"})
+        self.assertEqual(payload["model"], "gemini-v4xs-decisions")
+        self.assertEqual(payload["temperature"], 0.0)
+        self.assertEqual(len(payload["media"]), 3)
+        self.assertEqual(payload["media"][0], {"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"})
+        self.assertEqual(payload["media"][1], {"mime_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUg=="})
+        self.assertEqual(payload["media"][2], {"mime_type": "image/jpeg", "data": "/9j/4AAQSkZJRg=="})
+        self.assertEqual(payload["questions"]["q_choice"]["type"], "choice")
+        self.assertEqual(
+            payload["questions"]["q_noul"],
+            {
+                "type": "noul",
+                "instructions": "Is a pedestrian visible?",
+            },
         )
-    }
-    mock_wire = {
-        "answers": {
-            "sku": {
-                "choice": "sku_a",
-                "probabilities": {"sku_a": 0.88, "sku_b": 0.12},
+        self.assertEqual(
+            payload["questions"]["q_score"],
+            {
+                "type": "score",
+                "instructions": "Rate urgency.",
+                "criteria": ["low", "medium", "high"],
+            },
+        )
+
+    def test_gevstudio_parse_response_choice_noul_and_score_probabilities(self) -> None:
+        backend = mdm.GevStudioSystemOneBackend(target="gemini-v4xs-decisions")
+        questions = {
+            "action": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Pick action.",
+                criteria={"stop": "Stop", "slow": "Slow", "proceed": "Proceed"},
+            ),
+            "pedestrian": mdm.DecisionQuestion(
+                type="noul",
+                instructions="Pedestrian in path?",
+                criteria={"no": "No", "yes": "Yes"},
+            ),
+            "risk": mdm.DecisionQuestion(
+                type="score",
+                instructions="Risk level.",
+                levels=["low", "med", "high"],
+            ),
+        }
+        wire_response = {
+            "answers": {
+                "action": {
+                    "choice": "stop",
+                    "probabilities": {"stop": 0.90, "slow": 0.08, "proceed": 0.02},
+                },
+                "pedestrian": {
+                    "noul": True,
+                    "noul_prob": 0.96,
+                    "probabilities": {"0": 0.04, "1": 0.96},
+                },
+                "risk": {
+                    "score": 2,
+                    "score_value": 1.88,
+                    "probabilities": {"0": 0.02, "1": 0.08, "2": 0.90},
+                },
             }
         }
-    }
-    with patch("multimodal_decision_models.backends._post_json_with_retry", return_value=mock_wire):
-        orch = CascadeDecisionOrchestrator(
-            stage1_backend=backend,
-            prior_weight=0.25,
-            hesitation_threshold=0.30,
+        dists, evidence_map, trace = backend.parse_response(wire_response, questions)
+        self.assertAlmostEqual(dists["action"]["stop"], 0.90, places=5)
+        self.assertAlmostEqual(dists["pedestrian"]["yes"], 0.96, places=5)
+        self.assertAlmostEqual(dists["pedestrian"]["no"], 0.04, places=5)
+        self.assertAlmostEqual(dists["risk"]["high"], 0.90, places=5)
+        self.assertEqual(trace["discrete_fallback_slots"], [])
+        self.assertEqual(evidence_map, {})
+
+    def test_gevstudio_parse_response_discrete_fallback_and_strict_mode(self) -> None:
+        questions = {
+            "action": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Pick action.",
+                criteria={"stop": "Stop", "proceed": "Proceed"},
+            )
+        }
+        wire_discrete = {"answers": {"action": {"choice": "stop"}}}
+
+        lenient = mdm.GevStudioSystemOneBackend(
+            target="gemini-3.6-flash",
+            allow_discrete_fallback=True,
+            label_smoothing_eps=1e-3,
         )
-        res = orch.evaluate(state={"shelf": "bay_1"}, questions=questions)
-    assert res.terminal_state == DecisionTerminalState.STAGE1_RESOLVED
-    assert res.slots["sku"].predicted == "sku_a"
-    assert res.slots["sku"].probabilities["sku_a"] > 0.88
+        dists, _, trace = lenient.parse_response(wire_discrete, questions)
+        self.assertGreater(dists["action"]["stop"], 0.998)
+        self.assertEqual(trace["discrete_fallback_slots"], ["action"])
+
+        strict = mdm.GevStudioSystemOneBackend(
+            target="gemini-3.6-flash",
+            allow_discrete_fallback=False,
+        )
+        with self.assertRaises(mdm.LogprobAlignmentError):
+            strict.parse_response(wire_discrete, questions)
+
+    def test_gevstudio_cascade_orchestrator_end_to_end(self) -> None:
+        backend = mdm.GevStudioSystemOneBackend(
+            endpoint_url="https://gevstudio.corp.google.com/api/gev/systemone",
+            target="gemini-v4xs-decisions",
+        )
+        questions = {
+            "sku": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Select matching SKU.",
+                criteria={"sku_a": "SKU A", "sku_b": "SKU B"},
+                prior_logits={"sku_a": 1.2, "sku_b": -0.4},
+            )
+        }
+        mock_wire = {
+            "answers": {
+                "sku": {
+                    "choice": "sku_a",
+                    "probabilities": {"sku_a": 0.88, "sku_b": 0.12},
+                }
+            }
+        }
+        with patch("multimodal_decision_models.backends._post_json_with_retry", return_value=mock_wire):
+            orchestrator = mdm.CascadeDecisionOrchestrator(
+                stage1_backend=backend,
+                prior_weight=0.25,
+                hesitation_threshold=0.30,
+            )
+            result = orchestrator.evaluate(state={"shelf": "bay_1"}, questions=questions)
+        self.assertEqual(result.terminal_state, mdm.DecisionTerminalState.STAGE1_RESOLVED)
+        self.assertEqual(result.slots["sku"].predicted, "sku_a")
+        self.assertGreater(result.slots["sku"].probabilities["sku_a"], 0.88)
+
+    def test_gevstudio_validation_errors(self) -> None:
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            mdm.GevStudioSystemOneBackend(endpoint_url="file:///etc/passwd")
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            mdm.GevStudioSystemOneBackend(label_smoothing_eps=0.75)
+
+    def test_lemma1_top_m_entropy_invariance_and_small_shortlist_fast_exit(self) -> None:
+        # 50/50 sibling confusion over K=100 classes dilutes global entropy to ln(2)/ln(100) ~ 0.1505
+        sibling_100 = {f"c_{idx}": (0.5 if idx < 2 else 0.0) for idx in range(100)}
+        h_global = mdm.normalized_entropy(sibling_100)
+        h_top5 = mdm.effective_top_m_entropy(sibling_100, top_m=5)
+        self.assertAlmostEqual(h_global, math.log(2.0) / math.log(100.0), places=9)
+        self.assertAlmostEqual(h_top5, math.log(2.0) / math.log(5.0), places=9)
+        self.assertGreater(h_top5, 0.43)
+
+        # Fail-closed rejection of all-zero raw_probs in pre_gated_bayesian_poe_fusion
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            mdm.pre_gated_bayesian_poe_fusion({"a": 0.0, "b": 0.0})
+
+        # Stage-2A fast-exit gate on M=2 and M=3 shortlists
+        ok2, win2 = mdm.stage2a_fast_exit_gate({"sku_1": 0.85, "sku_2": 0.15})
+        self.assertTrue(ok2)
+        self.assertEqual(win2, "sku_1")
+        ok3, win3 = mdm.stage2a_fast_exit_gate({"sku_1": 0.80, "sku_2": 0.12, "sku_3": 0.08})
+        self.assertTrue(ok3)
+        self.assertEqual(win3, "sku_1")
+
+    def test_proposition1_cascade_risk_and_proposition2_cut_polytope_certificate(self) -> None:
+        bound = mdm.evaluate_two_stage_cascade_risk_bound(
+            escalation_rate=0.20,
+            fast_exit_selective_risk=0.02,
+            escalated_stage1_error_rate=0.45,
+            stage2_false_flip_rate=0.04,
+            stage2_unrecovered_error_rate=0.15,
+            alpha_stage1_fast_exit=0.05,
+            alpha_stage2_conformal=0.10,
+        )
+        self.assertTrue(bound.strictly_improves_over_stage1)
+        self.assertLess(bound.cascade_marginal_risk, bound.stage1_marginal_risk)
+        self.assertAlmostEqual(bound.hybrid_conformal_miscoverage_ub, 0.06, places=9)
+
+        cert_valid = mdm.cut_polytope_triangle_consistency_score(0.92, 0.90, 0.88)
+        self.assertTrue(cert_valid.am_gm_boundary_certified)
+        self.assertEqual(cert_valid.dominant_valid_vertex, (1, 1, 1))
+        self.assertGreater(cert_valid.consistency_score, 0.70)
+
+        cert_boundary = mdm.cut_polytope_triangle_consistency_score(2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0)
+        self.assertFalse(cert_boundary.am_gm_boundary_certified)
+        self.assertAlmostEqual(cert_boundary.consistency_score, 13.0 / 27.0, places=9)
 
 
-def test_gevstudio_validation_errors() -> None:
-    with pytest.raises(SchemaContractViolationError):
-        GevStudioSystemOneBackend(endpoint_url="file:///etc/passwd")
-    with pytest.raises(SchemaContractViolationError):
-        GevStudioSystemOneBackend(label_smoothing_eps=0.75)
+if __name__ == "__main__":
+    unittest.main()

@@ -1486,4 +1486,134 @@ func TangoPairedNonInferiorityTest(wins, losses, nTotal int, margin, alpha, gamm
 	}, nil
 }
 
+// EffectiveTopMEntropy computes Top-M truncated normalized Shannon entropy H(p_topM) / ln(min(K, M)) in [0, 1] (Lemma 1).
+func EffectiveTopMEntropy(probs map[string]float64, topM int) (float64, error) {
+	if topM < 2 {
+		return 0.0, fmt.Errorf("topM must be >= 2, got %d", topM)
+	}
+	k := len(probs)
+	if k <= 1 {
+		return 0.0, nil
+	}
+	mEff := topM
+	if k < mEff {
+		mEff = k
+	}
+	vals := make([]float64, 0, k)
+	for _, v := range probs {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0.0 {
+			vals = append(vals, v)
+		} else {
+			vals = append(vals, 0.0)
+		}
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] > vals[j] })
+	vals = vals[:mEff]
+	totalTop := 0.0
+	for _, v := range vals {
+		totalTop += v
+	}
+	if totalTop <= 0.0 {
+		return 1.0, nil
+	}
+	h := 0.0
+	for _, v := range vals {
+		p := v / totalTop
+		if p > 1e-12 {
+			h -= p * math.Log(p)
+		}
+	}
+	return math.Min(1.0, math.Max(0.0, h/math.Log(float64(mEff)))), nil
+}
 
+// TwoStageCascadeRiskBound holds the exact selective risk and hybrid miscoverage bound for a two-stage cascade (Proposition 1).
+type TwoStageCascadeRiskBound struct {
+	EscalationRate               float64
+	FastExitSelectiveRisk        float64
+	EscalatedStage1ErrorRate     float64
+	Stage2FalseFlipRate          float64
+	Stage2UnrecoveredErrorRate   float64
+	Stage1MarginalRisk           float64
+	CascadeMarginalRisk          float64
+	StrictlyImprovesOverStage1   bool
+	HybridConformalMiscoverageUB float64
+}
+
+// EvaluateTwoStageCascadeRiskBound computes exact two-stage hint-conditioned cascade risk and hybrid miscoverage bound (Proposition 1).
+func EvaluateTwoStageCascadeRiskBound(
+	escalationRate, fastExitSelectiveRisk, escalatedStage1ErrorRate, stage2FalseFlipRate, stage2UnrecoveredErrorRate, alphaStage1FastExit, alphaStage2Conformal float64,
+) (TwoStageCascadeRiskBound, error) {
+	args := []float64{
+		escalationRate, fastExitSelectiveRisk, escalatedStage1ErrorRate,
+		stage2FalseFlipRate, stage2UnrecoveredErrorRate, alphaStage1FastExit, alphaStage2Conformal,
+	}
+	for _, v := range args {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0.0 || v > 1.0 {
+			return TwoStageCascadeRiskBound{}, fmt.Errorf("probability argument must lie in [0, 1], got %v", v)
+		}
+	}
+	stage1Risk := (1.0-escalationRate)*fastExitSelectiveRisk + escalationRate*escalatedStage1ErrorRate
+	escStage2Risk := (1.0-escalatedStage1ErrorRate)*stage2FalseFlipRate + escalatedStage1ErrorRate*stage2UnrecoveredErrorRate
+	cascadeRisk := (1.0-escalationRate)*fastExitSelectiveRisk + escalationRate*escStage2Risk
+	hybridUB := (1.0-escalationRate)*alphaStage1FastExit + escalationRate*alphaStage2Conformal
+	return TwoStageCascadeRiskBound{
+		EscalationRate:               escalationRate,
+		FastExitSelectiveRisk:        fastExitSelectiveRisk,
+		EscalatedStage1ErrorRate:     escalatedStage1ErrorRate,
+		Stage2FalseFlipRate:          stage2FalseFlipRate,
+		Stage2UnrecoveredErrorRate:   stage2UnrecoveredErrorRate,
+		Stage1MarginalRisk:           stage1Risk,
+		CascadeMarginalRisk:          cascadeRisk,
+		StrictlyImprovesOverStage1:   cascadeRisk < stage1Risk-1e-12,
+		HybridConformalMiscoverageUB: hybridUB,
+	}, nil
+}
+
+// CutPolytopeTriangleCertificate holds the multilinear parity expansion and AM-GM cut-polytope vertex certificate (Proposition 2).
+type CutPolytopeTriangleCertificate struct {
+	ConsistencyScore      float64
+	ParityProduct         float64
+	DominantValidVertex   [3]int
+	DominantVertexMass    float64
+	AMGMBoundaryCertified bool
+}
+
+// CutPolytopeTriangleConsistencyScore evaluates s_triangle^{cut} = (1 + x_AB * x_BC * x_AC) / 2 and the > 8/27 AM-GM boundary certificate (Proposition 2).
+func CutPolytopeTriangleConsistencyScore(pAB, pBC, pAC float64) (CutPolytopeTriangleCertificate, error) {
+	for _, v := range []float64{pAB, pBC, pAC} {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0.0 || v > 1.0 {
+			return CutPolytopeTriangleCertificate{}, fmt.Errorf("edge probability must lie in [0, 1], got %v", v)
+		}
+	}
+	xA := 2.0*pAB - 1.0
+	xB := 2.0*pBC - 1.0
+	xC := 2.0*pAC - 1.0
+	parityProd := xA * xB * xC
+
+	type vertexMass struct {
+		v [3]int
+		m float64
+	}
+	vertices := [4]vertexMass{
+		{[3]int{1, 1, 1}, pAB * pBC * pAC},
+		{[3]int{0, 0, 1}, (1.0 - pAB) * (1.0 - pBC) * pAC},
+		{[3]int{0, 1, 0}, (1.0 - pAB) * pBC * (1.0 - pAC)},
+		{[3]int{1, 0, 0}, pAB * (1.0 - pBC) * (1.0 - pAC)},
+	}
+	consistencyVal := 0.0
+	dom := vertices[0]
+	for _, vm := range vertices {
+		consistencyVal += vm.m
+		if vm.m > dom.m {
+			dom = vm
+		}
+	}
+	certified := (consistencyVal > 0.5) && (dom.m > 8.0/27.0)
+	return CutPolytopeTriangleCertificate{
+		ConsistencyScore:      consistencyVal,
+		ParityProduct:         parityProd,
+		DominantValidVertex:   dom.v,
+		DominantVertexMass:    dom.m,
+		AMGMBoundaryCertified: certified,
+	}, nil
+}
