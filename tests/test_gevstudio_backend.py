@@ -339,6 +339,10 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         )
         self.assertIn("tail", ls_set.prediction_set)
 
+        # Verify exact coarse domain marginal preservation in mtp_partitioned_1pass
+        dom0_sum = sum(v for k, v in part_res.probabilities.items() if k.startswith("dom0_"))
+        self.assertAlmostEqual(dom0_sum, 0.82, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

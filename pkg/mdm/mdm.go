@@ -1717,3 +1717,83 @@ func SinkhornDealiasedTrieDecode(coarseProbs, fineProbs map[string]float64, leav
 	}
 	return out, bestKey
 }
+
+// PartitionedOnePassTrieDecode decodes a single-pass multi-slot taxonomy readout
+// consisting of 1 coarse domain slot and B <= 7 disjoint fine band slots with
+// zero cross-domain fine-code aliasing (Proposition 3).
+func PartitionedOnePassTrieDecode(
+	coarseProbs map[string]float64,
+	bandProbs map[string]map[string]float64,
+	leafToBand map[string]string,
+	leaves []TaxonomyLeaf,
+	catchAllKey string,
+) (map[string]float64, string) {
+	if len(leaves) == 0 {
+		return map[string]float64{}, ""
+	}
+	const eps = 1e-12
+	cTot := 0.0
+	for _, v := range coarseProbs {
+		if v > 0 {
+			cTot += v
+		}
+	}
+	if cTot <= 0 {
+		cTot = 1.0
+	}
+
+	domTotals := make(map[string]float64)
+	for _, leaf := range leaves {
+		if catchAllKey != "" && leaf.LeafKey == catchAllKey {
+			continue
+		}
+		bSlot := leafToBand[leaf.LeafKey]
+		bDist := bandProbs[bSlot]
+		val := eps
+		if bDist != nil && bDist[leaf.LeafKey] > eps {
+			val = bDist[leaf.LeafKey]
+		}
+		domTotals[leaf.CoarseKey] += val
+	}
+
+	rawJoint := make(map[string]float64, len(leaves))
+	denom := 0.0
+	for _, leaf := range leaves {
+		pc := math.Max(eps, math.Max(0, coarseProbs[leaf.CoarseKey])/cTot)
+		if catchAllKey != "" && leaf.LeafKey == catchAllKey {
+			rawJoint[leaf.LeafKey] = pc
+			denom += pc
+			continue
+		}
+		bSlot := leafToBand[leaf.LeafKey]
+		bDist := bandProbs[bSlot]
+		val := eps
+		if bDist != nil && bDist[leaf.LeafKey] > eps {
+			val = bDist[leaf.LeafKey]
+		}
+		domTot := domTotals[leaf.CoarseKey]
+		if domTot <= 0 {
+			domTot = 1.0
+		}
+		pCond := val / domTot
+		jProb := pc * pCond
+		rawJoint[leaf.LeafKey] = jProb
+		denom += jProb
+	}
+	if denom <= 0 {
+		denom = 1.0
+	}
+
+	out := make(map[string]float64, len(leaves))
+	bestKey := ""
+	bestVal := -1.0
+	for _, leaf := range leaves {
+		p := rawJoint[leaf.LeafKey] / denom
+		out[leaf.LeafKey] = p
+		if p > bestVal || (p == bestVal && leaf.LeafKey > bestKey) {
+			bestVal = p
+			bestKey = leaf.LeafKey
+		}
+	}
+	return out, bestKey
+}

@@ -394,4 +394,23 @@ func TestJevAgentHarnessDelegationGuardSFTAndTango(t *testing.T) {
 	if err != nil || len(lsRes.PredictionSet) < 2 {
 		t.Fatalf("expected tail included in label-shift weighted conformal set, got %+v, err=%v", lsRes, err)
 	}
+
+	// Proposition 3b: PartitionedOnePassTrieDecode exact chain-rule joint decoding
+	p1Probs, p1Win := PartitionedOnePassTrieDecode(
+		map[string]float64{"d1": 0.80, "d2": 0.20},
+		map[string]map[string]float64{
+			"band_1": {"d1_r1": 0.30, "d1_r2": 0.70},
+			"band_2": {"d2_r1": 1.00},
+		},
+		map[string]string{
+			"d1_r1": "band_1",
+			"d1_r2": "band_1",
+			"d2_r1": "band_2",
+		},
+		trieLeaves,
+		"",
+	)
+	if p1Win != "d1_r2" || math.Abs(p1Probs["d1_r2"]-0.56) > 1e-6 || math.Abs((p1Probs["d1_r1"]+p1Probs["d1_r2"])-0.80) > 1e-6 {
+		t.Fatalf("expected PartitionedOnePassTrieDecode winner d1_r2 with prob 0.56 and d1 marginal 0.80, got win=%s probs=%v", p1Win, p1Probs)
+	}
 }

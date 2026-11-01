@@ -709,24 +709,31 @@ class HierarchicalDecisionRouter:
 
         eps = 1e-12
         c_tot = sum(max(0.0, float(v)) for v in coarse_dist.values()) or 1.0
-        log_scores: dict[str, float] = {}
+        domain_band_totals: dict[str, float] = {}
+        for leaf_key, leaf in trie.leaves.items():
+            if trie.catch_all_key and leaf_key == trie.catch_all_key:
+                continue
+            b_slot = leaf_to_band.get(leaf_key, "")
+            b_dist = dists.get(b_slot, {})
+            domain_band_totals[leaf.coarse_key] = domain_band_totals.get(leaf.coarse_key, 0.0) + max(
+                eps, float(b_dist.get(leaf_key, 0.0))
+            )
 
+        raw_joint: dict[str, float] = {}
         for leaf_key, leaf in trie.leaves.items():
             p_c = max(eps, float(coarse_dist.get(leaf.coarse_key, 0.0)) / c_tot)
             if trie.catch_all_key and leaf_key == trie.catch_all_key:
-                log_scores[leaf_key] = math.log(p_c)
+                raw_joint[leaf_key] = p_c
             else:
                 b_slot = leaf_to_band.get(leaf_key, "")
                 b_dist = dists.get(b_slot, {})
-                b_tot = sum(max(0.0, float(v)) for v in b_dist.values()) or 1.0
-                p_leaf_in_band = max(eps, float(b_dist.get(leaf_key, 0.0)) / b_tot)
-                log_scores[leaf_key] = math.log(p_c) + math.log(p_leaf_in_band)
+                dom_tot = domain_band_totals.get(leaf.coarse_key, 0.0) or 1.0
+                p_cond = max(eps, float(b_dist.get(leaf_key, 0.0))) / dom_tot
+                raw_joint[leaf_key] = p_c * p_cond
 
-        max_lp = max(log_scores.values())
-        exps = {k: math.exp(lp - max_lp) for k, lp in log_scores.items()}
-        denom = sum(exps.values()) or 1.0
-        joint_probs = {k: v / denom for k, v in exps.items()}
-        winner = max(joint_probs.items(), key=lambda kv: kv[1])[0]
+        denom = sum(raw_joint.values()) or 1.0
+        joint_probs = {k: v / denom for k, v in raw_joint.items()}
+        winner = max(joint_probs.items(), key=lambda kv: (kv[1], kv[0]))[0]
         h_joint = normalized_entropy(joint_probs)
 
         return SlotReadout(
