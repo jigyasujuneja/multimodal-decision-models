@@ -341,7 +341,7 @@ def trie_constrained_joint_decode(
     fine_probs: Mapping[str, float],
     trie: TaxonomyTrie,
 ) -> tuple[dict[str, float], str]:
-    """Decode exact joint leaf probabilities strictly over valid paths in `trie`.
+    """Decode joint leaf probabilities strictly over valid paths in `trie`.
 
     Computes s(e | x) = log P_coarse(c_1(e) | x) + log P_fine(c_2(e) | x) for every valid
     leaf e in T and normalizes via log-sum-exp, eliminating invalid cross-slot combinations.
@@ -373,10 +373,91 @@ def trie_constrained_joint_decode(
     return leaf_probs, winner
 
 
-class HierarchicalDecisionRouter:
-    """Executes wide-option (>26) taxonomy routing across 4 Semantic-ID decoding arms."""
+def sinkhorn_dealiased_trie_decode(
+    coarse_probs: Mapping[str, float],
+    fine_probs: Mapping[str, float],
+    trie: TaxonomyTrie,
+    *,
+    leaf_prior_weights: Mapping[str, float] | None = None,
+    num_iters: int = 8,
+) -> tuple[dict[str, float], str]:
+    """De-alias 1-pass (coarse, fine) marginals via Sinkhorn-Knopp / IPF I-projection on `trie`.
 
-    VALID_MODES = ("mtp_naive", "mtp_trie", "beam_2pass", "hesitation_hybrid")
+    In 1-pass parallel readout, fine_probs[c_2] is the column marginal summed over all coarse
+    domains sharing fine code c_2: P_fine(c_2) = sum_{c_1 : (c_1, c_2) in T} Q(c_1, c_2).
+    Alternating Bregman KL row/column projections (Csiszar, Ann. Probab. 1975) onto the sparse
+    trie support T recovers the minimum-KL coupling Q^*(c_1, c_2) consistent with both slot
+    marginals while preventing high-collision fine codes from dominating low-collision roles.
+
+    Args:
+        coarse_probs: Coarse domain probability distribution P_1(c_1 | x).
+        fine_probs: Fine slot marginal probability distribution P_2(c_2 | x).
+        trie: Two-level TaxonomyTrie defining valid root-to-leaf edges (c_1, c_2).
+        leaf_prior_weights: Optional positive prior affinity weights A(e) per leaf_key.
+        num_iters: Number of alternating row/column IPF scaling iterations (>= 1).
+
+    Returns:
+        Tuple `(leaf_probs, winner_key)` where `leaf_probs` sums to 1.0 over `trie.leaves`.
+    """
+    if isinstance(num_iters, bool) or not isinstance(num_iters, int) or num_iters < 1:
+        raise ValueError(f"num_iters must be an integer >= 1, got {num_iters!r}")
+    if not trie.leaves:
+        return {}, ""
+
+    eps = 1e-12
+    c_tot = sum(max(0.0, float(v)) for v in coarse_probs.values()) or 1.0
+    f_tot = sum(max(0.0, float(v)) for v in fine_probs.values()) or 1.0
+    p_coarse = {k: max(eps, float(coarse_probs.get(k, 0.0)) / c_tot) for k in trie.coarse_criteria}
+    p_fine = {k: max(eps, float(fine_probs.get(k, 0.0)) / f_tot) for k in trie.fine_criteria}
+
+    # Initialize sparse coupling Q^{(0)}(e) on valid trie leaves e = (c_1, c_2) in T
+    coupling: dict[str, float] = {}
+    for leaf_key, leaf in trie.leaves.items():
+        prior_w = 1.0
+        if leaf_prior_weights is not None:
+            prior_w = max(eps, float(leaf_prior_weights.get(leaf_key, 1.0)))
+        coupling[leaf_key] = prior_w * p_coarse.get(leaf.coarse_key, eps) * p_fine.get(leaf.fine_key, eps)
+
+    # Alternating Bregman KL projection onto column (fine) and row (coarse) marginals
+    for _ in range(num_iters):
+        # 1. Column scaling: match fine slot marginal P_2(c_2 | x) across aliased leaves sharing c_2
+        col_sums: dict[str, float] = {}
+        for leaf_key, leaf in trie.leaves.items():
+            col_sums[leaf.fine_key] = col_sums.get(leaf.fine_key, 0.0) + coupling[leaf_key]
+        for leaf_key, leaf in trie.leaves.items():
+            c_sum = col_sums.get(leaf.fine_key, 0.0)
+            if c_sum > eps:
+                coupling[leaf_key] *= p_fine.get(leaf.fine_key, eps) / c_sum
+
+        # 2. Row scaling: match coarse domain marginal P_1(c_1 | x) across leaves in domain c_1
+        row_sums: dict[str, float] = {}
+        for leaf_key, leaf in trie.leaves.items():
+            row_sums[leaf.coarse_key] = row_sums.get(leaf.coarse_key, 0.0) + coupling[leaf_key]
+        for leaf_key, leaf in trie.leaves.items():
+            r_sum = row_sums.get(leaf.coarse_key, 0.0)
+            if r_sum > eps:
+                coupling[leaf_key] *= p_coarse.get(leaf.coarse_key, eps) / r_sum
+
+    total_q = sum(coupling.values())
+    if total_q <= 0.0:
+        return trie_constrained_joint_decode(coarse_probs, fine_probs, trie)
+
+    leaf_probs = {k: v / total_q for k, v in coupling.items()}
+    winner = max(leaf_probs.items(), key=lambda kv: kv[1])[0]
+    return leaf_probs, winner
+
+
+class HierarchicalDecisionRouter:
+    """Executes wide-option (>26) taxonomy routing across 6 Semantic-ID decoding arms."""
+
+    VALID_MODES = (
+        "mtp_naive",
+        "mtp_trie",
+        "mtp_sinkhorn",
+        "mtp_partitioned_1pass",
+        "beam_2pass",
+        "hesitation_hybrid",
+    )
 
     def __init__(
         self,
@@ -450,6 +531,18 @@ class HierarchicalDecisionRouter:
                 passes_so_far=1,
             )
 
+        if self.mode == "mtp_partitioned_1pass":
+            part_readout = self._try_partitioned_1pass(
+                state=state,
+                slot_id=slot_id,
+                question=question,
+                trie=active_trie,
+                coarse_q=coarse_q,
+                images=images,
+            )
+            if part_readout is not None:
+                return part_readout
+
         # Single-pass parallel readout of (coarse, fine) slots on the same canvas
         p1 = self.backend.score_questions(
             state,
@@ -499,6 +592,25 @@ class HierarchicalDecisionRouter:
                 invalid_coordinates=(best_c, best_f),
             )
 
+        if self.mode in ("mtp_sinkhorn", "mtp_partitioned_1pass"):
+            joint_probs, trie_winner = sinkhorn_dealiased_trie_decode(
+                coarse_dist,
+                fine_dist,
+                active_trie,
+            )
+            h_joint = normalized_entropy(joint_probs)
+            return SlotReadout(
+                slot_id=slot_id,
+                predicted=trie_winner,
+                probabilities=joint_probs,
+                raw_probabilities=coarse_dist,
+                h_raw=h_coarse,
+                confidence=1.0 - h_joint,
+                guard_applied="trie_sinkhorn_1pass",
+                backend_name=self.backend.name,
+                passes_used=1,
+            )
+
         joint_probs, trie_winner = trie_constrained_joint_decode(coarse_dist, fine_dist, active_trie)
         h_joint = normalized_entropy(joint_probs)
 
@@ -525,6 +637,108 @@ class HierarchicalDecisionRouter:
             h_coarse=h_coarse,
             images=images,
             passes_so_far=1,
+        )
+
+    def _try_partitioned_1pass(
+        self,
+        state: Any,
+        slot_id: str,
+        question: DecisionQuestion,
+        trie: TaxonomyTrie,
+        coarse_q: DecisionQuestion,
+        images: list[str] | None,
+    ) -> SlotReadout | None:
+        """Pack up to 7 disjoint fine sub-slots alongside 1 coarse slot in a single 8-slot pass.
+
+        Eliminates cross-domain fine-code aliasing for catalogs up to 7 * 25 + 1 = 176 options
+        while keeping passes_used = 1.
+        """
+        max_bands = MAX_SLOTS_PER_PASS - 1
+        band_cap = MAX_OPTIONS_PER_SLOT - 1
+        bands: list[list[TaxonomyLeaf]] = []
+        current_band: list[TaxonomyLeaf] = []
+
+        for dom in trie.coarse_order:
+            if dom == trie.catch_all_key:
+                continue
+            members = trie.domain_members(dom)
+            if not members:
+                continue
+            if len(members) > band_cap:
+                return None
+            if current_band and len(current_band) + len(members) > band_cap:
+                bands.append(current_band)
+                current_band = list(members)
+            else:
+                current_band.extend(members)
+        if current_band:
+            bands.append(current_band)
+
+        if not bands or len(bands) > max_bands:
+            return None
+
+        complement_key = trie.catch_all_key or "__other_band__"
+        complement_desc = (
+            question.criteria.get(trie.catch_all_key, "None of the above in this band")
+            if trie.catch_all_key
+            else "Intent belongs to another coarse domain band"
+        )
+
+        questions_1pass: dict[str, DecisionQuestion] = {f"{slot_id}_coarse": coarse_q}
+        leaf_to_band: dict[str, str] = {}
+        for b_idx, band_leaves in enumerate(bands):
+            b_slot = f"{slot_id}_band_{b_idx + 1}"
+            b_crit: dict[str, str] = {}
+            b_order: list[str] = []
+            for leaf in band_leaves:
+                b_crit[leaf.leaf_key] = leaf.description or question.criteria.get(leaf.leaf_key, leaf.leaf_key)
+                b_order.append(leaf.leaf_key)
+                leaf_to_band[leaf.leaf_key] = b_slot
+            b_crit[complement_key] = complement_desc
+            b_order.append(complement_key)
+            questions_1pass[b_slot] = DecisionQuestion(
+                type="choice",
+                instructions=f"{question.instructions} (Select the matching leaf intent in band {b_idx + 1}.)",
+                criteria=b_crit,
+                order=b_order,
+            )
+
+        dists = self.backend.score_questions(state, questions_1pass, images)
+        coarse_dist = dists.get(f"{slot_id}_coarse", {})
+        h_coarse = normalized_entropy(coarse_dist)
+
+        eps = 1e-12
+        c_tot = sum(max(0.0, float(v)) for v in coarse_dist.values()) or 1.0
+        log_scores: dict[str, float] = {}
+
+        for leaf_key, leaf in trie.leaves.items():
+            p_c = max(eps, float(coarse_dist.get(leaf.coarse_key, 0.0)) / c_tot)
+            if trie.catch_all_key and leaf_key == trie.catch_all_key:
+                log_scores[leaf_key] = math.log(p_c)
+            else:
+                b_slot = leaf_to_band.get(leaf_key, "")
+                b_dist = dists.get(b_slot, {})
+                b_tot = sum(max(0.0, float(v)) for v in b_dist.values()) or 1.0
+                p_leaf_in_band = max(eps, float(b_dist.get(leaf_key, 0.0)) / b_tot)
+                log_scores[leaf_key] = math.log(p_c) + math.log(p_leaf_in_band)
+
+        max_lp = max(log_scores.values())
+        exps = {k: math.exp(lp - max_lp) for k, lp in log_scores.items()}
+        denom = sum(exps.values()) or 1.0
+        joint_probs = {k: v / denom for k, v in exps.items()}
+        winner = max(joint_probs.items(), key=lambda kv: kv[1])[0]
+        h_joint = normalized_entropy(joint_probs)
+
+        return SlotReadout(
+            slot_id=slot_id,
+            predicted=winner,
+            probabilities=joint_probs,
+            raw_probabilities=coarse_dist,
+            h_raw=h_coarse,
+            confidence=1.0 - h_joint,
+            guard_applied=f"partitioned_1pass_{len(bands)}bands",
+            backend_name=self.backend.name,
+            passes_used=1,
         )
 
     def _run_pass2_beam(

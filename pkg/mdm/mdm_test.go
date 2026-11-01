@@ -355,4 +355,20 @@ func TestJevAgentHarnessDelegationGuardSFTAndTango(t *testing.T) {
 	if err != nil || certBoundary.AMGMBoundaryCertified || math.Abs(certBoundary.ConsistencyScore-13.0/27.0) > 1e-9 {
 		t.Fatalf("expected boundary 13/27 score and uncertified flag, got %+v, err=%v", certBoundary, err)
 	}
+
+	// Proposition 3: Sinkhorn-Knopp de-aliased trie coupling
+	trieLeaves := []TaxonomyLeaf{
+		{LeafKey: "d1_r1", CoarseKey: "d1", FineKey: "r1"},
+		{LeafKey: "d1_r2", CoarseKey: "d1", FineKey: "r2"},
+		{LeafKey: "d2_r1", CoarseKey: "d2", FineKey: "r1"},
+	}
+	sProbs, sWin := SinkhornDealiasedTrieDecode(
+		map[string]float64{"d1": 0.80, "d2": 0.20},
+		map[string]float64{"r1": 0.75, "r2": 0.25},
+		trieLeaves,
+		8,
+	)
+	if sWin != "d1_r1" || math.Abs((sProbs["d1_r1"]+sProbs["d1_r2"])-0.80) > 1e-4 {
+		t.Fatalf("expected Sinkhorn winner d1_r1 and row marginal 0.80, got win=%s probs=%v", sWin, sProbs)
+	}
 }

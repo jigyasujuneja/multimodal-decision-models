@@ -1617,3 +1617,103 @@ func CutPolytopeTriangleConsistencyScore(pAB, pBC, pAC float64) (CutPolytopeTria
 		AMGMBoundaryCertified: certified,
 	}, nil
 }
+
+// SinkhornDealiasedTrieDecode computes the minimum-KL I-projection coupling over valid taxonomy leaves via alternating row/column IPF scaling (Proposition 3).
+func SinkhornDealiasedTrieDecode(coarseProbs, fineProbs map[string]float64, leaves []TaxonomyLeaf, numIters int) (map[string]float64, string) {
+	if len(leaves) == 0 {
+		return map[string]float64{}, ""
+	}
+	if numIters < 1 {
+		numIters = 8
+	}
+	const eps = 1e-12
+	cTot, fTot := 0.0, 0.0
+	for _, v := range coarseProbs {
+		if v > 0 {
+			cTot += v
+		}
+	}
+	for _, v := range fineProbs {
+		if v > 0 {
+			fTot += v
+		}
+	}
+	if cTot <= 0 {
+		cTot = 1.0
+	}
+	if fTot <= 0 {
+		fTot = 1.0
+	}
+
+	pCoarse := make(map[string]float64, len(coarseProbs))
+	for k, v := range coarseProbs {
+		pCoarse[k] = math.Max(eps, math.Max(0, v)/cTot)
+	}
+	pFine := make(map[string]float64, len(fineProbs))
+	for k, v := range fineProbs {
+		pFine[k] = math.Max(eps, math.Max(0, v)/fTot)
+	}
+
+	coupling := make(map[string]float64, len(leaves))
+	for _, leaf := range leaves {
+		pc := pCoarse[leaf.CoarseKey]
+		if pc <= 0 {
+			pc = eps
+		}
+		pf := pFine[leaf.FineKey]
+		if pf <= 0 {
+			pf = eps
+		}
+		coupling[leaf.LeafKey] = pc * pf
+	}
+
+	for iter := 0; iter < numIters; iter++ {
+		colSums := make(map[string]float64)
+		for _, leaf := range leaves {
+			colSums[leaf.FineKey] += coupling[leaf.LeafKey]
+		}
+		for _, leaf := range leaves {
+			if cs := colSums[leaf.FineKey]; cs > eps {
+				pf := pFine[leaf.FineKey]
+				if pf <= 0 {
+					pf = eps
+				}
+				coupling[leaf.LeafKey] *= pf / cs
+			}
+		}
+
+		rowSums := make(map[string]float64)
+		for _, leaf := range leaves {
+			rowSums[leaf.CoarseKey] += coupling[leaf.LeafKey]
+		}
+		for _, leaf := range leaves {
+			if rs := rowSums[leaf.CoarseKey]; rs > eps {
+				pc := pCoarse[leaf.CoarseKey]
+				if pc <= 0 {
+					pc = eps
+				}
+				coupling[leaf.LeafKey] *= pc / rs
+			}
+		}
+	}
+
+	totQ := 0.0
+	for _, v := range coupling {
+		totQ += v
+	}
+	if totQ <= 0 {
+		totQ = 1.0
+	}
+	out := make(map[string]float64, len(leaves))
+	bestKey := ""
+	bestVal := -1.0
+	for _, leaf := range leaves {
+		p := coupling[leaf.LeafKey] / totQ
+		out[leaf.LeafKey] = p
+		if p > bestVal {
+			bestVal = p
+			bestKey = leaf.LeafKey
+		}
+	}
+	return out, bestKey
+}

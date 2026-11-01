@@ -175,6 +175,7 @@ from .hierarchy import (
     TaxonomyTrie,
     build_prefix_taxonomy_trie,
     packed_bracket_pass_count,
+    sinkhorn_dealiased_trie_decode,
     trie_constrained_joint_decode,
 )
 from .mcp_server import (
@@ -450,6 +451,7 @@ __all__ = [
     "serve_stdio",
     "shades_of_gray_white_balance",
     "shortlist_wide_question",
+    "sinkhorn_dealiased_trie_decode",
     "split_identifier_tokens",
     "stage2a_fast_exit_gate",
     "tango_paired_non_inferiority_test",

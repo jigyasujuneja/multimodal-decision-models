@@ -281,6 +281,46 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         self.assertEqual(tree_res.selected_leaf_id, "r1")
         self.assertTrue(tree_res.leaf_correct)
 
+        # Proposition 3: Sinkhorn-Knopp de-aliased trie coupling and partitioned 1-pass zero-aliasing router
+        wide_criteria = {f"dom{d}_intent{i}": f"Domain {d} action {i}" for d in range(4) for i in range(8)}
+        wide_criteria["oos"] = "Out of scope"
+        trie = mdm.build_prefix_taxonomy_trie(wide_criteria, catch_all_key="oos")
+        coarse_p = {k: (0.70 if k == "dom0" else 0.10) for k in trie.coarse_criteria}
+        fine_p = {k: (0.60 if k == "intent0" else 0.05) for k in trie.fine_criteria}
+        sink_probs, sink_win = mdm.sinkhorn_dealiased_trie_decode(coarse_p, fine_p, trie, num_iters=8)
+        self.assertEqual(sink_win, "dom0_intent0")
+        self.assertAlmostEqual(sum(sink_probs.values()), 1.0, places=9)
+
+        def mock_band_scorer(state, questions, images=None):
+            out = {}
+            for q_id, q in questions.items():
+                keys = q.option_keys()
+                if q_id.endswith("_coarse"):
+                    out[q_id] = {k: (0.82 if k == "dom0" else 0.18 / max(1, len(keys) - 1)) for k in keys}
+                elif "dom0_intent0" in keys:
+                    out[q_id] = {k: (0.88 if k == "dom0_intent0" else 0.12 / max(1, len(keys) - 1)) for k in keys}
+                else:
+                    out[q_id] = {k: 1.0 / len(keys) for k in keys}
+            return out
+
+        part_router = mdm.HierarchicalDecisionRouter(
+            backend=mdm.MockCallableBackend(name="mock_band", fn=mock_band_scorer),
+            mode="mtp_partitioned_1pass",
+        )
+        part_res = part_router.route(
+            state={"query": "run dom0 intent0"},
+            slot_id="intent",
+            question=mdm.DecisionQuestion(
+                type="choice",
+                instructions="Classify user intent.",
+                criteria=wide_criteria,
+            ),
+            trie=trie,
+        )
+        self.assertEqual(part_res.predicted, "dom0_intent0")
+        self.assertEqual(part_res.passes_used, 1)
+        self.assertTrue(part_res.guard_applied.startswith("partitioned_1pass_"))
+
 
 if __name__ == "__main__":
     unittest.main()
