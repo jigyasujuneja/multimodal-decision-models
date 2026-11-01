@@ -17,9 +17,16 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+import sys
 import unittest
 from unittest.mock import patch
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from benchmarks import run_formal_propositions_v090_bench as prop_bench
 import multimodal_decision_models as mdm
 
 
@@ -342,6 +349,26 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         # Verify exact coarse domain marginal preservation in mtp_partitioned_1pass
         dom0_sum = sum(v for k, v in part_res.probabilities.items() if k.startswith("dom0_"))
         self.assertAlmostEqual(dom0_sum, 0.82, places=6)
+
+    def test_formal_propositions_v090_benchmark_pillars(self) -> None:
+        typed_rows = prop_bench.load_typed_receipts(prop_bench.TYPED_RECEIPTS_PATH)
+        mdm_rows = prop_bench.load_typed_receipts(prop_bench.MDM_BENCH_RECEIPTS_PATH)
+
+        pillar1 = prop_bench.run_pillar1_top_m_entropy_experiment(typed_rows)
+        self.assertEqual(pillar1["sibling_tie_recall_top_m"], 1.0)
+        self.assertGreater(pillar1["top_m_entropy_accuracy"], pillar1["global_entropy_accuracy"])
+
+        pillar2 = prop_bench.run_pillar2_cascade_risk_bound_experiment(typed_rows)
+        self.assertTrue(pillar2["strictly_improves"])
+        self.assertTrue(pillar2["coverage_guarantee_satisfied"])
+
+        pillar3 = prop_bench.run_pillar3_polytope_and_sinkhorn_experiment(typed_rows)
+        self.assertTrue(pillar3["facet_bound_verified_all_100"])
+        self.assertEqual(pillar3["sinkhorn_dealiased_trie_accuracy"], 1.0)
+
+        pillar4 = prop_bench.run_pillar4_combined_shift_conformal_experiment(mdm_rows)
+        self.assertGreaterEqual(pillar4["combined_shift_tail_coverage"], pillar4["target_coverage"])
+        self.assertGreater(pillar4["combined_shift_tail_coverage"], pillar4["unweighted_tail_coverage"])
 
 
 if __name__ == "__main__":
