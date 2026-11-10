@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multimodal-decision-models"
-version = "0.4.0"
-description = "Model-agnostic calibrated multimodal decision models: four-paradigm backends, split conformal and RAPS prediction sets, L2 calibration, dual-buffer visual contact sheets, pluggable embedding shortlists, context pruning, and MCP stdio routing."
+version = "1.0.0"
+description = "Model-agnostic calibrated multimodal decision models: four-paradigm backends, split conformal and RAPS prediction sets, L2 calibration, dual-buffer visual contact sheets, pluggable embedding shortlists, agent framework guards, context pruning, and MCP stdio routing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}

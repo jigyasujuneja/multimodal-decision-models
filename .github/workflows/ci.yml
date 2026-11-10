@@ -33,8 +33,23 @@ jobs:
           go-version: "1.22"
           cache: false
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: sdk/ts/package-lock.json
+
       - name: Run Python unit tests
         run: PYTHONPATH=src python -m unittest discover -s tests -v
+
+      - name: Run TypeScript SDK build and unit tests
+        run: |
+          npm --prefix sdk/ts ci
+          npm --prefix sdk/ts test
+
+      - name: Validate Terraform module configuration
+        run: python deploy/terraform/test_terraform_config.py
 
       - name: Check Go formatting
         run: |
