@@ -22,6 +22,7 @@ import json
 import math
 import re
 from typing import Callable, Mapping
+import unicodedata
 
 from .backends import CascadeDecisionOrchestrator, DecisionBackend
 from .calibration import normalized_entropy
@@ -30,7 +31,7 @@ from .contracts import DecisionContractError, SchemaContractViolationError, sani
 from .types import DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory
 
 _UNTRUSTED_TAG_VARIANT_RE = re.compile(
-    r"</?\s*untrusted_(?:data|tool_output|audio_transcript)\s*>",
+    r"<[ \t\r\n]*(?:/[ \t\r\n]*)?untrusted_[^<>]*>",
     re.IGNORECASE,
 )
 
@@ -61,7 +62,8 @@ def neutralize_untrusted_delimiters(raw_text: str, max_chars: int = 16384) -> st
         raise SchemaContractViolationError(
             f"raw_text must be a string, got {type(raw_text).__qualname__}"
         )
-    escaped_tags = _UNTRUSTED_TAG_VARIANT_RE.sub("[escaped_untrusted_tag]", raw_text)
+    normalized_text = unicodedata.normalize("NFKC", raw_text)
+    escaped_tags = _UNTRUSTED_TAG_VARIANT_RE.sub("[escaped_untrusted_tag]", normalized_text)
     sanitized = sanitize_untrusted_text(escaped_tags, max_chars=max_chars)
     return f"<untrusted_data>\n{sanitized}\n</untrusted_data>"
 
@@ -202,6 +204,29 @@ def _extract_context_state_map(tool_context: object) -> Mapping[str, object]:
     return {}
 
 
+def _validate_guard_distribution(raw_map: object, slot_name: str) -> tuple[dict[str, float], dict[str, float]]:
+    if not isinstance(raw_map, Mapping) or not raw_map:
+        raise SchemaContractViolationError(f"guard slot {slot_name!r} distribution must be non-empty")
+    raw_clean: dict[str, float] = {}
+    total = 0.0
+    for key, value in raw_map.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SchemaContractViolationError(
+                f"guard slot {slot_name!r}[{key!r}] must be a finite non-boolean number"
+            )
+        numeric_value = float(value)
+        if not math.isfinite(numeric_value) or numeric_value < 0.0:
+            raise SchemaContractViolationError(
+                f"guard slot {slot_name!r}[{key!r}] must be finite and >= 0, got {value!r}"
+            )
+        raw_clean[str(key)] = numeric_value
+        total += numeric_value
+    if not math.isfinite(total) or total <= 0.0:
+        raise SchemaContractViolationError(f"guard slot {slot_name!r} probabilities must sum to > 0")
+    normalized = {key: val / total for key, val in raw_clean.items()}
+    return raw_clean, normalized
+
+
 def evaluate_adk_tool_guard(
     runner: CascadeDecisionOrchestrator | DecisionBackend,
     *,
@@ -248,20 +273,23 @@ def evaluate_adk_tool_guard(
             reason="invalid_tool_args_mapping",
         )
 
-    fenced_context = neutralize_untrusted_delimiters(str(untrusted_context))
-    fenced_args = wrap_untrusted_state(dict(tool_args))
-    guard_state = {
-        "tool_name": clean_tool_name,
-        "is_irreversible": is_irreversible,
-        "authenticated_user_request": sanitize_untrusted_text(str(user_request)),
-        "proposed_tool_arguments": fenced_args,
-        "external_context": fenced_context,
-    }
-    questions = _build_tool_guard_questions()
-
     try:
+        fenced_context = neutralize_untrusted_delimiters(str(untrusted_context))
+        fenced_args = wrap_untrusted_state(dict(tool_args))
+        guard_state = {
+            "tool_name": clean_tool_name,
+            "is_irreversible": is_irreversible,
+            "authenticated_user_request": sanitize_untrusted_text(str(user_request)),
+            "proposed_tool_arguments": fenced_args,
+            "external_context": fenced_context,
+        }
+        questions = _build_tool_guard_questions()
+
         if orchestrator is not None:
-            decision_result = orchestrator.evaluate(guard_state, questions)
+            decision_result = orchestrator.evaluate(
+                guard_state,
+                questions,
+            )
             if inspect.iscoroutine(decision_result):
                 decision_result.close()
                 raise SchemaContractViolationError("orchestrator.evaluate returned a coroutine")
@@ -282,10 +310,16 @@ def evaluate_adk_tool_guard(
                 )
             disp_slot = decision_result.slots["disposition"]
             origin_slot = decision_result.slots["intent_origin"]
-            disp_probs = dict(disp_slot.probabilities)
-            origin_probs = dict(origin_slot.probabilities)
-            raw_disp_probs = dict(disp_slot.raw_probabilities or disp_probs)
-            raw_origin_probs = dict(origin_slot.raw_probabilities or origin_probs)
+            _, disp_probs = _validate_guard_distribution(disp_slot.probabilities, "disposition")
+            _, origin_probs = _validate_guard_distribution(origin_slot.probabilities, "intent_origin")
+            raw_disp_probs, _ = _validate_guard_distribution(
+                disp_slot.raw_probabilities or disp_probs,
+                "disposition_raw",
+            )
+            raw_origin_probs, _ = _validate_guard_distribution(
+                origin_slot.raw_probabilities or origin_probs,
+                "intent_origin_raw",
+            )
             disp_pred = disp_slot.predicted
             origin_pred = origin_slot.predicted
             orchestrator_escalated = bool(decision_result.escalated)
@@ -303,17 +337,53 @@ def evaluate_adk_tool_guard(
                 raise SchemaContractViolationError(
                     "backend.score_questions must return disposition and intent_origin distributions"
                 )
-            raw_disp_probs = {str(k): float(v) for k, v in scored["disposition"].items()}
-            raw_origin_probs = {str(k): float(v) for k, v in scored["intent_origin"].items()}
-            disp_total = sum(raw_disp_probs.values())
-            origin_total = sum(raw_origin_probs.values())
-            if disp_total <= 0.0 or origin_total <= 0.0:
-                raise SchemaContractViolationError("guard slot probabilities must sum to > 0")
-            disp_probs = {k: v / disp_total for k, v in raw_disp_probs.items()}
-            origin_probs = {k: v / origin_total for k, v in raw_origin_probs.items()}
+            raw_disp_probs, disp_probs = _validate_guard_distribution(
+                scored["disposition"],
+                "disposition",
+            )
+            raw_origin_probs, origin_probs = _validate_guard_distribution(
+                scored["intent_origin"],
+                "intent_origin",
+            )
             disp_pred = max(disp_probs.items(), key=lambda pair: (pair[1], pair[0]))[0]
             origin_pred = max(origin_probs.items(), key=lambda pair: (pair[1], pair[0]))[0]
             orchestrator_escalated = False
+
+        joint_confidence = min(
+            float(disp_probs.get("allow", 0.0)),
+            float(origin_probs.get("explicit_user_intent", 0.0)),
+        )
+        if not math.isfinite(joint_confidence):
+            raise SchemaContractViolationError("guard joint_confidence must be finite")
+
+        conformal_ambiguous = False
+        if active_policy.joint_q_hat is not None:
+            seed_key = active_policy.hmac_seed_key
+            randomized = seed_key is not None
+            disp_set = conformal_prediction_set(
+                raw_disp_probs,
+                float(active_policy.joint_q_hat),
+                method=active_policy.conformal_method,
+                lam_reg=active_policy.conformal_lam_reg,
+                k_reg=active_policy.conformal_k_reg,
+                randomized=randomized,
+                abstain_keys=_GUARD_ABSTAIN_OR_BLOCK_KEYS,
+                seed_key=seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY if randomized else None,
+                item_key=f"{request_id}:disposition",
+            )
+            origin_set = conformal_prediction_set(
+                raw_origin_probs,
+                float(active_policy.joint_q_hat),
+                method=active_policy.conformal_method,
+                lam_reg=active_policy.conformal_lam_reg,
+                k_reg=active_policy.conformal_k_reg,
+                randomized=randomized,
+                abstain_keys=_GUARD_ABSTAIN_OR_BLOCK_KEYS,
+                seed_key=seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY if randomized else None,
+                item_key=f"{request_id}:intent_origin",
+            )
+            if disp_set.should_escalate or origin_set.should_escalate:
+                conformal_ambiguous = True
     except (DecisionContractError, OSError, TimeoutError, ValueError, KeyError, TypeError) as exc:
         return ADKToolGuardDecision(
             allowed=False,
@@ -325,40 +395,6 @@ def evaluate_adk_tool_guard(
             should_escalate=True,
             reason=f"fail_closed_error:{type(exc).__qualname__}:{exc}",
         )
-
-    joint_confidence = min(
-        float(disp_probs.get("allow", 0.0)),
-        float(origin_probs.get("explicit_user_intent", 0.0)),
-    )
-
-    conformal_ambiguous = False
-    if active_policy.joint_q_hat is not None:
-        seed_key = active_policy.hmac_seed_key
-        randomized = seed_key is not None
-        disp_set = conformal_prediction_set(
-            raw_disp_probs,
-            float(active_policy.joint_q_hat),
-            method=active_policy.conformal_method,
-            lam_reg=active_policy.conformal_lam_reg,
-            k_reg=active_policy.conformal_k_reg,
-            randomized=randomized,
-            abstain_keys=_GUARD_ABSTAIN_OR_BLOCK_KEYS,
-            seed_key=seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY if randomized else None,
-            item_key=f"{request_id}:disposition",
-        )
-        origin_set = conformal_prediction_set(
-            raw_origin_probs,
-            float(active_policy.joint_q_hat),
-            method=active_policy.conformal_method,
-            lam_reg=active_policy.conformal_lam_reg,
-            k_reg=active_policy.conformal_k_reg,
-            randomized=randomized,
-            abstain_keys=_GUARD_ABSTAIN_OR_BLOCK_KEYS,
-            seed_key=seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY if randomized else None,
-            item_key=f"{request_id}:intent_origin",
-        )
-        if disp_set.should_escalate or origin_set.should_escalate:
-            conformal_ambiguous = True
 
     if origin_pred != "explicit_user_intent":
         return ADKToolGuardDecision(
@@ -396,13 +432,13 @@ def evaluate_adk_tool_guard(
             reason="joint_conformal_set_ambiguous",
         )
 
-    if joint_confidence < required_confidence:
+    if not (math.isfinite(joint_confidence) and joint_confidence >= required_confidence):
         stakes_tier = "irreversible" if is_irreversible else "reversible"
         return ADKToolGuardDecision(
             allowed=False,
             disposition="ask_confirmation",
             intent_origin=origin_pred,
-            confidence=joint_confidence,
+            confidence=joint_confidence if math.isfinite(joint_confidence) else 0.0,
             is_irreversible=is_irreversible,
             required_confidence=required_confidence,
             should_escalate=True,

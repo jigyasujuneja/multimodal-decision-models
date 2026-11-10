@@ -1,4 +1,5 @@
 resource "google_service_account" "orchestrator" {
+  project      = var.project_id
   account_id   = "${var.name_prefix}-orchestrator-sa"
   display_name = "MDM CascadeDecisionOrchestrator Runtime SA"
   description  = "Least-privilege runtime identity for the Cloud Run MDM orchestrator."
@@ -6,6 +7,7 @@ resource "google_service_account" "orchestrator" {
 
 resource "google_service_account" "vertex_serving" {
   count        = var.enable_vertex_systemone_endpoint ? 1 : 0
+  project      = var.project_id
   account_id   = "${var.name_prefix}-vertex-sa"
   display_name = "MDM Vertex Stage-1 Serving SA"
   description  = "Least-privilege runtime identity for the optional Vertex AI /v1/systemone endpoint."

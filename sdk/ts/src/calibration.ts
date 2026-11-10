@@ -48,9 +48,20 @@ interface OptionProbability {
   readonly prob: number;
 }
 
+function nullProtoRecord<T = number>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+function hasOwn(target: object, key: string): boolean {
+  return Object.hasOwn(target, key);
+}
+
 function normalizeProbabilities(
   probabilities: Record<string, number>,
 ): OptionProbability[] {
+  if (!probabilities || typeof probabilities !== "object") {
+    throw new MDMValidationError("probability map must be an object");
+  }
   const keys = Object.keys(probabilities).sort();
   if (keys.length === 0) {
     throw new MDMValidationError("probability map must be non-empty");
@@ -58,6 +69,9 @@ function normalizeProbabilities(
   let totalMass = 0.0;
   const rawItems: OptionProbability[] = [];
   for (const key of keys) {
+    if (!hasOwn(probabilities, key)) {
+      continue;
+    }
     const val = probabilities[key];
     if (typeof val !== "number" || !Number.isFinite(val) || val < 0.0) {
       throw new MDMValidationError(
@@ -126,11 +140,11 @@ export function applyTemperature(
   }
   const ordered = normalizeProbabilities(probabilities);
   if (Math.abs(temperature - 1.0) <= 1e-12) {
-    const cloned: Record<string, number> = {};
+    const cloned = nullProtoRecord<number>();
     for (const item of ordered) {
       cloned[item.name] = item.prob;
     }
-    return cloned;
+    return { ...cloned };
   }
 
   let maxLogit = -Infinity;
@@ -149,11 +163,11 @@ export function applyTemperature(
     expScores.push({ name: item.name, score });
     normalizer += score;
   }
-  const out: Record<string, number> = {};
+  const out = nullProtoRecord<number>();
   for (const item of expScores) {
     out[item.name] = item.score / normalizer;
   }
-  return out;
+  return { ...out };
 }
 
 export function normalizeCosinePriorLogits(
@@ -169,10 +183,10 @@ export function normalizeCosinePriorLogits(
       ? temperature
       : DEFAULT_COSINE_PRIOR_TEMPERATURE;
 
-  const scaled: Record<string, number> = {};
+  const scaled = nullProtoRecord<number>();
   let maxScaled = -Infinity;
   for (const key of keys) {
-    const rawVal = cosineScores[key];
+    const rawVal = hasOwn(cosineScores, key) ? cosineScores[key] : undefined;
     const cleanVal =
       typeof rawVal === "number" && Number.isFinite(rawVal) ? rawVal : -1.0;
     const score = cleanVal / tau;
@@ -183,14 +197,16 @@ export function normalizeCosinePriorLogits(
   }
   let sumExp = 0.0;
   for (const key of keys) {
-    sumExp += Math.exp((scaled[key] ?? -Infinity) - maxScaled);
+    const val = hasOwn(scaled, key) ? scaled[key] : undefined;
+    sumExp += Math.exp((val ?? -Infinity) - maxScaled);
   }
   const logSumExp = maxScaled + Math.log(sumExp);
-  const out: Record<string, number> = {};
+  const out = nullProtoRecord<number>();
   for (const key of keys) {
-    out[key] = (scaled[key] ?? 0.0) - logSumExp;
+    const val = hasOwn(scaled, key) ? scaled[key] : undefined;
+    out[key] = (val ?? 0.0) - logSumExp;
   }
-  return out;
+  return { ...out };
 }
 
 export function fusePriorProbabilities(
@@ -203,7 +219,7 @@ export function fusePriorProbabilities(
   } = {},
 ): BayesianPoEResult {
   const ordered = normalizeProbabilities(rawProbabilities);
-  const baseMap: Record<string, number> = {};
+  const baseMap = nullProtoRecord<number>();
   for (const item of ordered) {
     baseMap[item.name] = item.prob;
   }
@@ -219,31 +235,41 @@ export function fusePriorProbabilities(
     gateMode === "never" ||
     !priorLogits ||
     Object.keys(priorLogits).length === 0 ||
+    !Number.isFinite(priorWeight) ||
     priorWeight <= 0.0 ||
     ordered.length <= 1
   ) {
-    return { probabilities: baseMap, hRaw, escalated };
+    return { probabilities: { ...baseMap }, hRaw, escalated };
   }
 
   let effectiveWeight = priorWeight;
   if (gateMode === "confident" && threshold > 0.0 && hRaw >= threshold) {
-    return { probabilities: baseMap, hRaw, escalated };
+    return { probabilities: { ...baseMap }, hRaw, escalated };
   }
   if (gateMode === "hesitant" && threshold > 0.0 && hRaw < threshold) {
-    return { probabilities: baseMap, hRaw, escalated };
+    return { probabilities: { ...baseMap }, hRaw, escalated };
   }
   if (gateMode === "proportional") {
     effectiveWeight = priorWeight * hRaw;
     if (effectiveWeight <= 1e-9) {
-      return { probabilities: baseMap, hRaw, escalated };
+      return { probabilities: { ...baseMap }, hRaw, escalated };
     }
   }
 
   let maxLogit = -Infinity;
-  const logits: Record<string, number> = {};
+  const logits = nullProtoRecord<number>();
   for (const item of ordered) {
     const baseProb = Math.max(1e-9, item.prob);
-    const priorVal = priorLogits[item.name] ?? 0.0;
+    let priorVal = 0.0;
+    if (hasOwn(priorLogits, item.name)) {
+      const candidatePrior = priorLogits[item.name];
+      if (typeof candidatePrior !== "number" || !Number.isFinite(candidatePrior)) {
+        throw new MDMValidationError(
+          `priorLogits[${JSON.stringify(item.name)}] must be a finite number`,
+        );
+      }
+      priorVal = candidatePrior;
+    }
     const combined = Math.log(baseProb) + effectiveWeight * priorVal;
     logits[item.name] = combined;
     if (combined > maxLogit) {
@@ -252,17 +278,19 @@ export function fusePriorProbabilities(
   }
 
   let total = 0.0;
-  const unnormalized: Record<string, number> = {};
+  const unnormalized = nullProtoRecord<number>();
   for (const item of ordered) {
-    const expVal = Math.exp((logits[item.name] ?? -Infinity) - maxLogit);
+    const itemLogit = hasOwn(logits, item.name) ? logits[item.name] : undefined;
+    const expVal = Math.exp((itemLogit ?? -Infinity) - maxLogit);
     unnormalized[item.name] = expVal;
     total += expVal;
   }
-  const fused: Record<string, number> = {};
+  const fused = nullProtoRecord<number>();
   for (const item of ordered) {
-    fused[item.name] = (unnormalized[item.name] ?? 0.0) / total;
+    const itemMass = hasOwn(unnormalized, item.name) ? unnormalized[item.name] : undefined;
+    fused[item.name] = (itemMass ?? 0.0) / total;
   }
-  return { probabilities: fused, hRaw, escalated };
+  return { probabilities: { ...fused }, hRaw, escalated };
 }
 
 export function hmacUint64(
@@ -359,7 +387,7 @@ function computeNonconformityScores(
   seedKey: string,
   itemKey: string,
 ): Record<string, number> {
-  const scores: Record<string, number> = {};
+  const scores = nullProtoRecord<number>();
   const groups = partitionTieGroups(ordered);
 
   if (!randomized) {
@@ -481,8 +509,10 @@ export function calibrateConformalQuantile(
       validated.seedKey,
       perExampleKey,
     );
-    const goldScore = itemScores[goldLabel];
-    if (goldScore === undefined) {
+    const goldScore = hasOwn(itemScores, goldLabel)
+      ? itemScores[goldLabel]
+      : undefined;
+    if (typeof goldScore !== "number" || !Number.isFinite(goldScore)) {
       throw new MDMValidationError(
         `gold label ${JSON.stringify(goldLabel)} missing at calibration index ${idx}`,
       );
@@ -552,7 +582,9 @@ export function conformalPredictionSet(
   const predictionSet: string[] = [];
   let containsAbstain = false;
   for (const item of ordered) {
-    const itemScore = scores[item.name] ?? Infinity;
+    const itemScore = hasOwn(scores, item.name)
+      ? (scores[item.name] ?? Infinity)
+      : Infinity;
     if (!Number.isFinite(qHat) || itemScore <= qHat + CONFORMAL_SCORE_TOLERANCE) {
       predictionSet.push(item.name);
       if (abstainLookup.has(item.name.trim().toLowerCase())) {
@@ -568,7 +600,7 @@ export function conformalPredictionSet(
 
   return {
     predictionSet,
-    scores,
+    scores: { ...scores },
     qHat,
     topOption,
     topProbability,
@@ -612,8 +644,8 @@ export function calibrateMultiSlotJointConformal(
   const validated = validateConformalConfig({ ...config, randomized: false });
 
   const maxScores: number[] = [];
-  const perSlotProbs: Record<string, Record<string, number>[]> = {};
-  const perSlotLabels: Record<string, string[]> = {};
+  const perSlotProbs = nullProtoRecord<Record<string, number>[]>();
+  const perSlotLabels = nullProtoRecord<string[]>();
   for (const slotName of slotNames) {
     perSlotProbs[slotName] = [];
     perSlotLabels[slotName] = [];
@@ -627,8 +659,8 @@ export function calibrateMultiSlotJointConformal(
     }
     let rowMax = 0.0;
     for (const slotName of slotNames) {
-      const slotDist = rowProbs[slotName];
-      const gold = rowLabels[slotName];
+      const slotDist = hasOwn(rowProbs, slotName) ? rowProbs[slotName] : undefined;
+      const gold = hasOwn(rowLabels, slotName) ? rowLabels[slotName] : undefined;
       if (!slotDist || typeof gold !== "string") {
         throw new MDMValidationError(
           `missing slot ${JSON.stringify(slotName)} at calibration index ${idx}`,
@@ -644,8 +676,8 @@ export function calibrateMultiSlotJointConformal(
         validated.seedKey,
         "",
       );
-      const goldScore = slotScores[gold];
-      if (goldScore === undefined) {
+      const goldScore = hasOwn(slotScores, gold) ? slotScores[gold] : undefined;
+      if (typeof goldScore !== "number" || !Number.isFinite(goldScore)) {
         throw new MDMValidationError(
           `label ${JSON.stringify(gold)} missing from slot ${JSON.stringify(slotName)} at index ${idx}`,
         );
@@ -679,7 +711,7 @@ export function calibrateMultiSlotJointConformal(
   }
 
   const bonferroniAlpha = alpha / slotNames.length;
-  const bonferroniSlotQHats: Record<string, number> = {};
+  const bonferroniSlotQHats = nullProtoRecord<number>();
   for (const slotName of slotNames) {
     const slotCal = calibrateConformalQuantile(
       perSlotProbs[slotName] ?? [],
@@ -697,7 +729,7 @@ export function calibrateMultiSlotJointConformal(
 
   return {
     jointMaxQHat,
-    bonferroniSlotQHats,
+    bonferroniSlotQHats: { ...bonferroniSlotQHats },
     slotNames,
     alpha,
     nCalib,
@@ -716,16 +748,21 @@ export function multiSlotJointConformalSets(
     readonly abstainLabels?: readonly string[];
   } = {},
 ): Record<string, ConformalSetResult> {
-  const out: Record<string, ConformalSetResult> = {};
+  const out = nullProtoRecord<ConformalSetResult>();
   for (const slotName of jointCalibration.slotNames) {
-    const dist = slotProbabilities[slotName];
-    if (!dist) {
+    const dist = hasOwn(slotProbabilities, slotName)
+      ? slotProbabilities[slotName]
+      : undefined;
+    if (!dist || typeof dist !== "object") {
       throw new MDMValidationError(
         `missing slot ${JSON.stringify(slotName)} in slotProbabilities`,
       );
     }
+    const bonfQ = hasOwn(jointCalibration.bonferroniSlotQHats, slotName)
+      ? jointCalibration.bonferroniSlotQHats[slotName]
+      : undefined;
     const qHat = options.useBonferroni
-      ? (jointCalibration.bonferroniSlotQHats[slotName] ?? jointCalibration.jointMaxQHat)
+      ? (bonfQ ?? jointCalibration.jointMaxQHat)
       : jointCalibration.jointMaxQHat;
     out[slotName] = conformalPredictionSet(dist, qHat, {
       method: jointCalibration.method,
@@ -735,5 +772,5 @@ export function multiSlotJointConformalSets(
       abstainLabels: options.abstainLabels,
     });
   }
-  return out;
+  return { ...out };
 }

@@ -96,6 +96,7 @@ export interface SystemOneDecideRequest {
   readonly state: unknown;
   readonly questions: Record<string, DecisionQuestion>;
   readonly images?: readonly string[];
+  readonly priorLogits?: Record<string, Record<string, number>>;
   readonly temperature?: number;
 }
 

@@ -41,6 +41,17 @@ variable "enable_vertex_systemone_endpoint" {
   default     = false
 }
 
+variable "vertex_endpoint_id" {
+  description = "Numeric Vertex AI endpoint ID (1..9223372036854775807) for google_vertex_ai_endpoint.systemone.name."
+  type        = string
+  default     = "1000000001"
+
+  validation {
+    condition     = can(regex("^[1-9][0-9]{0,18}$", var.vertex_endpoint_id))
+    error_message = "vertex_endpoint_id must be a positive base-10 integer string required by GCP Vertex AI Endpoint names."
+  }
+}
+
 variable "vertex_serving_container_image" {
   description = "Digest-pinned container image URI for the optional Stage-1 Vertex AI serving container."
   type        = string
@@ -56,42 +67,77 @@ variable "vertex_machine_type" {
   description = "Compute machine type for the optional Stage-1 Vertex AI endpoint."
   type        = string
   default     = "g2-standard-8"
+
+  validation {
+    condition     = length(trimspace(var.vertex_machine_type)) >= 3
+    error_message = "vertex_machine_type must be a non-empty GCE/Vertex machine type."
+  }
 }
 
 variable "vertex_accelerator_type" {
   description = "GPU accelerator type attached to the optional Stage-1 Vertex AI endpoint."
   type        = string
   default     = "NVIDIA_L4"
+
+  validation {
+    condition     = length(trimspace(var.vertex_accelerator_type)) >= 3
+    error_message = "vertex_accelerator_type must be a non-empty Vertex AI accelerator type."
+  }
 }
 
 variable "vertex_accelerator_count" {
   description = "Number of GPUs per Stage-1 Vertex AI replica."
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.vertex_accelerator_count >= 1 && floor(var.vertex_accelerator_count) == var.vertex_accelerator_count
+    error_message = "vertex_accelerator_count must be an integer >= 1."
+  }
 }
 
 variable "vertex_min_replica_count" {
   description = "Minimum replica count for the Stage-1 Vertex AI endpoint."
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.vertex_min_replica_count >= 1 && floor(var.vertex_min_replica_count) == var.vertex_min_replica_count
+    error_message = "vertex_min_replica_count must be an integer >= 1."
+  }
 }
 
 variable "vertex_max_replica_count" {
   description = "Maximum autoscaled replica count for the Stage-1 Vertex AI endpoint."
   type        = number
   default     = 3
+
+  validation {
+    condition     = var.vertex_max_replica_count >= 1 && floor(var.vertex_max_replica_count) == var.vertex_max_replica_count
+    error_message = "vertex_max_replica_count must be an integer >= 1."
+  }
 }
 
 variable "cloudrun_min_instances" {
   description = "Minimum warm Cloud Run instances for the CascadeDecisionOrchestrator."
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.cloudrun_min_instances >= 0 && floor(var.cloudrun_min_instances) == var.cloudrun_min_instances
+    error_message = "cloudrun_min_instances must be an integer >= 0."
+  }
 }
 
 variable "cloudrun_max_instances" {
   description = "Maximum autoscaled Cloud Run instances for the CascadeDecisionOrchestrator."
   type        = number
   default     = 20
+
+  validation {
+    condition     = var.cloudrun_max_instances >= 1 && floor(var.cloudrun_max_instances) == var.cloudrun_max_instances
+    error_message = "cloudrun_max_instances must be an integer >= 1."
+  }
 }
 
 variable "cloudrun_ingress" {
@@ -127,12 +173,22 @@ variable "hesitation_threshold" {
   description = "Default normalized Shannon entropy threshold H_raw triggering Stage-2 cascade escalation."
   type        = number
   default     = 0.16
+
+  validation {
+    condition     = var.hesitation_threshold > 0 && var.hesitation_threshold < 1
+    error_message = "hesitation_threshold must be strictly within (0, 1)."
+  }
 }
 
 variable "conformal_alpha" {
   description = "Target split-conformal miscoverage rate alpha in (0, 1)."
   type        = number
   default     = 0.10
+
+  validation {
+    condition     = var.conformal_alpha > 0 && var.conformal_alpha < 1
+    error_message = "conformal_alpha must be strictly within (0, 1)."
+  }
 }
 
 variable "upstream_api_key_secret_id" {

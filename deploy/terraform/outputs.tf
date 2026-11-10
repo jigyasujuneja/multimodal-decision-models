@@ -26,3 +26,18 @@ output "vertex_systemone_raw_predict_url" {
     : ""
   )
 }
+
+output "vertex_dedicated_deployment_spec" {
+  description = "Dedicated GPU machine, accelerator, and replica scaling specification for Stage-1 Vertex AI endpoint model deployment."
+  value = {
+    enabled           = var.enable_vertex_systemone_endpoint
+    endpoint_id       = var.enable_vertex_systemone_endpoint ? google_vertex_ai_endpoint.systemone[0].name : ""
+    model_name        = var.enable_vertex_systemone_endpoint ? google_vertex_ai_model.systemone[0].name : ""
+    service_account   = var.enable_vertex_systemone_endpoint ? google_service_account.vertex_serving[0].email : ""
+    machine_type      = var.vertex_machine_type
+    accelerator_type  = var.vertex_accelerator_type
+    accelerator_count = var.vertex_accelerator_count
+    min_replica_count = var.vertex_min_replica_count
+    max_replica_count = var.vertex_max_replica_count
+  }
+}

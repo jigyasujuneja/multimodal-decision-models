@@ -135,6 +135,30 @@ class TerraformModuleValidationTest(unittest.TestCase):
         self.assertIn("Live in Terraform", readme_text)
         self.assertIn("In-Process", readme_text)
 
+        # Every declared variable must be referenced outside variables.tf (zero dead variables).
+        declared_variables = set(re.findall(r'variable\s+"([a-z0-9_]+)"', variables_text))
+        non_variables_hcl = "\n".join(
+            (TERRAFORM_DIR / name).read_text(encoding="utf-8")
+            for name in REQUIRED_TF_FILES
+            if name != "variables.tf"
+        )
+        referenced_variables = set(re.findall(r"\bvar\.([a-z0-9_]+)\b", non_variables_hcl))
+        self.assertEqual(
+            declared_variables - referenced_variables,
+            set(),
+            f"Unreferenced Terraform variables: {sorted(declared_variables - referenced_variables)}",
+        )
+
+        # Service accounts must bind project = var.project_id explicitly, and Vertex endpoint name must be numeric.
+        iam_text = (TERRAFORM_DIR / "iam.tf").read_text(encoding="utf-8")
+        self.assertEqual(iam_text.count('resource "google_service_account"'), 2)
+        self.assertGreaterEqual(iam_text.count("project      = var.project_id"), 2)
+        vertex_text = (TERRAFORM_DIR / "vertex_endpoint.tf").read_text(encoding="utf-8")
+        self.assertIn("name         = var.vertex_endpoint_id", vertex_text)
+        self.assertIn("^[1-9][0-9]{0,18}$", variables_text)
+        self.assertIn("var.hesitation_threshold > 0 && var.hesitation_threshold < 1", variables_text)
+        self.assertIn("var.conformal_alpha > 0 && var.conformal_alpha < 1", variables_text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
