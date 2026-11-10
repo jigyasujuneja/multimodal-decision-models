@@ -75,11 +75,11 @@ jobs:
           root = pathlib.Path(".")
           parts = [
               "googlers" + r"\.com",
+              "uplink" + r"\.goog",
+              "artifact" + "-foundry",
               "corp" + r"\.google\.com",
               "decision" + "-lab",
               "/usr/local/" + "google",
-              r"\." + "uplink" + r"\.goog",
-              "artifact" + "-foundry",
           ]
           banned = re.compile("(" + "|".join(parts) + ")", re.I)
           hits = []
