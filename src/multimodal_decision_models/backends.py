@@ -153,27 +153,33 @@ _CHOICE_ALIAS_KEYS = ("choice", "answer", "selected", "predicted")
 
 
 CONNECT_TIMEOUT_SECONDS: float = 20.0
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 _CREDENTIAL_HEADER_NAMES: frozenset[str] = frozenset(
     {"authorization", "x-dgem-key", "x-dgem-api-key", "x-goog-api-key"}
 )
 
 
-def parse_url_origin(raw_url: str) -> tuple[str, str, int]:
+def parse_url_origin(
+    raw_url: str,
+    *,
+    allow_insecure_http: bool = True,
+) -> tuple[str, str, int]:
     """Validate an HTTP(S) URL and return its normalized ``(scheme, hostname, port)`` origin tuple.
 
     Args:
         raw_url: Target HTTP or HTTPS URL string.
+        allow_insecure_http: Whether non-loopback cleartext ``http://`` URLs are permitted.
 
     Returns:
         Normalized ``(scheme, hostname, port)`` tuple.
 
     Raises:
-        SchemaContractViolationError: If ``raw_url`` contains CR/LF, uses a non-HTTP(S) scheme, or lacks a host.
+        SchemaContractViolationError: If ``raw_url`` contains control chars, uses a forbidden scheme, or lacks a host.
     """
     if not isinstance(raw_url, str):
         raise SchemaContractViolationError(f"endpoint URL must be a string, got {raw_url!r}")
-    if "\r" in raw_url or "\n" in raw_url:
-        raise SchemaContractViolationError("endpoint URL must not contain CR or LF characters")
+    if "\r" in raw_url or "\n" in raw_url or "\x00" in raw_url:
+        raise SchemaContractViolationError("endpoint URL must not contain CR, LF, or NUL characters")
     try:
         parsed = urllib.parse.urlparse(raw_url.strip())
         scheme = (parsed.scheme or "").lower()
@@ -184,6 +190,10 @@ def parse_url_origin(raw_url: str) -> tuple[str, str, int]:
     if scheme not in ("http", "https") or not hostname:
         raise SchemaContractViolationError(
             f"endpoint URL must use http:// or https:// with a valid host, got {raw_url!r}"
+        )
+    if scheme == "http" and not allow_insecure_http and hostname not in _LOOPBACK_HOSTS:
+        raise SchemaContractViolationError(
+            f"cleartext http:// is restricted to loopback hosts unless allow_insecure_http=True: {raw_url!r}"
         )
     resolved_port = port if port is not None else (443 if scheme == "https" else 80)
     return (scheme, hostname, resolved_port)
@@ -251,43 +261,61 @@ class _BoundedConnectHTTPSHandler(urllib.request.HTTPSHandler):
 
 
 class _OriginGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Preserve 307/308 POST bodies while stripping credentials permanently across origin boundaries."""
+    """Preserve 307/308 POST bodies while stripping credentials and blocking HTTPS->HTTP downgrades."""
+
+    def __init__(self, *, allow_insecure_http: bool = True) -> None:
+        super().__init__()
+        self._allow_insecure_http = bool(allow_insecure_http)
 
     def redirect_request(
         self,
-        req: urllib.request.Request,
+        request: urllib.request.Request,
         fp: object,
         code: int,
         msg: str,
         headers: http.client.HTTPMessage,
         newurl: str,
     ) -> urllib.request.Request | None:
-        resolved_url = urllib.parse.urljoin(req.full_url, newurl.replace(" ", "%20"))
-        next_origin = parse_url_origin(resolved_url)
-        method = req.get_method()
+        first_origin = getattr(
+            request,
+            "_mdm_first_origin",
+            parse_url_origin(request.full_url, allow_insecure_http=self._allow_insecure_http),
+        )
+        resolved_url = urllib.parse.urljoin(request.full_url, newurl.replace(" ", "%20"))
+        next_origin = parse_url_origin(resolved_url, allow_insecure_http=self._allow_insecure_http)
+        if first_origin[0] == "https" and next_origin[0] != "https":
+            raise SchemaContractViolationError(
+                f"refusing HTTPS-to-HTTP downgrade redirect from {request.full_url!r} to {resolved_url!r}"
+            )
+        method = request.get_method()
         if code in (307, 308) and method not in ("GET", "HEAD"):
             copied_headers = {
                 key: val
-                for key, val in req.header_items()
+                for key, val in request.header_items()
                 if key.lower() not in ("host", "content-length")
             }
             redirected: urllib.request.Request | None = urllib.request.Request(
                 resolved_url,
-                data=req.data,
+                data=request.data,
                 headers=copied_headers,
-                origin_req_host=req.origin_req_host,
+                origin_req_host=request.origin_req_host,
                 unverifiable=True,
                 method=method,
             )
         else:
-            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            redirected = super().redirect_request(request, fp, code, msg, headers, newurl)
             if redirected is None:
                 return None
-            next_origin = parse_url_origin(redirected.full_url)
+            next_origin = parse_url_origin(
+                redirected.full_url, allow_insecure_http=self._allow_insecure_http
+            )
+            if first_origin[0] == "https" and next_origin[0] != "https":
+                raise SchemaContractViolationError(
+                    f"refusing HTTPS-to-HTTP downgrade redirect from {request.full_url!r} to {redirected.full_url!r}"
+                )
 
-        first_origin = getattr(req, "_mdm_first_origin", parse_url_origin(req.full_url))
         crossed_origin = bool(
-            getattr(req, "_mdm_crossed_origin", False) or (first_origin != next_origin)
+            getattr(request, "_mdm_crossed_origin", False) or (first_origin != next_origin)
         )
         setattr(redirected, "_mdm_first_origin", first_origin)
         setattr(redirected, "_mdm_crossed_origin", crossed_origin)
@@ -301,9 +329,9 @@ class _OriginGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
-def _build_origin_guarded_opener() -> urllib.request.OpenerDirector:
+def _build_origin_guarded_opener(*, allow_insecure_http: bool = True) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(
-        _OriginGuardedRedirectHandler(),
+        _OriginGuardedRedirectHandler(allow_insecure_http=allow_insecure_http),
         _BoundedConnectHTTPSHandler(),
     )
 
@@ -379,6 +407,21 @@ def _validate_slot_distribution(dist: Any, label: str) -> dict[str, float]:
     return clean
 
 
+MAX_HTTP_RESPONSE_BYTES: int = 8 * 1024 * 1024
+
+
+def _read_bounded_utf8_response(response: http.client.HTTPResponse, max_bytes: int = MAX_HTTP_RESPONSE_BYTES) -> str:
+    raw_bytes = response.read(max_bytes + 1)
+    if len(raw_bytes) > max_bytes:
+        raise SchemaContractViolationError(
+            f"upstream HTTP response exceeded maximum size limit ({max_bytes} bytes)"
+        )
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SchemaContractViolationError(f"upstream HTTP response is not valid UTF-8: {exc}") from exc
+
+
 def _post_json_with_retry(
     url: str,
     payload: Mapping[str, Any],
@@ -388,9 +431,10 @@ def _post_json_with_retry(
     max_retries: int = 2,
     base_backoff_sec: float = 0.05,
     sla_deadline_monotonic: float | None = None,
+    allow_insecure_http: bool = True,
 ) -> dict[str, Any]:
     """Execute a JSON POST with bounded jittered retries on transient HTTP/network errors."""
-    parse_url_origin(url)
+    parse_url_origin(url, allow_insecure_http=allow_insecure_http)
     clean_headers = _validate_header_map(headers)
     try:
         raw_body = json.dumps(payload, allow_nan=False).encode("utf-8")
@@ -398,7 +442,7 @@ def _post_json_with_retry(
         raise SchemaContractViolationError(f"failed to serialize request payload: {exc}") from exc
     attempts = max(0, int(max_retries)) + 1
     last_err: Exception | None = None
-    opener = _build_origin_guarded_opener()
+    opener = _build_origin_guarded_opener(allow_insecure_http=allow_insecure_http)
 
     for attempt in range(attempts):
         now = time.monotonic()
@@ -409,12 +453,12 @@ def _post_json_with_retry(
                 raise UpstreamTransientError("SLA deadline exhausted before upstream call")
             eff_timeout = min(timeout_sec, rem)
 
-        req = urllib.request.Request(url, data=raw_body, headers=dict(clean_headers), method="POST")
+        request = urllib.request.Request(url, data=raw_body, headers=dict(clean_headers), method="POST")
         try:
-            with opener.open(req, timeout=eff_timeout) as resp:
-                raw_resp = resp.read().decode("utf-8")
+            with opener.open(request, timeout=eff_timeout) as response:
+                raw_response_text = _read_bounded_utf8_response(response)
             try:
-                parsed = json.loads(raw_resp)
+                parsed = json.loads(raw_response_text)
             except json.JSONDecodeError as exc:
                 raise SchemaContractViolationError(f"upstream returned invalid JSON: {exc}") from exc
             if not isinstance(parsed, dict):
@@ -506,13 +550,15 @@ class DgemSystemOneBackend:
         name: str = "dgem_systemone",
         *,
         server_key: str | None = None,
+        allow_insecure_http: bool = True,
     ) -> None:
         if not isinstance(endpoint_url, str):
             raise SchemaContractViolationError(
                 f"endpoint_url must be a string, got {endpoint_url!r}"
             )
         clean_url = endpoint_url.rstrip("/")
-        _validate_http_url(clean_url)
+        self.allow_insecure_http = bool(allow_insecure_http)
+        parse_url_origin(clean_url, allow_insecure_http=self.allow_insecure_http)
         if api_key is not None and not isinstance(api_key, str):
             raise SchemaContractViolationError(
                 f"api_key must be a string or None, got {api_key!r}"
@@ -571,6 +617,7 @@ class DgemSystemOneBackend:
                 timeout_sec=self.timeout_sec,
                 max_retries=self.max_retries,
                 base_backoff_sec=self.base_backoff_sec,
+                allow_insecure_http=self.allow_insecure_http,
             )
         base_root = self.endpoint_url
         for suffix in ("/v1/systemone", "/v1"):
@@ -578,16 +625,18 @@ class DgemSystemOneBackend:
                 base_root = base_root[: -len(suffix)]
                 break
         health_url = f"{base_root}/health"
-        _validate_http_url(health_url)
-        opener = _build_origin_guarded_opener()
-        req = urllib.request.Request(
+        parse_url_origin(health_url, allow_insecure_http=self.allow_insecure_http)
+        opener = _build_origin_guarded_opener(allow_insecure_http=self.allow_insecure_http)
+        request = urllib.request.Request(
             health_url,
             headers={k: v for k, v in headers.items() if k.lower() != "content-type"},
             method="GET",
         )
         try:
-            with opener.open(req, timeout=self.timeout_sec) as resp:
-                parsed = json.loads(resp.read().decode("utf-8"))
+            with opener.open(request, timeout=self.timeout_sec) as response:
+                parsed = json.loads(_read_bounded_utf8_response(response))
+        except SchemaContractViolationError:
+            raise
         except urllib.error.HTTPError as exc:
             code = int(exc.code)
             if code in _RETRYABLE_HTTP_STATUS:
@@ -724,7 +773,7 @@ class DgemSystemOneBackend:
         images: list[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         url = self.resolve_predict_url()
-        _validate_http_url(url)
+        parse_url_origin(url, allow_insecure_http=self.allow_insecure_http)
         headers = self._build_auth_headers()
         data = _post_json_with_retry(
             url,
@@ -733,6 +782,7 @@ class DgemSystemOneBackend:
             timeout_sec=self.timeout_sec,
             max_retries=self.max_retries,
             base_backoff_sec=self.base_backoff_sec,
+            allow_insecure_http=self.allow_insecure_http,
         )
         dists, ev_map, trace = self.parse_response(data, questions)
         self.last_evidence = ev_map

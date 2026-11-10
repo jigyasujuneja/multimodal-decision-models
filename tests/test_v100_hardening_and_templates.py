@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import http.client
 import http.server
 import json
 import pathlib
@@ -25,10 +26,12 @@ import socketserver
 import threading
 from typing import Any
 import unittest
+import urllib.request
 
 from multimodal_decision_models.backends import (
     DgemSystemOneBackend,
     MockCallableBackend,
+    _OriginGuardedRedirectHandler,
     is_raw_predict_endpoint,
     parse_url_origin,
 )
@@ -51,6 +54,12 @@ GO_TEMPLATE_PLACEHOLDER_RE = re.compile(
 
 def render_go_json_template(raw_template: str, variables: dict[str, Any]) -> dict[str, Any]:
     """Render ``{{ default <lit> .<var> | toJson }}`` placeholders into parsed JSON."""
+    declared_variables = {
+        match.group(2) for match in GO_TEMPLATE_PLACEHOLDER_RE.finditer(raw_template)
+    }
+    undeclared = sorted(set(variables.keys()) - declared_variables)
+    if undeclared:
+        raise AssertionError(f"Undeclared template example variables: {undeclared}")
 
     def replace_match(match: re.Match[str]) -> str:
         default_literal = match.group(1)
@@ -61,6 +70,8 @@ def render_go_json_template(raw_template: str, variables: dict[str, Any]) -> dic
         return json.dumps(default_value)
 
     rendered_text = GO_TEMPLATE_PLACEHOLDER_RE.sub(replace_match, raw_template)
+    if "{{" in rendered_text or "}}" in rendered_text:
+        raise AssertionError("Unresolved Go template delimiters remained after rendering")
     parsed_payload = json.loads(rendered_text)
     if not isinstance(parsed_payload, dict):
         raise AssertionError("Rendered policy template root must be a JSON object")
@@ -329,6 +340,11 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
         self.assertEqual(rec_bpe.strategy, "direct_universal_255")
         self.assertEqual(rec_bpe.label_scheme, "universal_256")
 
+        rec_bpe_256 = recommend_wide_routing_strategy(256, supports_extended_255=True)
+        self.assertEqual(rec_bpe_256.strategy, "direct_universal_255")
+        self.assertEqual(rec_bpe_256.label_scheme, "universal_256")
+        self.assertEqual(rec_bpe_256.expected_passes, 1.0)
+
         rec_emb = recommend_wide_routing_strategy(1200, has_embeddings=True)
         self.assertEqual(rec_emb.strategy, "csls_shortlist_1pass")
 
@@ -387,6 +403,54 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
                         self.assertIn(expected_val, valid_names)
                     elif target_question["type"] == "boolean":
                         self.assertIsInstance(expected_val, bool)
+
+        sample_raw = (TEMPLATES_DIR / "tool_safety_gate.json.tmpl").read_text(encoding="utf-8")
+        with self.assertRaises(AssertionError):
+            render_go_json_template(sample_raw, {"undeclared_variable_name": "override"})
+
+    def test_redirect_handler_blocks_https_downgrade_and_non_loopback_http(self) -> None:
+        handler = _OriginGuardedRedirectHandler(allow_insecure_http=False)
+        https_req = urllib.request.Request(
+            "https://secure.example.com/v1/systemone",
+            data=b'{"state":{}}',
+            headers={"Authorization": "Bearer secret"},
+            method="POST",
+        )
+        with self.assertRaises(SchemaContractViolationError):
+            handler.redirect_request(
+                https_req,
+                fp=object(),
+                code=307,
+                msg="Temporary Redirect",
+                headers=http.client.HTTPMessage(),
+                newurl="http://cleartext.example.com/v1/systemone",
+            )
+
+        with self.assertRaises(SchemaContractViolationError):
+            handler.redirect_request(
+                https_req,
+                fp=object(),
+                code=302,
+                msg="Found",
+                headers=http.client.HTTPMessage(),
+                newurl="http://localhost:8080/v1/systemone",
+            )
+
+        loopback_req = urllib.request.Request(
+            "http://localhost:8080/v1/systemone",
+            data=b'{"state":{}}',
+            headers={"Authorization": "Bearer secret"},
+            method="POST",
+        )
+        with self.assertRaises(SchemaContractViolationError):
+            handler.redirect_request(
+                loopback_req,
+                fp=object(),
+                code=307,
+                msg="Temporary Redirect",
+                headers=http.client.HTTPMessage(),
+                newurl="http://127.0.0.2:8080/steal",
+            )
 
 
 if __name__ == "__main__":

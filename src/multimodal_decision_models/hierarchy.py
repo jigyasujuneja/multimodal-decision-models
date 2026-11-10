@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .calibration import normalized_entropy, pre_gated_bayesian_poe_fusion
 from .shortlist import split_identifier_tokens
+from .types import MAX_EXTENDED_OPTIONS_PER_SLOT
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     MAX_OPTIONS_PER_SLOT,
@@ -100,7 +101,7 @@ def recommend_wide_routing_strategy(
     Codifies the benchmarked routing ladder across ``dgem`` and ``MDM-Bench``:
       1. ``2 <= K <= 26``: ``direct_az`` (single-token ``[A-Z]`` readout, 1 pass).
       2. ``27 <= K <= 52`` (when ``supports_az_aa_52=True``): ``direct_az_aa`` (52-option ``A..Z, AA..AZ``, 1 pass).
-      3. ``53 <= K <= 255`` (when ``supports_extended_255=True``): ``direct_universal_255`` (``UNIVERSAL_256_DECISION_CODES``, 1 pass).
+      3. ``53 <= K <= 256`` (when ``supports_extended_255=True``): ``direct_universal_255`` (``UNIVERSAL_256_DECISION_CODES``, 1 pass).
       4. ``K > 26`` with dense embeddings (``has_embeddings=True``): ``csls_shortlist_1pass`` (CSLS Top-20 + cosine ``prior_logits``, 1 pass).
       5. ``K <= 176`` on multi-slot canvas (``supports_multi_slot_canvas=True``): ``mtp_partitioned_1pass`` (1 coarse + <= 7 disjoint fine bands, 1 pass).
       6. Larger taxonomies without embeddings: ``hesitation_hybrid`` (2-level ``[A-Z]`` taxonomy with conditional Pass-2 beam, ~1.2 passes).
@@ -131,14 +132,14 @@ def recommend_wide_routing_strategy(
             rationale="Fits in a single-pass 52-option (az_aa) slot without hierarchical fine-code aliasing.",
         )
 
-    if supports_extended_255 and num_options <= 255:
+    if supports_extended_255 and num_options <= MAX_EXTENDED_OPTIONS_PER_SLOT:
         return WideRoutingRecommendation(
             num_options=num_options,
             strategy="direct_universal_255",
             label_scheme="universal_256",
             expected_passes=1.0,
             avoids_unpartitioned_trie_aliasing=True,
-            rationale="Uses 255 BPE-safe single-token uppercase codes (UNIVERSAL_256_DECISION_CODES) in 1 pass.",
+            rationale="Uses 256 BPE-safe single-token uppercase codes (UNIVERSAL_256_DECISION_CODES) in 1 pass.",
         )
 
     if has_embeddings:
