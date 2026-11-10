@@ -15,6 +15,9 @@
 package mdm
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -24,6 +27,9 @@ import (
 	"sync"
 	"time"
 )
+
+// DefaultConformalSeedKey is the canonical cross-language HMAC-SHA256 seed key shared by Python, Go, and TypeScript.
+const DefaultConformalSeedKey = "dgem-conformal-v1"
 
 const conformalTieTol = 1e-12
 const maxSeededConformalStreams = 256
@@ -55,8 +61,53 @@ type ConformalConfig struct {
 	KReg        int        `json:"k_reg,omitempty"`        // RAPS unpenalized top-k ranks >= 0 (default 1 when zero-value ConformalConfig{} is passed)
 	Randomized  bool       `json:"randomized,omitempty"`   // whether to draw u ~ Uniform(0, 1) instead of deterministic u = 0
 	Seed        int64      `json:"seed,omitempty"`         // deterministic RNG seed when Randomized is true (0 draws from shared stream)
+	SeedKey     string     `json:"seed_key,omitempty"`     // stateless HMAC-SHA256 seed key for cross-language deterministic randomized conformal sets
+	ItemKey     string     `json:"item_key,omitempty"`     // per-example identifier used with SeedKey (or DefaultConformalSeedKey) when Randomized is true
 	RNG         *rand.Rand `json:"-"`                      // optional caller-managed RNG stream when Randomized is true
 	AbstainKeys []string   `json:"abstain_keys,omitempty"` // custom abstain/catch-all keys; defaults to defaultConformalAbstainKeys when nil
+}
+
+// HmacUint64 returns the big-endian uint64 unpacked from the first 8 bytes of HMAC-SHA256(seedKey, itemKey+"\x00"+tag).
+func HmacUint64(seedKey, itemKey, tag string) uint64 {
+	effectiveKey := seedKey
+	if effectiveKey == "" {
+		effectiveKey = DefaultConformalSeedKey
+	}
+	mac := hmac.New(sha256.New, []byte(effectiveKey))
+	mac.Write([]byte(itemKey))
+	mac.Write([]byte{0})
+	mac.Write([]byte(tag))
+	sum := mac.Sum(nil)
+	return binary.BigEndian.Uint64(sum[:8])
+}
+
+// HmacUniformFloat64 draws a stateless Uniform[0, 1) float64 with 53-bit mantissa precision matching Python and TypeScript.
+func HmacUniformFloat64(seedKey, itemKey, tag string) float64 {
+	top53 := HmacUint64(seedKey, itemKey, tag) >> 11
+	return float64(top53) * (1.0 / float64(uint64(1)<<53))
+}
+
+func drawStatelessHMACOrderAndU(groups [][]string, seedKey, itemKey string) (float64, []string) {
+	uDraw := HmacUniformFloat64(seedKey, itemKey, "u")
+	flat := make([]string, 0, len(groups)*2)
+	for _, grp := range groups {
+		if len(grp) <= 1 {
+			flat = append(flat, grp...)
+			continue
+		}
+		shuffled := make([]string, len(grp))
+		copy(shuffled, grp)
+		sort.Slice(shuffled, func(i, j int) bool {
+			hi := HmacUint64(seedKey, itemKey, "tie:"+shuffled[i])
+			hj := HmacUint64(seedKey, itemKey, "tie:"+shuffled[j])
+			if hi != hj {
+				return hi < hj
+			}
+			return shuffled[i] < shuffled[j]
+		})
+		flat = append(flat, shuffled...)
+	}
+	return uDraw, flat
 }
 
 // DefaultConformalConfig returns the standard RAPS configuration (Method: "raps", Alpha: 0.10, LamReg: 0.01, KReg: 1)
@@ -317,20 +368,36 @@ func CalibrateConformalQuantile(
 	alpha float64,
 	cfg ConformalConfig,
 ) (float64, error) {
+	return CalibrateConformalQuantileWithKeys(calibProbs, calibLabels, nil, alpha, cfg)
+}
+
+// CalibrateConformalQuantileWithKeys computes the split conformal quantile q_hat with optional
+// per-example itemKeys for stateless cross-language HMAC-SHA256 parity when cfg.Randomized is true.
+func CalibrateConformalQuantileWithKeys(
+	calibProbs []map[string]float64,
+	calibLabels []string,
+	itemKeys []string,
+	alpha float64,
+	cfg ConformalConfig,
+) (float64, error) {
 	if math.IsNaN(alpha) || math.IsInf(alpha, 0) || alpha <= 0 || alpha >= 1 {
 		return 0, fmt.Errorf("mdm: alpha must lie strictly in (0, 1), got %v", alpha)
 	}
 	if len(calibProbs) == 0 || len(calibProbs) != len(calibLabels) {
 		return 0, errors.New("mdm: calibProbs and calibLabels must be non-empty slices of equal length")
 	}
+	if itemKeys != nil && len(itemKeys) != len(calibProbs) {
+		return 0, errors.New("mdm: itemKeys must match calibProbs length when non-nil")
+	}
 	resolved, err := resolveConformalConfig(cfg)
 	if err != nil {
 		return 0, err
 	}
 
+	useHMAC := resolved.Randomized && (resolved.SeedKey != "" || itemKeys != nil)
 	var calRNG *rand.Rand
 	useGlobal := false
-	if resolved.Randomized {
+	if resolved.Randomized && !useHMAC {
 		if resolved.RNG != nil {
 			calRNG = resolved.RNG
 		} else if resolved.Seed != 0 {
@@ -354,6 +421,13 @@ func CalibrateConformalQuantile(
 		var itemScores map[string]float64
 		if !resolved.Randomized {
 			itemScores = computeDeterministicConformalScores(groups, norm, resolved)
+		} else if useHMAC {
+			itemKey := fmt.Sprintf("cal:%d", i)
+			if itemKeys != nil {
+				itemKey = itemKeys[i]
+			}
+			uVal, ordered := drawStatelessHMACOrderAndU(groups, resolved.SeedKey, itemKey)
+			itemScores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
 		} else if useGlobal {
 			conformalRNGMu.Lock()
 			uVal, ordered := drawWithRand(defaultConformalRNG, groups)
@@ -366,7 +440,7 @@ func CalibrateConformalQuantile(
 		scores[i] = itemScores[gold]
 	}
 
-	if resolved.Randomized && resolved.RNG == nil && resolved.Seed != 0 && calRNG != nil {
+	if resolved.Randomized && !useHMAC && resolved.RNG == nil && resolved.Seed != 0 && calRNG != nil {
 		storeSeededConformalRNG(resolved.Seed, calRNG)
 	}
 
@@ -403,8 +477,12 @@ func ConformalPredictionSet(
 
 	groups := partitionConformalTieGroups(ranked, norm)
 	var scores map[string]float64
+	useHMAC := resolved.Randomized && (resolved.SeedKey != "" || (resolved.ItemKey != "" && resolved.Seed == 0 && resolved.RNG == nil))
 	if !resolved.Randomized {
 		scores = computeDeterministicConformalScores(groups, norm, resolved)
+	} else if useHMAC {
+		uVal, ordered := drawStatelessHMACOrderAndU(groups, resolved.SeedKey, resolved.ItemKey)
+		scores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
 	} else {
 		uVal, ordered := drawRandomizedOrderAndU(groups, resolved)
 		scores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
@@ -745,8 +823,12 @@ func MondrianConformalPredictionSet(
 	}
 	groups := partitionConformalTieGroups(ranked, norm)
 	var scores map[string]float64
+	useHMAC := resolved.Randomized && (resolved.SeedKey != "" || (resolved.ItemKey != "" && resolved.Seed == 0 && resolved.RNG == nil))
 	if !resolved.Randomized {
 		scores = computeDeterministicConformalScores(groups, norm, resolved)
+	} else if useHMAC {
+		uVal, ordered := drawStatelessHMACOrderAndU(groups, resolved.SeedKey, resolved.ItemKey)
+		scores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)
 	} else {
 		uVal, ordered := drawRandomizedOrderAndU(groups, resolved)
 		scores = computeRandomizedConformalScores(ordered, norm, resolved, uVal)

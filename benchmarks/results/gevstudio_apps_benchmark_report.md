@@ -1,6 +1,6 @@
 # Live Benchmark Report: `multimodal-decision-models` on Gev Studio (`/apps`)
 
-- **Target Endpoint**: `https://gevstudio.corp.google.com/api/gev/systemone` (`//depot/google3/prototypes/projects/gev_studio`)
+- **Target Endpoint**: `https://gevstudio.example.com/api/gev/systemone`
 - **Repository**: [`jigyasujuneja/multimodal-decision-models`](https://github.com/jigyasujuneja/multimodal-decision-models)
 - **Adapter**: [`GevStudioSystemOneBackend`](../src/multimodal_decision_models/backends.py)
 - **Benchmark Runner**: [`benchmarks/run_gevstudio_apps_bench.py`](../benchmarks/run_gevstudio_apps_bench.py)
@@ -22,17 +22,17 @@ We connected our GitHub [`multimodal-decision-models`](https://github.com/jigyas
    - Raw `dgem:vertex` (`DGemma 26B-A4B NVFP4` on Vertex AI G4) scores **`78/95` slots (`82.1%`, `54/70` exact cases, `Brier = 0.2898`)**, and raw `gemini-3.5-flash-lite` scores **`82/95` slots (`86.3%`, `57/70` exact cases, `Brier = 0.2721`)**, with `gemini-3.5-flash-lite` excelling on `ops` (`48/50 = 96.0%`) while dropping to `17/25` (`68.0%`) on `polysemy`.
    - **`MDM Calibrated Cascade` (`Stage-1 v4xs` + Pre-Gated Bayesian PoE $\to$ `Stage-2 3.5-flash-lite + dgem:vertex` on hesitant slots $H_{\text{raw}} \ge 0.85$)** achieves **`92/95` slots (`96.8%` slot accuracy, `67/70` = `95.7%` exact case accuracy, `Brier = 0.0594`, `ECE = 0.0342`, `NLL = 0.1342`)** while resolving **`95.8%` (`91/95`) of all slots in a single Stage-1 pass** (escalating only `4/95` genuinely hesitant slots: `sup-07.urgent`, `sup-09.team`, `code-02.approved`, `code-04.approved`). This beats the live `/apps/triage` #1 leaderboard score (`89/95 = 93.7%`) by **`+3.1%` (`+3` slots, `+3` exact cases)** and cuts Brier error by **`-29.7%`** vs. raw `v4xs` and **`-79.5%`** vs. raw `dgem:vertex` (Paired McNemar $p = 0.0001$).
 
-3. **GitHub `multimodal-decision-models` (`v0.4.0–v0.8.0`) Multimodal Suites Executed Live on `gevstudio.corp.google.com`**:
+3. **GitHub `multimodal-decision-models` (`v0.4.0–v0.8.0`) Multimodal Suites Executed Live on `gevstudio.example.com`**:
    - **Suite 3A (`visual_compiler.py` 2x2 Dual-Buffer SKU Contact Sheets + Layer-5 Pack-Size Guard)**: Raw `gemini-v4xs-decisions` scores **`3/4` (`75.0%`)** on identical-artwork `1-pack` vs. `6-pack`/`12-pack` sister SKUs; **`MDM Calibrated Stack`** (`shades_of_gray_white_balance` + `inner_crop_cie_lab_similarity` + `apply_layer5_deterministic_guards`) achieves **`4/4` (`100.0%`)**.
    - **Suite 3B (`som_navigator.py` Set-of-Marks 4x4 Spatial UI Grounding)**: Both raw and `MDM Calibrated Stack` achieve **`4/4` (`100.0%`)**, with `safe_expected_mark_center` providing verified bounding-box coordinate containment across all 4 joint UI slots (`next_target_mark`, `element_state`, `loop_or_error_detected`, `goal_progress_score`).
    - **Suite 3C (`audio_video_decision.py` `v0.8.0` PCM16 `audio/wav` Turn-Taking + `ST-SoM` Video Spoof Detection)**: Raw `gemini-v4xs-decisions` on `audio/wav` + ASR text scores **`2/4` (`50.0%`)** (prematurely interrupting a mid-IBAN hesitation pause when ASR strips `"um..."` and failing to block an audio-replay wire-transfer spoof when video shows static closed lips); **`MDM v0.8.0 Calibrated Stack`** (`VoiceActivityProjectionConfig` prosodic prior fusion + `evaluate_audiovisual_event_agreement` triangle consistency guard) achieves **`4/4` (`100.0%`)**.
 
-4. **Infrastructure Bug Discovered in Gev Studio (`typesafe_adapter.go`)**:
-   - During live multimodal probing of `dgem:vertex` through `https://gevstudio.corp.google.com/api/gev/systemone?target=dgem:vertex`, we found that `typeSafeWireRequest` in `//depot/google3/prototypes/projects/gev_studio/go/systemone/typesafe_adapter.go` (lines 185–190) serializes only `{Model, State, Questions}` after `ExtractStateMedia` strips inline images into `req.Media`, silently dropping `req.Media` on the wire to `https://dgemma.aaie.cloud/v1/systemone`. Pairing `dgem:vertex` with `gemini-v4xs-decisions` / `gemini-3.5-flash-lite` or compiling visual/acoustic features into structured state telemetry via `multimodal-decision-models` completely works around this limitation.
+4. **Infrastructure Bug Discovered in Proxy Adapter (`typesafe_adapter.go`)**:
+   - During live multimodal probing of `dgem:vertex` through `/api/gev/systemone?target=dgem:vertex`, `typeSafeWireRequest` in `typesafe_adapter.go` (lines 185–190) serializes only `{Model, State, Questions}` after `ExtractStateMedia` strips inline images into `req.Media`, silently dropping `req.Media` on the wire to `/v1/systemone`. Pairing `dgem:vertex` with `gemini-v4xs-decisions` / `gemini-3.5-flash-lite` or compiling visual/acoustic features into structured state telemetry via `multimodal-decision-models` completely works around this limitation.
 
 ---
 
-## 2. Live Target Reachability & Modality Matrix on `gevstudio.corp.google.com`
+## 2. Live Target Reachability & Modality Matrix on `gevstudio.example.com`
 
 | Gev Studio Target (`?target=...`) | Underlying Model / Serving Stack | Text / JSON | Image (`image/png`, `image/jpeg`) | Audio (`audio/wav`) | Probabilities / Logprobs | Single-Call p50 Latency |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |

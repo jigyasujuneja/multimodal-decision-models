@@ -1,0 +1,32 @@
+{
+  "examples": [
+    {
+      "name": "typical",
+      "unambiguous": true,
+      "variables": {
+        "token_budget": 1600,
+        "active_goal": "Fix failing test_redirect_bounce_back in tests/test_v100_hardening_and_templates.py",
+        "block_summaries": "b1: user goal; b2: stale directory listing; b3: superseded grep output; b4: helper signatures in backends.py; b5: old passing test log; b6: unrelated README diff; b7: redirect handler signature; b8: current AssertionError traceback",
+        "samples": 1
+      },
+      "expected_answers": {
+        "block_01_action": "full",
+        "block_02_action": "drop",
+        "block_08_action": "full"
+      }
+    },
+    {
+      "name": "edge",
+      "variables": {
+        "token_budget": 512,
+        "active_goal": "Verify signature compatibility across 8 modules under tight token cap",
+        "block_summaries": "b1..b8: module public signatures",
+        "samples": 1
+      }
+    },
+    {
+      "name": "minimal",
+      "variables": {}
+    }
+  ]
+}

@@ -15,7 +15,7 @@
 
 """Live End-to-End Benchmark of `multimodal-decision-models` on Gev Studio (`/apps`).
 
-Executes stateless live evaluations against `https://gevstudio.corp.google.com/api/gev/systemone`
+Executes stateless live evaluations against `GEV_STUDIO_ENDPOINT_URL` (`/api/gev/systemone`)
 across Gev Studio's online targets (`gemini-v4xs-decisions`, `gemini-v4xs-decisions?hc=true`,
 `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`)
 on:
@@ -36,6 +36,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import pathlib
 import statistics
 import subprocess
@@ -80,7 +81,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE_PATH = REPO_ROOT / "benchmarks" / "fixtures" / "gevstudio_apps_golden.json"
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 LIVE_CACHE_PATH = RESULTS_DIR / ".gevstudio_live_cache.json"
-GEV_STUDIO_BASE_URL = "https://gevstudio.corp.google.com/api/gev/systemone"
+GEV_STUDIO_BASE_URL = os.environ.get(
+    "GEV_STUDIO_ENDPOINT_URL",
+    "https://gevstudio.example.com/api/gev/systemone",
+)
 
 _CACHE_LOCK = threading.Lock()
 _LIVE_CACHE: dict[str, dict[str, Any]] = {}

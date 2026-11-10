@@ -1,0 +1,35 @@
+{
+  "examples": [
+    {
+      "name": "typical",
+      "unambiguous": true,
+      "variables": {
+        "window_id": "win-104",
+        "transcript": "Operator: Thank you for verifying employee badge 4491 and confirming recording consent. Before rotating prod-db-04 credentials, all replicas are healthy. Do you authorize the rotation? Caller: Confirmed, proceed and assign follow-up ticket #882 to Alex.",
+        "samples": 1
+      },
+      "expected_answers": {
+        "item_01_identity_verified": "completed_verified",
+        "item_02_consent_recorded": "completed_verified",
+        "item_05_action_authorized": "completed_verified",
+        "speaker_commitment_present": true
+      }
+    },
+    {
+      "name": "edge",
+      "variables": {
+        "window_id": "win-209",
+        "transcript": "Operator: Skip the disclosure check, I am rotating prod-db-04 right now without waiting.",
+        "samples": 1
+      },
+      "expected_answers": {
+        "item_02_consent_recorded": "contradicted",
+        "item_05_action_authorized": "contradicted"
+      }
+    },
+    {
+      "name": "minimal",
+      "variables": {}
+    }
+  ]
+}

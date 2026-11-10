@@ -25,12 +25,17 @@ under exchangeability via the exact ceil((n + 1) * (1 - alpha)) / n empirical qu
 
 from __future__ import annotations
 
-import math
-import random
-import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+import hashlib
+import hmac
+import math
+import random
+import struct
+import threading
 from typing import Collection, Mapping, Sequence
+
+DEFAULT_CONFORMAL_SEED_KEY: str = "dgem-conformal-v1"
 
 DEFAULT_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset(
     {
@@ -78,6 +83,42 @@ def _get_or_create_inference_rng(seed: int | None, rng: random.Random | None) ->
         while len(_SEEDED_STREAMS) > _MAX_SEEDED_STREAMS:
             _SEEDED_STREAMS.popitem(last=False)
         return created
+
+
+def hmac_uint64(seed_key: str, item_key: str, tag: str) -> int:
+    """Compute a stateless big-endian uint64 HMAC-SHA256 digest matching Go and TypeScript SDKs.
+
+    Args:
+        seed_key: Secret or deterministic domain seed key (defaults to ``DEFAULT_CONFORMAL_SEED_KEY`` when empty).
+        item_key: Per-example identifier ensuring order-independent tie-breaking across threadpools.
+        tag: Domain-separation suffix such as ``"u"`` or ``"tie:<label>"``.
+
+    Returns:
+        Unsigned 64-bit integer unpacked from the first 8 bytes of ``HMAC-SHA256(seed_key, item_key + "\\x00" + tag)``.
+    """
+    if not isinstance(seed_key, str) or not isinstance(item_key, str) or not isinstance(tag, str):
+        raise ValueError("seed_key, item_key, and tag must be strings")
+    effective_key = seed_key if seed_key else DEFAULT_CONFORMAL_SEED_KEY
+    digest = hmac.new(effective_key.encode("utf-8"), digestmod=hashlib.sha256)
+    digest.update(item_key.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(tag.encode("utf-8"))
+    return int(struct.unpack(">Q", digest.digest()[:8])[0])
+
+
+def hmac_uniform_float64(seed_key: str, item_key: str, tag: str) -> float:
+    """Draw a stateless Uniform[0, 1) float64 with 53-bit mantissa precision via HMAC-SHA256.
+
+    Args:
+        seed_key: Secret or deterministic domain seed key.
+        item_key: Per-example identifier.
+        tag: Domain-separation suffix.
+
+    Returns:
+        Deterministic float in ``[0.0, 1.0)`` identical across Python, Go, and TypeScript.
+    """
+    top_53 = hmac_uint64(seed_key, item_key, tag) >> 11
+    return float(top_53) * (1.0 / float(1 << 53))
 
 
 def _partition_tie_groups(
@@ -164,6 +205,8 @@ def _compute_all_nonconformity_scores(
     randomized: bool = False,
     active_rng: random.Random | None = None,
     use_global_lock: bool = False,
+    hmac_seed_key: str | None = None,
+    hmac_item_key: str = "",
 ) -> dict[str, float]:
     scores: dict[str, float] = {}
     groups = _partition_tie_groups(ranked_keys, norm_probs)
@@ -187,11 +230,37 @@ def _compute_all_nonconformity_scores(
             strict_count += len(grp)
         return scores
 
-    rng_use = active_rng if active_rng is not None else _DEFAULT_RNG
-    if use_global_lock:
-        with _RNG_LOCK:
+    if hmac_seed_key is not None:
+        u_draw = hmac_uniform_float64(hmac_seed_key, hmac_item_key, "u")
+        ordered_rand: list[str] = []
+        for grp in groups:
+            if len(grp) > 1:
+                shuffled_group = sorted(
+                    grp,
+                    key=lambda label_key: (
+                        hmac_uint64(hmac_seed_key, hmac_item_key, f"tie:{label_key}"),
+                        label_key,
+                    ),
+                )
+                ordered_rand.extend(shuffled_group)
+            else:
+                ordered_rand.append(grp[0])
+    else:
+        rng_use = active_rng if active_rng is not None else _DEFAULT_RNG
+        if use_global_lock:
+            with _RNG_LOCK:
+                u_draw = rng_use.random()
+                ordered_rand = []
+                for grp in groups:
+                    if len(grp) > 1:
+                        grp_copy = list(grp)
+                        rng_use.shuffle(grp_copy)
+                        ordered_rand.extend(grp_copy)
+                    else:
+                        ordered_rand.append(grp[0])
+        else:
             u_draw = rng_use.random()
-            ordered_rand: list[str] = []
+            ordered_rand = []
             for grp in groups:
                 if len(grp) > 1:
                     grp_copy = list(grp)
@@ -199,16 +268,6 @@ def _compute_all_nonconformity_scores(
                     ordered_rand.extend(grp_copy)
                 else:
                     ordered_rand.append(grp[0])
-    else:
-        u_draw = rng_use.random()
-        ordered_rand = []
-        for grp in groups:
-            if len(grp) > 1:
-                grp_copy = list(grp)
-                rng_use.shuffle(grp_copy)
-                ordered_rand.extend(grp_copy)
-            else:
-                ordered_rand.append(grp[0])
 
     cum_before = 0.0
     for idx, key in enumerate(ordered_rand):
@@ -236,22 +295,36 @@ def calibrate_conformal_quantile(
     randomized: bool = False,
     seed: int | None = None,
     rng: random.Random | None = None,
+    seed_key: str | None = None,
+    item_keys: Sequence[str] | None = None,
 ) -> ConformalCalibrationResult:
     """Compute the finite-sample split conformal quantile q_hat at miscoverage level alpha in (0, 1).
 
     Uses the exact order statistic index m = ceil((n + 1) * (1 - alpha)) over n exchangeable
     calibration nonconformity scores. When m > n, returns q_hat = +inf so prediction sets cover
-    the full label space conservatively.
+    the full label space conservatively. Passing ``seed_key`` enables stateless, lock-free
+    ``HMAC-SHA256`` tie-breaking with exact cross-language parity across Python, Go, and TypeScript.
     """
     if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not math.isfinite(float(alpha)) or float(alpha) <= 0.0 or float(alpha) >= 1.0:
         raise ValueError(f"alpha must be finite and strictly in (0, 1), got {alpha!r}")
     if not calib_probs or len(calib_probs) != len(calib_labels):
         raise ValueError("calib_probs and calib_labels must be non-empty sequences of equal length")
+    if seed_key is not None and not isinstance(seed_key, str):
+        raise ValueError("seed_key must be a string or None")
+    if item_keys is not None and len(item_keys) != len(calib_probs):
+        raise ValueError("item_keys must match calib_probs length when provided")
     clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+
+    use_hmac = bool(randomized and (seed_key is not None or item_keys is not None))
+    effective_seed_key = (
+        (seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY)
+        if use_hmac
+        else None
+    )
 
     use_lock = False
     cal_rng: random.Random | None = None
-    if randomized:
+    if randomized and not use_hmac:
         if rng is not None:
             cal_rng = rng
         elif seed is not None:
@@ -266,6 +339,9 @@ def calibrate_conformal_quantile(
         ranked_keys, norm_probs, _ = _normalize_and_rank_probs(dist)
         if gold not in norm_probs:
             raise ValueError(f"calibration label {gold!r} at index {idx} not present in option probabilities")
+        current_item_key = (
+            str(item_keys[idx]) if item_keys is not None else f"cal:{idx}"
+        )
         item_scores = _compute_all_nonconformity_scores(
             ranked_keys,
             norm_probs,
@@ -275,10 +351,12 @@ def calibrate_conformal_quantile(
             randomized=randomized,
             active_rng=cal_rng,
             use_global_lock=use_lock,
+            hmac_seed_key=effective_seed_key,
+            hmac_item_key=current_item_key,
         )
         calib_scores.append(item_scores[gold])
 
-    if randomized and rng is None and seed is not None and cal_rng is not None:
+    if randomized and not use_hmac and rng is None and seed is not None and cal_rng is not None:
         _store_seeded_rng(int(seed), cal_rng)
 
     n = len(calib_scores)
@@ -314,20 +392,34 @@ def conformal_prediction_set(
     randomized: bool = False,
     seed: int | None = None,
     rng: random.Random | None = None,
+    seed_key: str | None = None,
+    item_key: str = "",
     abstain_keys: Collection[str] | None = DEFAULT_CONFORMAL_ABSTAIN_KEYS,
 ) -> ConformalSetResult:
     """Construct the calibrated prediction set C_alpha(x) = {y : s(x, y) <= q_hat} in probability rank order.
 
     Flags should_escalate = True whenever |C_alpha(x)| != 1 or any abstain/catch-all option belongs to C_alpha(x).
+    When ``seed_key`` (or ``item_key`` without integer ``seed``/``rng``) is provided under ``randomized=True``,
+    uses stateless ``HMAC-SHA256`` tie-breaking for thread-safe, cross-language deterministic sets.
     """
     if isinstance(q_hat, bool) or not isinstance(q_hat, (int, float)) or math.isnan(float(q_hat)) or float(q_hat) < 0.0:
         raise ValueError(f"q_hat must be >= 0 and not NaN, got {q_hat!r}")
+    if seed_key is not None and not isinstance(seed_key, str):
+        raise ValueError("seed_key must be a string or None")
+    if not isinstance(item_key, str):
+        raise ValueError("item_key must be a string")
     q_hat_f = float(q_hat)
     clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
     ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
 
-    active_rng = _get_or_create_inference_rng(seed, rng) if randomized else None
-    use_lock = bool(randomized and rng is None)
+    use_hmac = bool(randomized and (seed_key is not None or (bool(item_key) and seed is None and rng is None)))
+    effective_seed_key = (
+        (seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY)
+        if use_hmac
+        else None
+    )
+    active_rng = _get_or_create_inference_rng(seed, rng) if (randomized and not use_hmac) else None
+    use_lock = bool(randomized and not use_hmac and rng is None)
     scores = _compute_all_nonconformity_scores(
         ranked_keys,
         norm_probs,
@@ -337,6 +429,8 @@ def conformal_prediction_set(
         randomized=randomized,
         active_rng=active_rng,
         use_global_lock=use_lock,
+        hmac_seed_key=effective_seed_key,
+        hmac_item_key=item_key,
     )
 
     if math.isinf(q_hat_f):
