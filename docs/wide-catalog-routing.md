@@ -52,7 +52,7 @@ if retrieval.fast_exit:
     selected_sku = retrieval.fast_exit_id
 else:
     reduced_question = shortlist_wide_question(
-        wide_question=DecisionQuestion(
+        question=DecisionQuestion(
             type="choice",
             instructions="Match the shelf crop to the exact catalog SKU.",
             criteria={
@@ -61,8 +61,8 @@ else:
                 "sku_citrus_330ml": "Sparkling Citrus single 330ml can",
             },
         ),
-        prior_logits=retrieval.prior_logits,
-        max_candidates=20,
+        scores=retrieval.prior_logits,
+        top_k=20,
         catch_all_key="none_of_the_above",
         pairwise_diff=True,
     )

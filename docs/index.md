@@ -37,4 +37,4 @@ The [`templates/`](../templates/) directory provides 8 production `.json.tmpl` p
 | [`swarm_lock_arbiter.json.tmpl`](../templates/swarm_lock_arbiter.json.tmpl) | Deterministic multi-agent resource lock arbitration across overlapping edit paths. |
 | [`multimodal/contact_sheet_verify.json.tmpl`](../templates/multimodal/contact_sheet_verify.json.tmpl) | Evidence-First Stage-2B contact-sheet SKU disambiguation with pack-weight reading. |
 | [`multimodal/entity_resolution_dedup.json.tmpl`](../templates/multimodal/entity_resolution_dedup.json.tmpl) | Pairwise catalog entity deduplication feeding transitive triangle-consistency projection. |
-| [`multimodal/ui_pathfinder_som.json.tmpl`](../templates/multimodal/ui_pathfinder_som.json.tmpl) | Set-of-Marks UI element grounding with `must_ask_confirmation` safety deferral. |
+| [`multimodal/ui_pathfinder_som.json.tmpl`](../templates/multimodal/ui_pathfinder_som.json.tmpl) | Set-of-Marks UI element grounding across `next_target_mark`, `element_state`, `loop_or_error_detected`, and `goal_progress_score`. |

@@ -17,11 +17,16 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
+import multimodal_decision_models as mdm
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_FENCED_BLOCK_RE = re.compile(r"```(python|go)\n(.*?)```", re.DOTALL)
 
 EXPECTED_DOCS_HUB_GUIDES: tuple[str, ...] = (
     "docs/index.md",
@@ -82,6 +87,67 @@ class V100DocumentationHubTest(unittest.TestCase):
             0,
             f"docs_link_check.py failed:\n{completed.stdout}\n{completed.stderr}",
         )
+
+    def test_all_fenced_python_and_go_snippets_execute_and_compile(self) -> None:
+        synthetic_png = mdm.encode_png(
+            mdm.ImageBuffer(width=16, height=16, rgb=bytes([120, 140, 180]) * (16 * 16))
+        )
+        python_blocks_executed = 0
+        go_blocks_compiled = 0
+
+        for rel_path in EXPECTED_DOCS_HUB_GUIDES:
+            content = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+            exec_globals: dict[str, object] = {
+                "__name__": "__doc_snippet__",
+                "validation_probabilities": [
+                    {"approve": 0.85, "reject": 0.15},
+                    {"approve": 0.20, "reject": 0.80},
+                    {"approve": 0.65, "reject": 0.35},
+                ],
+                "validation_gold_labels": ["approve", "reject", "approve"],
+                "test_probabilities": [
+                    {"approve": 0.80, "reject": 0.20},
+                    {"approve": 0.25, "reject": 0.75},
+                ],
+                "test_gold_labels": ["approve", "reject"],
+                "heldout_slot_probs": [
+                    {"s1": {"a": 0.9, "b": 0.1}, "s2": {"x": 0.88, "y": 0.12}},
+                    {"s1": {"a": 0.15, "b": 0.85}, "s2": {"x": 0.12, "y": 0.88}},
+                ],
+                "heldout_slot_labels": [
+                    {"s1": "a", "s2": "x"},
+                    {"s1": "b", "s2": "y"},
+                ],
+                "live_slot_probs": {"s1": {"a": 0.91, "b": 0.09}, "s2": {"x": 0.90, "y": 0.10}},
+                "raw_query_png_bytes": synthetic_png,
+                "raw_candidate_png_list": [synthetic_png, synthetic_png],
+            }
+            for block_idx, match in enumerate(_FENCED_BLOCK_RE.finditer(content)):
+                lang, snippet = match.group(1), match.group(2)
+                if lang == "python":
+                    exec(compile(snippet, f"{rel_path}#block-{block_idx}", "exec"), exec_globals)
+                    python_blocks_executed += 1
+                elif lang == "go":
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        go_src = pathlib.Path(tmp_dir) / "snippet_main.go"
+                        go_bin = pathlib.Path(tmp_dir) / "snippet_bin"
+                        go_src.write_text(snippet, encoding="utf-8")
+                        build_proc = subprocess.run(
+                            ["go", "build", "-o", str(go_bin), str(go_src)],
+                            cwd=str(REPO_ROOT),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertEqual(
+                            build_proc.returncode,
+                            0,
+                            f"Go snippet failed in {rel_path}#block-{block_idx}:\n{build_proc.stderr}",
+                        )
+                        go_blocks_compiled += 1
+
+        self.assertGreaterEqual(python_blocks_executed, 9)
+        self.assertGreaterEqual(go_blocks_compiled, 1)
 
 
 if __name__ == "__main__":

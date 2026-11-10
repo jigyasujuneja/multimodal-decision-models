@@ -22,11 +22,10 @@ On `Hanno-Labs/decision-bench` (`N = 300`), Equation 12 posterior distillation r
 from multimodal_decision_models import reasoning_to_readout_distillation_loss
 
 distill_metrics = reasoning_to_readout_distillation_loss(
-    student_logits={"approve": 1.8, "manual_review": 0.9, "reject": -1.4},
     teacher_probs={"approve": 0.68, "manual_review": 0.27, "reject": 0.05},
-    gold_label="approve",
-    distill_weight=0.7,
-    temperature=1.5,
+    student_probs={"approve": 0.59, "manual_review": 0.31, "reject": 0.10},
+    base_anchor_probs={"approve": 0.55, "manual_review": 0.30, "reject": 0.15},
+    teacher_temperature=1.5,
 )
 ```
 
@@ -43,13 +42,13 @@ Unconditional knowledge distillation (`0.3 * one_hot(gold) + 0.7 * p_teacher`) i
 from multimodal_decision_models import selective_teacher_brier_sft_loss
 
 sft_result = selective_teacher_brier_sft_loss(
-    student_probs={"ask_confirmation": 0.78, "execute_tool": 0.22},
     teacher_probs={"ask_confirmation": 0.15, "execute_tool": 0.85},
-    gold_label="ask_confirmation",
-    is_must_ask_state=True,
-    teacher_weight=0.70,
+    student_probs={"ask_confirmation": 0.78, "execute_tool": 0.22},
+    gold_key="ask_confirmation",
+    acceptable_keys=["ask_confirmation"],
+    gold_weight_alpha=0.30,
 )
-# sft_result.target_corrupted is False; teacher error is zeroed on must_ask failure.
+# sft_result.teacher_accepted is False; target_distribution stays 100% on gold_key.
 ```
 
 ## Run statistical gates and recalibrate after every checkpoint update

@@ -159,16 +159,17 @@ import (
 
 func main() {
 	digest := mdm.HmacUint64("dgem-conformal-v1", "req-42:intent", "u")
-	setResult, _ := mdm.ConformalPredictionSetWithSeedKey(
+	setResult, _ := mdm.ConformalPredictionSet(
 		map[string]float64{"billing_refund": 0.88, "technical_incident": 0.08, "ambiguous_or_oos": 0.04},
 		0.18,
-		"raps",
-		0.01,
-		1,
-		true,
-		"dgem-conformal-v1",
-		"req-9012:route",
-		nil,
+		mdm.ConformalConfig{
+			Method:     "raps",
+			LamReg:     0.01,
+			KReg:       1,
+			Randomized: true,
+			SeedKey:    "dgem-conformal-v1",
+			ItemKey:    "req-9012:route",
+		},
 	)
 	fmt.Println(digest, setResult.PredictionSet, setResult.ShouldEscalate)
 }

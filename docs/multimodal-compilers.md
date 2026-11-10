@@ -12,6 +12,7 @@ Raw multimodal prompting wastes tokens and loses fine-grained signal: downsampli
 
 ```python
 from multimodal_decision_models import (
+    DecisionQuestion,
     compile_dual_buffer_contact_sheet,
     decode_png,
     inject_evidence_slot,
@@ -29,7 +30,17 @@ sheet = compile_dual_buffer_contact_sheet(
     ],
     curved_container=True,
 )
-# Feed sheet.png_bytes + inject_evidence_slot(questions) to Stage-2 VLM
+stage2_questions = inject_evidence_slot(
+    {
+        "sku": DecisionQuestion(
+            type="choice",
+            instructions="Select the matching SKU.",
+            criteria={"sku_330ml": "330ml single", "sku_500ml": "500ml tall can"},
+        )
+    },
+    evidence_prompt="Transcribe the printed volume in ml on the query container.",
+)
+# Feed sheet.png_bytes and stage2_questions to Stage-2 VLM.
 ```
 
 Pairing `compile_dual_buffer_contact_sheet` with `inject_evidence_slot` (forcing the verifier to read pack typography into an `evidence_read` slot ahead of the SKU choice) eliminates hallucinated sister-pack guesses when text is occluded.

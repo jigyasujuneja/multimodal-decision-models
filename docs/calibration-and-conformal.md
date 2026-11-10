@@ -33,11 +33,11 @@ from multimodal_decision_models import (
 )
 
 scaler = fit_temperature_scaling(
-    val_probs=validation_probabilities,
-    val_labels=validation_gold_labels,
+    validation_probabilities,
+    validation_gold_labels,
     l2_reg=1e-3,
 )
-calibrated_probs = scaler.transform(test_probabilities)
+calibrated_probs = scaler.predict_proba(test_probabilities)
 murphy = brier_murphy_decomposition(calibrated_probs, test_gold_labels)
 ```
 
