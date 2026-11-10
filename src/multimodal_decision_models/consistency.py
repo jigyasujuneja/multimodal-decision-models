@@ -16,12 +16,15 @@
 
 from __future__ import annotations
 
-import math
-import re
 from collections import defaultdict
 from dataclasses import dataclass
+import hashlib
+import json
+import math
+import re
 from typing import Mapping, Sequence
 
+from .conformal import conformal_prediction_set
 from .eval_suite import brier_murphy_decomposition
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
@@ -828,10 +831,20 @@ def covariance_discounted_logit_pool(
         raise ValueError(f"prior_weight must be finite and >= 0, got {prior_weight!r}")
 
     agent_ids = sorted(str(k) for k in agent_probs.keys())
-    first_dist = agent_probs[agent_ids[0]]
-    if not first_dist:
-        raise ValueError("option probability mapping must be non-empty")
-    option_keys = sorted(str(k) for k in first_dist.keys())
+    normalized_agents: dict[str, dict[str, float]] = {}
+    expected_option_set: set[str] | None = None
+    for aid in agent_ids:
+        norm_dist = _normalize_probability_map(agent_probs[aid], f"agent_probs[{aid!r}]")
+        if expected_option_set is None:
+            expected_option_set = set(norm_dist.keys())
+        elif set(norm_dist.keys()) != expected_option_set:
+            raise ValueError(
+                f"agent {aid!r} option keys {sorted(norm_dist.keys())!r} do not match "
+                f"expected keys {sorted(expected_option_set)!r}"
+            )
+        normalized_agents[aid] = norm_dist
+    assert expected_option_set is not None
+    option_keys = sorted(expected_option_set)
 
     if calibration is None:
         w_map = {aid: 1.0 / float(len(agent_ids)) for aid in agent_ids}
@@ -848,24 +861,241 @@ def covariance_discounted_logit_pool(
     pooled_logits: dict[str, float] = {k: 0.0 for k in option_keys}
 
     for aid in agent_ids:
-        dist = agent_probs[aid]
+        norm_dist = normalized_agents[aid]
         w_m = w_map[aid]
-        tot = sum(max(0.0, float(dist.get(k, 0.0))) for k in option_keys)
-        if tot <= 0.0:
-            raise ValueError(f"agent {aid!r} probability distribution sum must be > 0")
         for k in option_keys:
-            p_mk = max(eps, float(dist.get(k, 0.0)) / tot)
+            p_mk = max(eps, norm_dist[k])
             pooled_logits[k] += inv_temp * w_m * math.log(p_mk)
 
     if prior_probs is not None and prior_weight > 0.0:
-        p_tot = sum(max(0.0, float(prior_probs.get(k, 0.0))) for k in option_keys)
-        if p_tot > 0.0:
-            for k in option_keys:
-                pi_k = max(eps, float(prior_probs.get(k, 0.0)) / p_tot)
-                pooled_logits[k] += float(prior_weight) * math.log(pi_k)
+        norm_prior = _normalize_probability_map(prior_probs, "prior_probs")
+        if set(norm_prior.keys()) != expected_option_set:
+            raise ValueError("prior_probs must contain the exact same option keys as agent_probs")
+        for k in option_keys:
+            pi_k = max(eps, norm_prior[k])
+            pooled_logits[k] += float(prior_weight) * math.log(pi_k)
 
     max_l = max(pooled_logits.values())
     exps = {k: math.exp(pooled_logits[k] - max_l) for k in option_keys}
     z = sum(exps.values())
     return {k: exps[k] / z for k in option_keys}
+
+
+@dataclass(frozen=True)
+class BlindFirstConsensusResult:
+    """Result of blind-first multi-agent consensus with score-mechanism shift protection."""
+
+    pooled_probabilities: dict[str, float]
+    predicted_label: str
+    robust_conformal_set: tuple[str, ...]
+    solo_commitments: dict[str, str]
+    agent_shift_jsd_bits: dict[str, float]
+    sycophancy_flagged_agents: tuple[str, ...]
+    mean_shift_jsd_bits: float
+
+
+def _normalize_probability_map(raw_probs: Mapping[str, float], label: str) -> dict[str, float]:
+    if not isinstance(raw_probs, Mapping) or not raw_probs:
+        raise ValueError(f"{label} must be a non-empty probability Mapping")
+    total = 0.0
+    cleaned: dict[str, float] = {}
+    for opt_key, raw_val in raw_probs.items():
+        if isinstance(raw_val, bool) or not isinstance(raw_val, (int, float)):
+            raise ValueError(f"{label}[{opt_key!r}] must be numeric")
+        fval = float(raw_val)
+        if not math.isfinite(fval) or fval < 0.0:
+            raise ValueError(f"{label}[{opt_key!r}] must be finite and >= 0")
+        cleaned[str(opt_key)] = fval
+        total += fval
+    if total <= 0.0:
+        raise ValueError(f"{label} sum must be > 0")
+    return {k: v / total for k, v in cleaned.items()}
+
+
+def compute_solo_commitment_digest(
+    agent_id: str,
+    request_id: str,
+    solo_probabilities: Mapping[str, float],
+) -> str:
+    """Compute a canonical SHA-256 pre-commitment digest for an agent's Stage-1 solo posterior.
+
+    Args:
+        agent_id: Non-empty agent identifier.
+        request_id: Non-empty decision request identifier.
+        solo_probabilities: Stage-1 solo probability distribution before peer exposure.
+
+    Returns:
+        Hexadecimal SHA-256 digest binding `(agent_id, request_id, solo_probabilities)`.
+
+    Raises:
+        ValueError: If identifiers are empty or `solo_probabilities` is invalid.
+    """
+    if not isinstance(agent_id, str) or not agent_id.strip():
+        raise ValueError("agent_id must be a non-empty string")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("request_id must be a non-empty string")
+    norm = _normalize_probability_map(solo_probabilities, "solo_probabilities")
+    canonical_payload = json.dumps(
+        {
+            "agent_id": agent_id.strip(),
+            "request_id": request_id.strip(),
+            "probabilities": {k: round(norm[k], 10) for k in sorted(norm.keys())},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_payload).hexdigest()
+
+
+def score_mechanism_shift_jsd(
+    solo_probabilities: Mapping[str, float],
+    peer_conditioned_probabilities: Mapping[str, float],
+) -> float:
+    """Compute Jensen-Shannon divergence (bits in `[0, 1]`) measuring peer-induced score shift.
+
+    Args:
+        solo_probabilities: Agent's blind Stage-1 probability distribution `p_solo(y | x)`.
+        peer_conditioned_probabilities: Agent's Stage-2 distribution `p_social(y | x, peers)`.
+
+    Returns:
+        Jensen-Shannon divergence in `[0, 1]` bits.
+    """
+    solo = _normalize_probability_map(solo_probabilities, "solo_probabilities")
+    social = _normalize_probability_map(
+        peer_conditioned_probabilities, "peer_conditioned_probabilities"
+    )
+    if set(solo.keys()) != set(social.keys()):
+        raise ValueError(
+            "solo_probabilities and peer_conditioned_probabilities must share identical option keys"
+        )
+    keys = sorted(solo.keys())
+    eps = 1e-12
+    js_bits = 0.0
+    for key in keys:
+        p_val = solo.get(key, 0.0)
+        q_val = social.get(key, 0.0)
+        mid = 0.5 * (p_val + q_val)
+        if p_val > eps and mid > eps:
+            js_bits += 0.5 * p_val * math.log2(p_val / mid)
+        if q_val > eps and mid > eps:
+            js_bits += 0.5 * q_val * math.log2(q_val / mid)
+    return min(1.0, max(0.0, js_bits))
+
+
+def evaluate_blind_first_consensus(
+    solo_agent_probs: Mapping[str, Mapping[str, float]],
+    peer_conditioned_agent_probs: Mapping[str, Mapping[str, float]],
+    *,
+    q_hat: float,
+    request_id: str = "swarm-round",
+    verified_new_evidence_agents: Sequence[str] = (),
+    max_unjustified_jsd_bits: float = 0.08,
+    calibration: CorrelatedEnsembleCalibrationResult | None = None,
+    conformal_method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+) -> BlindFirstConsensusResult:
+    """Pool multi-agent beliefs while protecting conformal coverage from sycophantic peer collapse.
+
+    Implements the blind-first pre-commitment defense against score-mechanism shift (Hu & Su,
+    arXiv:2609.04445): each agent commits `p_solo` before viewing peer rationales. If an agent's
+    peer-conditioned distribution shifts by more than `max_unjustified_jsd_bits` without verified
+    new external tool/citation evidence, its effective belief reverts to `p_solo` during pooling,
+    and the final conformal set forms the conservative union `C_solo_pool U C_social_pool`.
+
+    Args:
+        solo_agent_probs: Stage-1 blind probability maps per agent ID.
+        peer_conditioned_agent_probs: Stage-2 peer-exposed probability maps per agent ID.
+        q_hat: Calibrated split-conformal quantile threshold (`>= 0` or `+inf`).
+        request_id: Deterministic round identifier bound into SHA-256 commitments.
+        verified_new_evidence_agents: Agent IDs that retrieved new external citations in Stage 2.
+        max_unjustified_jsd_bits: Maximum peer JSD shift (bits) permitted without new evidence.
+        calibration: Optional `CorrelatedEnsembleCalibrationResult` discounting correlated clones.
+        conformal_method: Conformal scoring method (`"lac"`, `"aps"`, or `"raps"`).
+        lam_reg: RAPS penalty weight.
+        k_reg: RAPS onset rank.
+
+    Returns:
+        `BlindFirstConsensusResult` with commitments, flagged agents, and sycophancy-proof set.
+    """
+    if not solo_agent_probs or set(solo_agent_probs.keys()) != set(
+        peer_conditioned_agent_probs.keys()
+    ):
+        raise ValueError(
+            "solo_agent_probs and peer_conditioned_agent_probs must share identical non-empty agent keys"
+        )
+    if (
+        isinstance(max_unjustified_jsd_bits, bool)
+        or not isinstance(max_unjustified_jsd_bits, (int, float))
+        or not math.isfinite(float(max_unjustified_jsd_bits))
+        or float(max_unjustified_jsd_bits) < 0.0
+    ):
+        raise ValueError("max_unjustified_jsd_bits must be finite and >= 0")
+
+    evidence_allow = {str(aid) for aid in verified_new_evidence_agents}
+    agent_ids = sorted(str(aid) for aid in solo_agent_probs.keys())
+    commitments: dict[str, str] = {}
+    jsd_map: dict[str, float] = {}
+    flagged: list[str] = []
+    effective_probs: dict[str, dict[str, float]] = {}
+    norm_solo_all: dict[str, dict[str, float]] = {}
+    norm_social_all: dict[str, dict[str, float]] = {}
+
+    for aid in agent_ids:
+        solo_dist = _normalize_probability_map(solo_agent_probs[aid], f"solo[{aid}]")
+        social_dist = _normalize_probability_map(
+            peer_conditioned_agent_probs[aid], f"peer_conditioned[{aid}]"
+        )
+        norm_solo_all[aid] = solo_dist
+        norm_social_all[aid] = social_dist
+        commitments[aid] = compute_solo_commitment_digest(aid, request_id, solo_dist)
+        shift_bits = score_mechanism_shift_jsd(solo_dist, social_dist)
+        jsd_map[aid] = round(shift_bits, 6)
+        if shift_bits > float(max_unjustified_jsd_bits) and aid not in evidence_allow:
+            flagged.append(aid)
+            effective_probs[aid] = solo_dist
+        else:
+            effective_probs[aid] = social_dist
+
+    solo_pooled = covariance_discounted_logit_pool(norm_solo_all, calibration=calibration)
+    social_pooled = covariance_discounted_logit_pool(norm_social_all, calibration=calibration)
+    effective_pooled = covariance_discounted_logit_pool(effective_probs, calibration=calibration)
+
+    solo_set = conformal_prediction_set(
+        solo_pooled, q_hat, method=conformal_method, lam_reg=lam_reg, k_reg=k_reg
+    )
+    eff_set = conformal_prediction_set(
+        effective_pooled, q_hat, method=conformal_method, lam_reg=lam_reg, k_reg=k_reg
+    )
+    social_set = conformal_prediction_set(
+        social_pooled, q_hat, method=conformal_method, lam_reg=lam_reg, k_reg=k_reg
+    )
+
+    # Preserve solo conformal coverage whenever sycophantic peer shift was detected, plus union
+    # with effective/social conformal support ordered descending by effective_pooled probability.
+    union_keys = set(eff_set.prediction_set) | set(solo_set.prediction_set)
+    if not flagged:
+        union_keys |= set(social_set.prediction_set)
+    ordered_union = sorted(
+        union_keys,
+        key=lambda opt: (-effective_pooled.get(opt, 0.0), opt),
+    )
+    winner = sorted(
+        effective_pooled.keys(),
+        key=lambda opt: (-effective_pooled[opt], opt),
+    )[0]
+    mean_jsd = sum(jsd_map.values()) / float(len(jsd_map))
+
+    return BlindFirstConsensusResult(
+        pooled_probabilities=effective_pooled,
+        predicted_label=winner,
+        robust_conformal_set=tuple(ordered_union),
+        solo_commitments=commitments,
+        agent_shift_jsd_bits=jsd_map,
+        sycophancy_flagged_agents=tuple(flagged),
+        mean_shift_jsd_bits=round(mean_jsd, 6),
+    )
+
 

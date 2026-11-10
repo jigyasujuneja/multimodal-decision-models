@@ -14,13 +14,18 @@
  * limitations under the License.
  */
 
-import { DEFAULT_CONFORMAL_SEED_KEY, conformalPredictionSet } from "./calibration.js";
+import {
+  DEFAULT_CONFORMAL_SEED_KEY,
+  conformalPredictionSet,
+  evaluateNevcGate,
+} from "./calibration.js";
 import type { MDMClient } from "./client.js";
 import {
   type ConformalMethod,
   type DecisionQuestion,
   type DecisionResponse,
   MDMValidationError,
+  type NevControllerPolicy,
 } from "./types.js";
 
 const GUARD_BLOCK_LABELS: readonly string[] = [
@@ -35,6 +40,8 @@ export interface ActionStakesPolicy {
   readonly irreversibleMinConfidence?: number;
   readonly reversibleMinConfidence?: number;
   readonly jointQHat?: number;
+  readonly stepQHatResolver?: (stepIndex: number) => number;
+  readonly nevcPolicy?: NevControllerPolicy;
   readonly conformalMethod?: ConformalMethod;
   readonly seedKey?: string;
 }
@@ -45,6 +52,7 @@ export interface GenkitToolGuardInput {
   readonly userRequest: string;
   readonly untrustedContext?: string;
   readonly requestId?: string;
+  readonly stepIndex?: number;
 }
 
 export interface GenkitToolGuardVerdict {
@@ -379,16 +387,26 @@ export function createGenkitToolGuard(
         };
       }
 
-      if (policy.jointQHat !== undefined) {
+      const resolvedStep =
+        input.stepIndex !== undefined ? input.stepIndex : 1;
+      if (!Number.isInteger(resolvedStep) || resolvedStep < 1) {
+        throw new MDMValidationError("stepIndex must be an integer >= 1");
+      }
+      const effectiveQHat =
+        policy.stepQHatResolver !== undefined
+          ? policy.stepQHatResolver(resolvedStep)
+          : policy.jointQHat;
+
+      if (effectiveQHat !== undefined) {
         const seedKey = policy.seedKey ?? DEFAULT_CONFORMAL_SEED_KEY;
-        const dispSet = conformalPredictionSet(dispRawProbs, policy.jointQHat, {
+        const dispSet = conformalPredictionSet(dispRawProbs, effectiveQHat, {
           method: policy.conformalMethod ?? "raps",
           randomized: Boolean(policy.seedKey),
           seedKey,
           itemKey: `${requestId}:disposition`,
           abstainLabels: GUARD_BLOCK_LABELS,
         });
-        const originSet = conformalPredictionSet(originRawProbs, policy.jointQHat, {
+        const originSet = conformalPredictionSet(originRawProbs, effectiveQHat, {
           method: policy.conformalMethod ?? "raps",
           randomized: Boolean(policy.seedKey),
           seedKey,
@@ -410,6 +428,28 @@ export function createGenkitToolGuard(
       }
 
       if (!(Number.isFinite(jointConfidence) && jointConfidence >= requiredConfidence)) {
+        if (
+          Number.isFinite(jointConfidence) &&
+          !isIrreversible &&
+          policy.nevcPolicy !== undefined
+        ) {
+          const nevcVerdict = evaluateNevcGate(
+            1.0 - jointConfidence,
+            policy.nevcPolicy,
+          );
+          if (!nevcVerdict.shouldIntervene) {
+            return {
+              allowed: true,
+              disposition: "allow",
+              intentOrigin: "explicit_user_intent",
+              confidence: jointConfidence,
+              isIrreversible: false,
+              requiredConfidence,
+              shouldEscalate: false,
+              reason: `authorized_by_nevc_gate:${nevcVerdict.netExpectedValue.toFixed(4)}`,
+            };
+          }
+        }
         return {
           allowed: false,
           disposition: "ask_confirmation",
