@@ -240,6 +240,7 @@ def evaluate_adk_tool_guard(
     request_id: str = "adk-tool-guard",
     policy: ActionStakesPolicy | None = None,
     step_index: int = 1,
+    tenant_id: str = "default",
 ) -> ADKToolGuardDecision:
     """Evaluate a proposed tool call under Action-Stakes and Joint Conformal guardrails.
 
@@ -293,6 +294,7 @@ def evaluate_adk_tool_guard(
             decision_result = orchestrator.evaluate(
                 guard_state,
                 questions,
+                tenant_id=tenant_id,
             )
             if inspect.iscoroutine(decision_result):
                 decision_result.close()
@@ -502,6 +504,8 @@ def create_adk_before_tool_guard(
     untrusted_context_key: str = "untrusted_context",
     request_id_key: str = "invocation_id",
     step_index_key: str = "step_index",
+    tenant_id_key: str = "tenant_id",
+    default_tenant_id: str = "default",
 ) -> Callable[[object, Mapping[str, object], object], dict[str, object] | None]:
     """Build a Google ADK ``before_tool_callback`` enforcing Action-Stakes and ``<untrusted_data>`` isolation.
 
@@ -539,6 +543,12 @@ def create_adk_before_tool_guard(
         )
         raw_step = context_state.get(step_index_key, 1)
         resolved_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step >= 1 else 1
+        raw_tenant = context_state.get(tenant_id_key)
+        resolved_tenant = (
+            raw_tenant.strip()
+            if isinstance(raw_tenant, str) and raw_tenant.strip()
+            else default_tenant_id
+        )
 
         verdict = evaluate_adk_tool_guard(
             runner,
@@ -549,6 +559,7 @@ def create_adk_before_tool_guard(
             request_id=request_id,
             policy=active_policy,
             step_index=resolved_step,
+            tenant_id=resolved_tenant,
         )
         if verdict.allowed is True:
             return None
@@ -599,6 +610,8 @@ def create_langgraph_decision_node(
     output_key: str = "mdm_decision",
     images_key: str | None = None,
     quarantine_untrusted: bool = True,
+    tenant_id_key: str = "tenant_id",
+    default_tenant_id: str = "default",
 ) -> Callable[[Mapping[str, object]], dict[str, object]]:
     """Create a deterministic LangGraph state-routing node backed by ``mdm``.
 
@@ -650,10 +663,17 @@ def create_langgraph_decision_node(
                 }
             image_list = list(raw_images)
 
+        raw_tenant = graph_state.get(tenant_id_key)
+        resolved_tenant = (
+            raw_tenant.strip()
+            if isinstance(raw_tenant, str) and raw_tenant.strip()
+            else default_tenant_id
+        )
         decision_result = effective_orchestrator.evaluate(
             prepared_state,
             bound_questions,
             images=image_list,
+            tenant_id=resolved_tenant,
         )
         return {output_key: _serialize_decision_result(decision_result)}
 

@@ -286,6 +286,78 @@ def _compute_all_nonconformity_scores(
     return scores
 
 
+def nonconformity_score(
+    probs: Mapping[str, float],
+    label: str,
+    *,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+    randomized: bool = False,
+    seed: int | None = None,
+    rng: random.Random | None = None,
+    seed_key: str | None = None,
+    item_key: str = "",
+) -> float:
+    """Compute the conformal nonconformity score s(x, y) for a candidate label.
+
+    Args:
+        probs: Option probability mapping for a single decision slot.
+        label: Candidate or ground-truth option key present in ``probs``.
+        method: Score method (``"lac"``, ``"aps"``, or ``"raps"``).
+        lam_reg: RAPS regularization weight ``>= 0``.
+        k_reg: RAPS unpenalized top-k cutoff ``>= 0``.
+        randomized: Whether to enable randomized tie/rank smoothing.
+        seed: Optional integer PRNG seed when ``randomized=True`` without HMAC keys.
+        rng: Optional explicit ``random.Random`` instance when ``randomized=True``.
+        seed_key: Optional HMAC-SHA256 seed key when ``randomized=True``.
+        item_key: Per-example HMAC item identifier.
+
+    Returns:
+        Nonconformity score in ``[0, +inf)``.
+
+    Raises:
+        ValueError: If ``probs``, hyperparameters, or ``label`` are invalid.
+    """
+    if seed_key is not None and not isinstance(seed_key, str):
+        raise ValueError("seed_key must be a string or None")
+    if not isinstance(item_key, str):
+        raise ValueError("item_key must be a string")
+    clean_method = _validate_conformal_hyperparams(method, lam_reg, k_reg)
+    ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
+    target = str(label)
+    if target not in norm_probs:
+        raise ValueError(f"label {target!r} not present in option probabilities")
+
+    use_hmac = bool(
+        randomized
+        and (seed_key is not None or (seed is None and rng is None))
+    )
+    effective_seed = (
+        (seed_key if seed_key is not None else DEFAULT_CONFORMAL_SEED_KEY)
+        if use_hmac
+        else None
+    )
+    active_rng = (
+        (rng if rng is not None else random.Random(int(seed)))
+        if (randomized and not use_hmac and seed is not None or rng is not None)
+        else None
+    )
+    scores = _compute_all_nonconformity_scores(
+        ranked_keys,
+        norm_probs,
+        clean_method,
+        lam_reg,
+        k_reg,
+        randomized=randomized,
+        active_rng=active_rng if (randomized and not use_hmac) else None,
+        use_global_lock=False,
+        hmac_seed_key=effective_seed,
+        hmac_item_key=item_key,
+    )
+    return float(scores[target])
+
+
 def calibrate_conformal_quantile(
     calib_probs: Sequence[Mapping[str, float]],
     calib_labels: Sequence[str],

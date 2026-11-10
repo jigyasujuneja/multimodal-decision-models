@@ -41,6 +41,8 @@ from .conformal import DEFAULT_CONFORMAL_ABSTAIN_KEYS, DEFAULT_CONFORMAL_SEED_KE
 from .context_pruner import ContextBlock, prune_agent_context_blocks
 from .contracts import DecisionContractError
 from .embedding_index import MultimodalEmbeddingIndex
+from .security import detect_comparative_undermining_attack, wrap_canary_untrusted_envelope
+from .trajectory_control import NetExpectedValueController, polynomial_alpha_at_step
 from .visual_compiler import ImageBuffer, compile_dual_buffer_contact_sheet, decode_png, decode_ppm
 
 MCP_SERVER_NAME = "dgem-catalog"
@@ -55,6 +57,8 @@ DEFAULT_MCP_PROTOCOL_VERSION: str = "2024-11-05"
 MAX_FRAME_BYTES: int = 16 * 1024 * 1024
 MAX_CONTENT_LENGTH_BYTES: int = MAX_FRAME_BYTES
 MAX_HEADER_LINES: int = 64
+MAX_JSON_DEPTH: int = 32
+_FORBIDDEN_PROTO_KEYS: frozenset[str] = frozenset({"__proto__", "constructor", "prototype"})
 _MAX_DRAIN_HEADER_LINES: int = 1024
 _MIME_HEADER_LINE_RE = re.compile(rb"^([A-Za-z][A-Za-z0-9_-]*)[ \t]*:(.*)$")
 
@@ -68,8 +72,48 @@ class _FramingInvalidRequestError(ValueError):
 
 
 def _reject_json_constant(token: str) -> Any:
-    """Reject non-RFC-8259 NaN/Infinity tokens during JSON parsing."""
+    """Reject non-RFC-8259 JSON constant tokens during JSON parsing."""
     raise ValueError(f"Non-RFC-8259 JSON constant not permitted: {token}")
+
+
+def _enforce_json_safety(
+    obj: Any,
+    *,
+    max_depth: int = MAX_JSON_DEPTH,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+) -> None:
+    """Reject cyclic structures, excessive nesting depth, non-finite floats, and prototype keys."""
+    if _depth > max_depth:
+        raise _InvalidParamsError(f"JSON nesting depth exceeds MAX_JSON_DEPTH ({max_depth})")
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            raise _InvalidParamsError(f"non-finite float not permitted: {obj!r}")
+        return
+    active_seen = set() if _seen is None else _seen
+    obj_id = id(obj)
+    if obj_id in active_seen:
+        raise _InvalidParamsError("cyclic container not permitted in JSON-RPC payload")
+    next_seen = active_seen | {obj_id}
+    if isinstance(obj, Mapping):
+        for raw_key, raw_val in obj.items():
+            if not isinstance(raw_key, str):
+                raise _InvalidParamsError("JSON object keys must be strings")
+            if raw_key in _FORBIDDEN_PROTO_KEYS:
+                raise _InvalidParamsError(f"forbidden prototype-pollution key {raw_key!r}")
+            _enforce_json_safety(
+                raw_val, max_depth=max_depth, _depth=_depth + 1, _seen=next_seen
+            )
+        return
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            _enforce_json_safety(
+                item, max_depth=max_depth, _depth=_depth + 1, _seen=next_seen
+            )
+        return
+    raise _InvalidParamsError(f"unsupported JSON value type: {type(obj).__qualname__}")
 
 
 def _require_mapping(val: Any, field: str, *, non_empty: bool = False) -> Mapping[str, Any]:
@@ -288,6 +332,47 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["candidates"],
         },
     },
+    {
+        "name": "audit_untrusted_candidates",
+        "description": (
+            "Audit untrusted RAG passages or option descriptions for Comparative Undermining "
+            "Attacks (CUA), Unicode tag/bidi smuggling, and wrap clean items in HMAC canary tags."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "candidate_texts": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+                "request_id": {"type": "string", "default": "mcp-audit"},
+                "wrap_canary": {"type": "boolean", "default": True},
+            },
+            "required": ["candidate_texts"],
+        },
+    },
+    {
+        "name": "evaluate_trajectory_guard",
+        "description": (
+            "Compute polynomial alpha-spending budget and Net Expected Value Controller (NEVC) "
+            "intervention verdict for a multi-step agent turn."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "step_index": {"type": "integer", "default": 1},
+                "alpha_total": {"type": "number", "default": 0.10},
+                "exponent_p": {"type": "number", "default": 1.6},
+                "horizon_max_steps": {"type": ["integer", "null"], "default": 10},
+                "raw_fail_probability": {"type": "number"},
+                "task_value": {"type": "number", "default": 1.0},
+                "intervention_cost": {"type": "number", "default": 0.08},
+                "fix_probability_if_failing": {"type": "number", "default": 0.45},
+                "regression_probability_if_passing": {"type": "number", "default": 0.03},
+            },
+            "required": ["raw_fail_probability"],
+        },
+    },
 ]
 
 
@@ -296,6 +381,8 @@ def build_mcp_tool_schemas(
     configured_backends: Sequence[str] | None = None,
     enable_visual_compiler: bool = True,
     enable_context_pruner: bool = True,
+    enable_security_auditor: bool = True,
+    enable_trajectory_guard: bool = True,
 ) -> list[dict[str, Any]]:
     """Build capability-aware MCP tool schemas reflecting configured backends and enabled compilers.
 
@@ -303,6 +390,8 @@ def build_mcp_tool_schemas(
         configured_backends: Optional non-empty sequence of active backend paradigm identifiers.
         enable_visual_compiler: Include ``compile_contact_sheet`` when True.
         enable_context_pruner: Include ``prune_context_blocks`` when True.
+        enable_security_auditor: Include ``audit_untrusted_candidates`` when True.
+        enable_trajectory_guard: Include ``evaluate_trajectory_guard`` when True.
 
     Returns:
         Deep-copied list of JSON Schema tool descriptors for ``tools/list``.
@@ -310,8 +399,13 @@ def build_mcp_tool_schemas(
     Raises:
         ValueError: If ``configured_backends`` is empty or contains an unknown paradigm name.
     """
-    if not isinstance(enable_visual_compiler, bool) or not isinstance(enable_context_pruner, bool):
-        raise ValueError("enable_visual_compiler and enable_context_pruner must be booleans")
+    if (
+        not isinstance(enable_visual_compiler, bool)
+        or not isinstance(enable_context_pruner, bool)
+        or not isinstance(enable_security_auditor, bool)
+        or not isinstance(enable_trajectory_guard, bool)
+    ):
+        raise ValueError("capability flags must be booleans")
 
     active_paradigms: list[str] | None = None
     if configured_backends is not None:
@@ -333,6 +427,10 @@ def build_mcp_tool_schemas(
         if tool_name == "compile_contact_sheet" and not enable_visual_compiler:
             continue
         if tool_name == "prune_context_blocks" and not enable_context_pruner:
+            continue
+        if tool_name == "audit_untrusted_candidates" and not enable_security_auditor:
+            continue
+        if tool_name == "evaluate_trajectory_guard" and not enable_trajectory_guard:
             continue
         cloned = copy.deepcopy(base_schema)
         if tool_name == "evaluate_conformal_decision" and active_paradigms is not None:
@@ -774,20 +872,158 @@ def _tool_compile_contact_sheet(args: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_audit_untrusted_candidates(args: Mapping[str, Any]) -> dict[str, Any]:
+    if "candidate_texts" not in args:
+        raise _InvalidParamsError("candidate_texts is required")
+    raw_map = _require_mapping(args.get("candidate_texts"), "candidate_texts", non_empty=True)
+    clean_texts: dict[str, str] = {}
+    for key, val in raw_map.items():
+        if not isinstance(key, str) or not key.strip():
+            raise _InvalidParamsError("candidate_texts keys must be non-empty strings")
+        clean_texts[key] = _require_str(val, f"candidate_texts.{key}")
+
+    req_id = (
+        _require_str(args["request_id"], "request_id", non_empty=True)
+        if args.get("request_id") is not None
+        else "mcp-audit"
+    )
+    wrap_canary = (
+        _require_bool(args["wrap_canary"], "wrap_canary")
+        if args.get("wrap_canary") is not None
+        else True
+    )
+    audit = detect_comparative_undermining_attack(clean_texts)
+    envelopes: dict[str, str] = {}
+    if wrap_canary:
+        for cid in audit.clean_ids:
+            env = wrap_canary_untrusted_envelope(clean_texts[cid], request_id=f"{req_id}:{cid}")
+            envelopes[cid] = env.fenced_text
+    return {
+        "quarantined_ids": list(audit.quarantined_ids),
+        "clean_ids": list(audit.clean_ids),
+        "reasons_by_id": {k: list(v) for k, v in audit.reasons_by_id.items()},
+        "smuggling_counts_by_id": dict(audit.smuggling_counts_by_id),
+        "any_attack_detected": audit.any_attack_detected,
+        "canary_envelopes": envelopes,
+    }
+
+
+def _tool_evaluate_trajectory_guard(args: Mapping[str, Any]) -> dict[str, Any]:
+    if "raw_fail_probability" not in args:
+        raise _InvalidParamsError("raw_fail_probability is required")
+    raw_fail = _require_number(args.get("raw_fail_probability"), "raw_fail_probability")
+    step_idx = (
+        _require_int(args["step_index"], "step_index")
+        if args.get("step_index") is not None
+        else 1
+    )
+    alpha_total = (
+        _require_number(args["alpha_total"], "alpha_total")
+        if args.get("alpha_total") is not None
+        else 0.10
+    )
+    exponent_p = (
+        _require_number(args["exponent_p"], "exponent_p")
+        if args.get("exponent_p") is not None
+        else 1.6
+    )
+    horizon_raw = args.get("horizon_max_steps", 10)
+    horizon = _require_int(horizon_raw, "horizon_max_steps") if horizon_raw is not None else None
+
+    task_val = (
+        _require_number(args["task_value"], "task_value")
+        if args.get("task_value") is not None
+        else 1.0
+    )
+    cost = (
+        _require_number(args["intervention_cost"], "intervention_cost")
+        if args.get("intervention_cost") is not None
+        else 0.08
+    )
+    fix_prob = (
+        _require_number(args["fix_probability_if_failing"], "fix_probability_if_failing")
+        if args.get("fix_probability_if_failing") is not None
+        else 0.45
+    )
+    reg_prob = (
+        _require_number(
+            args["regression_probability_if_passing"], "regression_probability_if_passing"
+        )
+        if args.get("regression_probability_if_passing") is not None
+        else 0.03
+    )
+
+    alpha_step = polynomial_alpha_at_step(
+        step_idx,
+        alpha_total=alpha_total,
+        exponent_p=exponent_p,
+        horizon_max_steps=horizon,
+    )
+    controller = NetExpectedValueController(
+        task_value=task_val,
+        intervention_cost=cost,
+        fix_probability_if_failing=fix_prob,
+        regression_probability_if_passing=reg_prob,
+    )
+    decision = controller.evaluate(raw_fail)
+    return {
+        "step_index": step_idx,
+        "alpha_step": alpha_step,
+        "should_intervene": decision.should_intervene,
+        "calibrated_fail_probability": decision.calibrated_fail_probability,
+        "net_expected_value": decision.net_expected_value,
+        "min_fail_probability_threshold": decision.min_fail_probability_threshold,
+    }
+
+
 def handle_jsonrpc_message(
     msg: Mapping[str, Any],
     *,
     configured_backends: Sequence[str] | None = None,
     enable_visual_compiler: bool = True,
     enable_context_pruner: bool = True,
+    enable_security_auditor: bool = True,
+    enable_trajectory_guard: bool = True,
 ) -> dict[str, Any] | None:
     """Process a single JSON-RPC 2.0 request or notification and return response dict (or None)."""
     active_schemas = build_mcp_tool_schemas(
         configured_backends=configured_backends,
         enable_visual_compiler=enable_visual_compiler,
         enable_context_pruner=enable_context_pruner,
+        enable_security_auditor=enable_security_auditor,
+        enable_trajectory_guard=enable_trajectory_guard,
     )
     enabled_tool_names = {schema["name"] for schema in active_schemas}
+    if not isinstance(msg, Mapping):
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request: expected JSON object"},
+        }
+    raw_id_candidate = msg.get("id")
+    safe_id = (
+        raw_id_candidate
+        if (
+            raw_id_candidate is None
+            or isinstance(raw_id_candidate, str)
+            or (
+                isinstance(raw_id_candidate, (int, float))
+                and not isinstance(raw_id_candidate, bool)
+                and math.isfinite(float(raw_id_candidate))
+            )
+        )
+        else None
+    )
+    try:
+        _enforce_json_safety(msg)
+    except _InvalidParamsError as exc:
+        if "id" not in msg:
+            return None
+        return {
+            "jsonrpc": "2.0",
+            "id": safe_id,
+            "error": {"code": -32602, "message": f"Invalid params: {exc}"},
+        }
     has_id = "id" in msg
     req_id = msg.get("id")
     if has_id and req_id is not None and (
@@ -903,6 +1139,8 @@ def handle_jsonrpc_message(
             "evaluate_conformal_decision": _tool_evaluate_conformal_decision,
             "prune_context_blocks": _tool_prune_context_blocks,
             "compile_contact_sheet": _tool_compile_contact_sheet,
+            "audit_untrusted_candidates": _tool_audit_untrusted_candidates,
+            "evaluate_trajectory_guard": _tool_evaluate_trajectory_guard,
         }
         handler = dispatch.get(tool_name)
         if handler is None:
@@ -927,7 +1165,7 @@ def handle_jsonrpc_message(
                 "id": req_id,
                 "error": {"code": -32602, "message": f"Invalid params: {exc}"},
             }
-        except (DecisionContractError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        except (DecisionContractError, ValueError, KeyError, TypeError) as exc:
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -984,12 +1222,32 @@ def _parse_content_length_value(raw_len_text: bytes | None) -> int:
     return content_len
 
 
-def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
+def _drain_unterminated_line(stream: BinaryIO, chunk_size: int = 65536) -> None:
+    """Drain remaining bytes of an oversized single line without unbounded memory growth."""
+    while True:
+        chunk = stream.read(chunk_size)
+        if not chunk or b"\n" in chunk:
+            break
+
+
+def _read_next_frame(
+    stream: BinaryIO,
+    *,
+    resync_to_mime: bool = False,
+) -> tuple[bytes | None, bool]:
     """Read next JSON-RPC payload from binary stream, returning `(raw_json_bytes, is_content_length_framed)`."""
     while True:
-        line = stream.readline()
+        line = stream.readline(MAX_FRAME_BYTES + 1)
         if not line:
             return None, False
+        if len(line) > MAX_FRAME_BYTES:
+            if not line.endswith(b"\n"):
+                _drain_unterminated_line(stream)
+            if resync_to_mime:
+                continue
+            raise _FramingInvalidRequestError(
+                f"unframed line exceeds MAX_FRAME_BYTES ({MAX_FRAME_BYTES})"
+            )
         stripped = line.strip()
         if not stripped:
             continue
@@ -1005,9 +1263,14 @@ def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
 
             header_lines_seen = 1
             while True:
-                hdr_line = stream.readline()
+                hdr_line = stream.readline(MAX_FRAME_BYTES + 1)
                 if not hdr_line or hdr_line in (b"\r\n", b"\n"):
                     break
+                if len(hdr_line) > MAX_FRAME_BYTES:
+                    if not hdr_line.endswith(b"\n"):
+                        _drain_unterminated_line(stream)
+                    _drain_mime_headers(stream)
+                    raise _FramingInvalidRequestError("MIME header line exceeds MAX_FRAME_BYTES")
                 header_lines_seen += 1
                 if header_lines_seen > MAX_HEADER_LINES:
                     _drain_mime_headers(stream)
@@ -1033,6 +1296,11 @@ def _read_next_frame(stream: BinaryIO) -> tuple[bytes | None, bool]:
                 return None, True
             return body, True
 
+        if resync_to_mime:
+            # Discard orphaned payload bytes following a rejected MIME Content-Length frame
+            # until the next valid MIME header block or EOF so rejected bodies never execute.
+            continue
+
         return stripped, False
 
 
@@ -1053,34 +1321,41 @@ def serve_stdio(
     configured_backends: Sequence[str] | None = None,
     enable_visual_compiler: bool = True,
     enable_context_pruner: bool = True,
+    enable_security_auditor: bool = True,
+    enable_trajectory_guard: bool = True,
 ) -> int:
     """Run the synchronous `dgem-catalog` MCP JSON-RPC 2.0 server loop until EOF."""
     build_mcp_tool_schemas(
         configured_backends=configured_backends,
         enable_visual_compiler=enable_visual_compiler,
         enable_context_pruner=enable_context_pruner,
+        enable_security_auditor=enable_security_auditor,
+        enable_trajectory_guard=enable_trajectory_guard,
     )
     in_stream = stdin if stdin is not None else sys.stdin.buffer
     out_stream = stdout if stdout is not None else sys.stdout.buffer
+    resync_to_mime = False
 
     while True:
         try:
-            raw_frame, framed = _read_next_frame(in_stream)
+            raw_frame, framed = _read_next_frame(in_stream, resync_to_mime=resync_to_mime)
+            resync_to_mime = False
         except _FramingInvalidRequestError as exc:
-            err_resp = {
+            error_response = {
                 "jsonrpc": "2.0",
                 "id": None,
                 "error": {"code": -32600, "message": f"Invalid Request: {exc}"},
             }
-            _write_frame(out_stream, err_resp, True)
+            _write_frame(out_stream, error_response, True)
+            resync_to_mime = True
             continue
         except ValueError as exc:
-            err_resp = {
+            error_response = {
                 "jsonrpc": "2.0",
                 "id": None,
                 "error": {"code": -32700, "message": f"Framing error: {exc}"},
             }
-            _write_frame(out_stream, err_resp, True)
+            _write_frame(out_stream, error_response, True)
             continue
 
         if raw_frame is None:
@@ -1114,6 +1389,8 @@ def serve_stdio(
             configured_backends=configured_backends,
             enable_visual_compiler=enable_visual_compiler,
             enable_context_pruner=enable_context_pruner,
+            enable_security_auditor=enable_security_auditor,
+            enable_trajectory_guard=enable_trajectory_guard,
         )
         if response is not None:
             _write_frame(out_stream, response, framed)
