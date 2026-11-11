@@ -1,0 +1,40 @@
+# Multimodal Decision Models documentation
+
+To ship fast, calibrated structured decisions across images, UI screens, audio/video streams, retrieved documents, and agent tool calls, `multimodal-decision-models` (`v1.0.0`) decouples decision geometry and finite-sample uncertainty quantification from the underlying inference engine. You define a declarative multi-slot policy once and execute it identically across parallel masked diffusion (`/v1/systemone`), autoregressive token logprobs (`/v1/chat/completions`), frontier multimodal verifiers (`VertexGeminiBackend`), and logprob-free sampled models (`BlackBoxSampledBackend`).
+
+## Choose your path by role
+
+Select the guide sequence that matches what you are building:
+
+| Role | Primary goal | Recommended reading path |
+| :--- | :--- | :--- |
+| **Model & ML Developers** | Calibrate posteriors, bound family-wise error rates across multi-slot workflows, route wide catalogs, and distill System-2 reasoning into fast System-1 readouts without corrupting safety abstentions. | 1. [Calibration, conformal sets, and risk control](calibration-and-conformal.md)<br>2. [Wide-catalog routing and taxonomy tries](wide-catalog-routing.md)<br>3. [Distillation, tuning, and post-tuning recalibration](distillation-and-tuning.md)<br>4. [Research paper manuscript](research_paper.md) |
+| **Application & Agent Builders** | Wire Python, Go, or TypeScript SDKs into services, compile visual and audio/video evidence into single-pass inputs, guard Google ADK / LangGraph / Genkit tool calls, and compact agent context windows. | 1. [Quickstart and four-paradigm backends](quickstart-and-paradigms.md)<br>2. [Multimodal compilers for vision, UI, and audio/video](multimodal-compilers.md)<br>3. [Agentic shared control, tool guards, and context pruning](agentic-shared-control.md)<br>4. [Practical use-case recipes](practical_use_cases.md) |
+| **Engineering Managers & Architects** | Place two-stage System-1 to System-2 cascades inside production architectures, enforce fail-closed SLA quarantines, and deploy least-privilege Cloud Run and Vertex AI infrastructure. | 1. [Quickstart and four-paradigm backends](quickstart-and-paradigms.md)<br>2. [Production deployment, Terraform, and MCP operations](production-deployment.md)<br>3. [Executive research summary](research_summary.md)<br>4. [Architecture specification](architecture.md) |
+
+## Progressive guide index
+
+| Guide | What you accomplish | Key modules and templates |
+| :--- | :--- | :--- |
+| **[Quickstart and four-paradigm backends](quickstart-and-paradigms.md)** | Run your first calibrated decision in Python, Go, or TypeScript and compare `mdm`, `dgem`, and managed single-pass decision endpoints. | [`backends.py`](../src/multimodal_decision_models/backends.py), [`pkg/mdm/`](../pkg/mdm/), [`sdk/ts/`](../sdk/ts/) |
+| **[Calibration, conformal sets, and risk control](calibration-and-conformal.md)** | Fit post-hoc temperature scalers, fuse priors only when Stage 1 hesitates, compute stateless `HMAC-SHA256` RAPS sets, and bound multi-slot workflow error rates. | [`calibration.py`](../src/multimodal_decision_models/calibration.py), [`conformal.py`](../src/multimodal_decision_models/conformal.py) |
+| **[Wide-catalog routing and taxonomy tries](wide-catalog-routing.md)** | Scale from `26` single-letter options to `10,000+` SKUs or tools without multi-token BPE splits or unpartitioned trie aliasing. | [`hierarchy.py`](../src/multimodal_decision_models/hierarchy.py), [`shortlist.py`](../src/multimodal_decision_models/shortlist.py), [`embedding_index.py`](../src/multimodal_decision_models/embedding_index.py) |
+| **[Multimodal compilers for vision, UI, and audio/video](multimodal-compilers.md)** | Compile lighting-normalized visual contact sheets, Set-of-Marks UI grids, and streaming PCM16 audio/video slices using zero external media libraries. | [`visual_compiler.py`](../src/multimodal_decision_models/visual_compiler.py), [`som_navigator.py`](../src/multimodal_decision_models/som_navigator.py), [`audio_video_decision.py`](../src/multimodal_decision_models/audio_video_decision.py) |
+| **[Agentic shared control, tool guards, and context pruning](agentic-shared-control.md)** | Enforce Action-Stakes confidence gates ($V_{\text{irrev}}$ vs. $V_{\text{rev}}$), neutralize `<untrusted_data>` prompt injections, and prune trajectory context by `58.85%`. | [`adapters.py`](../src/multimodal_decision_models/adapters.py), [`context_pruner.py`](../src/multimodal_decision_models/context_pruner.py), [`templates/tool_safety_gate.json.tmpl`](../templates/tool_safety_gate.json.tmpl) |
+| **[Distillation, tuning, and post-tuning recalibration](distillation-and-tuning.md)** | Prevent `<think>` token probability collapse, distill reasoning traces via Equation 12 soft posteriors, and preserve `must_ask` safety states with Selective Teacher Brier SFT. | [`calibration.py`](../src/multimodal_decision_models/calibration.py), [`eval_suite.py`](../src/multimodal_decision_models/eval_suite.py) |
+| **[Production deployment, Terraform, and MCP operations](production-deployment.md)** | Deploy Cloud Run orchestrators and optional Vertex AI endpoints with digest-pinned Terraform, content-addressed SHA-256 caching, and dynamic MCP `stdio` schemas. | [`deploy/terraform/`](../deploy/terraform/), [`contracts.py`](../src/multimodal_decision_models/contracts.py), [`mcp_server.py`](../src/multimodal_decision_models/mcp_server.py) |
+
+## Canonical policy templates
+
+The [`templates/`](../templates/) directory provides 8 production `.json.tmpl` policy schemas paired with `.examples.json` input/output fixtures:
+
+| Template | Primary pattern |
+| :--- | :--- |
+| [`tool_safety_gate.json.tmpl`](../templates/tool_safety_gate.json.tmpl) | Pre-execution agent tool guard isolating `<untrusted_data>` from authenticated user intent. |
+| [`agent_context_pruning.json.tmpl`](../templates/agent_context_pruning.json.tmpl) | 8-slot trajectory context compaction (`full`, `stub`, `drop`) feeding exact `MCKP` pruning. |
+| [`audio_video_triage.json.tmpl`](../templates/audio_video_triage.json.tmpl) | Full-duplex `VAP` turn-taking and cross-modal `AVEL` spoof detection. |
+| [`live_checklist_verify.json.tmpl`](../templates/live_checklist_verify.json.tmpl) | Multi-criterion compliance and groundedness verification with abstention gating. |
+| [`swarm_lock_arbiter.json.tmpl`](../templates/swarm_lock_arbiter.json.tmpl) | Deterministic multi-agent resource lock arbitration across overlapping edit paths. |
+| [`multimodal/contact_sheet_verify.json.tmpl`](../templates/multimodal/contact_sheet_verify.json.tmpl) | Evidence-First Stage-2B contact-sheet SKU disambiguation with pack-weight reading. |
+| [`multimodal/entity_resolution_dedup.json.tmpl`](../templates/multimodal/entity_resolution_dedup.json.tmpl) | Pairwise catalog entity deduplication feeding transitive triangle-consistency projection. |
+| [`multimodal/ui_pathfinder_som.json.tmpl`](../templates/multimodal/ui_pathfinder_som.json.tmpl) | Set-of-Marks UI element grounding across `next_target_mark`, `element_state`, `loop_or_error_detected`, and `goal_progress_score`. |
