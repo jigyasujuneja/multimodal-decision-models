@@ -126,9 +126,16 @@ func TestConformalEdgeCasesAndAbstainEscalation(t *testing.T) {
 	if !math.IsInf(qInf, 1) {
 		t.Fatalf("expected +Inf when ceil((n+1)*(1-alpha)) > n, got %v", qInf)
 	}
-	fullSet, err := ConformalPredictionSet(smallProbs[0], qInf, ConformalConfig{})
+	fullSetDefault, err := ConformalPredictionSet(smallProbs[0], qInf, ConformalConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error on +Inf qHat: %v", err)
+	}
+	if len(fullSetDefault.PredictionSet) != 3 || fullSetDefault.ContainsAbstain || !fullSetDefault.ShouldEscalate {
+		t.Fatalf("expected full set of 3 with non-singleton escalation and opt-in abstain disabled, got %+v", fullSetDefault)
+	}
+	fullSet, err := ConformalPredictionSet(smallProbs[0], qInf, ConformalConfig{AbstainKeys: StandardConformalAbstainKeys()})
+	if err != nil {
+		t.Fatalf("unexpected error on +Inf qHat with StandardConformalAbstainKeys: %v", err)
 	}
 	if len(fullSet.PredictionSet) != 3 || !fullSet.ContainsAbstain || !fullSet.ShouldEscalate {
 		t.Fatalf("expected full set of 3 with abstain escalation, got %+v", fullSet)
@@ -150,8 +157,8 @@ func TestConformalEdgeCasesAndAbstainEscalation(t *testing.T) {
 		t.Fatalf("expected sku_1, got %v", confident.PredictionSet)
 	}
 
-	// Singleton abstain key DOES trigger escalation
-	abstainSing, err := ConformalPredictionSet(
+	// Singleton abstain key does NOT escalate by default, and DOES escalate when opted in
+	abstainDefault, err := ConformalPredictionSet(
 		map[string]float64{"none_of_the_above": 0.94, "sku_1": 0.04, "sku_2": 0.02},
 		0.20,
 		ConformalConfig{Method: "raps", LamReg: 0.01, KReg: 1},
@@ -159,8 +166,20 @@ func TestConformalEdgeCasesAndAbstainEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if !abstainDefault.Singleton || abstainDefault.ContainsAbstain || abstainDefault.ShouldEscalate {
+		t.Fatalf("expected singleton abstain not to escalate without opt-in AbstainKeys, got %+v", abstainDefault)
+	}
+
+	abstainSing, err := ConformalPredictionSet(
+		map[string]float64{"none_of_the_above": 0.94, "sku_1": 0.04, "sku_2": 0.02},
+		0.20,
+		ConformalConfig{Method: "raps", LamReg: 0.01, KReg: 1, AbstainKeys: StandardConformalAbstainKeys()},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !abstainSing.Singleton || !abstainSing.ContainsAbstain || !abstainSing.ShouldEscalate {
-		t.Fatalf("expected singleton abstain to escalate, got %+v", abstainSing)
+		t.Fatalf("expected singleton abstain to escalate when StandardConformalAbstainKeys() is passed, got %+v", abstainSing)
 	}
 
 	// Input contract rejections
@@ -331,12 +350,16 @@ func TestConformalTieSymmetryAndStatefulRandomizedCoverage(t *testing.T) {
 
 func TestDefaultConformalConfigRapsZeroBoundariesAndNineKeyAbstainUnion(t *testing.T) {
 	defCfg := DefaultConformalConfig()
-	if defCfg.Method != "raps" || defCfg.Alpha != 0.10 || defCfg.LamReg != 0.01 || defCfg.KReg != 1 || len(defCfg.AbstainKeys) != 9 {
+	if defCfg.Method != "raps" || defCfg.Alpha != 0.10 || defCfg.LamReg != 0.01 || defCfg.KReg != 1 || len(defCfg.AbstainKeys) != 0 {
 		t.Fatalf("unexpected DefaultConformalConfig(): %+v", defCfg)
 	}
-	defCfg.AbstainKeys[0] = "mutated_caller_copy"
-	if DefaultConformalConfig().AbstainKeys[0] != "0" {
-		t.Fatal("DefaultConformalConfig() must return an isolated AbstainKeys slice copy")
+	stdKeys := StandardConformalAbstainKeys()
+	if len(stdKeys) != 9 || stdKeys[0] != "0" {
+		t.Fatalf("unexpected StandardConformalAbstainKeys(): %+v", stdKeys)
+	}
+	stdKeys[0] = "mutated_caller_copy"
+	if StandardConformalAbstainKeys()[0] != "0" {
+		t.Fatal("StandardConformalAbstainKeys() must return an isolated slice copy")
 	}
 
 	sixOpts := map[string]float64{
@@ -387,8 +410,8 @@ func TestDefaultConformalConfigRapsZeroBoundariesAndNineKeyAbstainUnion(t *testi
 		t.Fatalf("expected singleton [o1] at qHat=0.20 under KReg=0 LamReg=0.20, got %+v err=%v", rank1Set, err)
 	}
 
-	// All 9 default abstain keys (case-insensitive and whitespace-trimmed) escalate when AbstainKeys is nil,
-	// while explicit empty non-nil AbstainKeys: []string{} opts out cleanly.
+	// Abstain keys are opt-in by default (nil or empty AbstainKeys does NOT escalate valid labels such as "oos" or "0"),
+	// while StandardConformalAbstainKeys() escalates all 9 catch-all keys case-insensitively and whitespace-trimmed.
 	nineKeys := []string{
 		"0",
 		"abstain",
@@ -406,12 +429,12 @@ func TestDefaultConformalConfigRapsZeroBoundariesAndNineKeyAbstainUnion(t *testi
 	for _, ak := range nineKeys {
 		probs := map[string]float64{ak: 0.96, "valid_sku": 0.04}
 		resNil, err := ConformalPredictionSet(probs, 0.20, ConformalConfig{Method: "lac"})
-		if err != nil || !resNil.Singleton || !resNil.ContainsAbstain || !resNil.ShouldEscalate {
-			t.Fatalf("expected default abstain escalation for %q, got res=%+v err=%v", ak, resNil, err)
+		if err != nil || !resNil.Singleton || resNil.ContainsAbstain || resNil.ShouldEscalate {
+			t.Fatalf("expected nil AbstainKeys not to escalate %q by default, got res=%+v err=%v", ak, resNil, err)
 		}
-		resOptOut, err := ConformalPredictionSet(probs, 0.20, ConformalConfig{Method: "lac", AbstainKeys: []string{}})
-		if err != nil || !resOptOut.Singleton || resOptOut.ContainsAbstain || resOptOut.ShouldEscalate {
-			t.Fatalf("expected empty AbstainKeys slice to opt out for %q, got res=%+v err=%v", ak, resOptOut, err)
+		resOptIn, err := ConformalPredictionSet(probs, 0.20, ConformalConfig{Method: "lac", AbstainKeys: StandardConformalAbstainKeys()})
+		if err != nil || !resOptIn.Singleton || !resOptIn.ContainsAbstain || !resOptIn.ShouldEscalate {
+			t.Fatalf("expected StandardConformalAbstainKeys() escalation for %q, got res=%+v err=%v", ak, resOptIn, err)
 		}
 	}
 }

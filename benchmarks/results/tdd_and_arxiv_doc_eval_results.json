@@ -1598,7 +1598,7 @@
     }
   },
   {
-    "file": "/usr/local/google/home/jjuneja/.gemini/jetski/scratch/teamwork_multimodal_dm/.worktrees/decision_lab_exp49/docs/preprint/paper.typ",
+    "file": "docs/preprint/paper.typ",
     "filename": "paper.typ",
     "archetype": "arxiv_typst",
     "overall_binary_score": 1,
@@ -1777,7 +1777,7 @@
     }
   },
   {
-    "file": "/usr/local/google/home/jjuneja/.gemini/jetski/scratch/teamwork_multimodal_dm/.worktrees/decision_lab_exp49/docs/preprint/paper.md",
+    "file": "docs/preprint/paper.md",
     "filename": "paper.md",
     "archetype": "arxiv_md",
     "overall_binary_score": 1,

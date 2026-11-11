@@ -89,6 +89,7 @@ from .calibration import (
 )
 from .conformal import (
     DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+    STANDARD_CONFORMAL_ABSTAIN_KEYS,
     ConformalCalibrationResult,
     ConformalSetResult,
     MondrianCalibrationResult,
@@ -269,6 +270,7 @@ __all__ = [
     "MAX_SLOTS_PER_PASS",
     "MCP_SERVER_NAME",
     "OPENAI_MAX_TOP_LOGPROBS",
+    "STANDARD_CONFORMAL_ABSTAIN_KEYS",
     "TURN_TAKING_ACTIONS",
     "UNIVERSAL_256_DECISION_CODES",
     "UNTRUSTED_BOUNDARY_NOTICE",

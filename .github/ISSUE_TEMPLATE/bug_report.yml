@@ -1,0 +1,25 @@
+name: Bug Report
+description: Report a calibration discrepancy, backend contract failure, or documentation error
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Concise description of the bug and affected module (`conformal`, `backends`, `hierarchy`, `visual_compiler`, `audio_video_decision`, `pkg/mdm`, or `sdk/ts`).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal Reproduction
+      description: Minimal self-contained snippet or command that reproduces the issue (use RFC 2606 `example.com` hosts and synthetic inputs).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. Actual Behavior
+      description: What finite-sample bound, HTTP status, or output structure was expected versus observed?
+    validations:
+      required: true

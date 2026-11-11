@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .calibration import normalized_entropy, pre_gated_bayesian_poe_fusion
 from .shortlist import split_identifier_tokens
+from .types import MAX_EXTENDED_OPTIONS_PER_SLOT
 from .types import (
     DEFAULT_HESITATION_THRESHOLD,
     MAX_OPTIONS_PER_SLOT,
@@ -73,6 +74,103 @@ def packed_bracket_pass_count(
     s_cap = max(1, max_slots_per_pass)
     round1_brackets = math.ceil(num_options / b_size)
     return 1 + math.ceil(round1_brackets / s_cap)
+
+
+@dataclass(frozen=True)
+class WideRoutingRecommendation:
+    """Empirically validated wide-option routing recommendation for a catalog of size ``K``."""
+
+    num_options: int
+    strategy: str
+    label_scheme: str
+    expected_passes: float
+    avoids_unpartitioned_trie_aliasing: bool
+    rationale: str
+
+
+def recommend_wide_routing_strategy(
+    num_options: int,
+    *,
+    supports_az_aa_52: bool = True,
+    supports_extended_255: bool = False,
+    has_embeddings: bool = False,
+    supports_multi_slot_canvas: bool = True,
+) -> WideRoutingRecommendation:
+    """Select the empirically optimal wide-option readout strategy for ``num_options`` candidates.
+
+    Codifies the benchmarked routing ladder across ``dgem`` and ``MDM-Bench``:
+      1. ``2 <= K <= 26``: ``direct_az`` (single-token ``[A-Z]`` readout, 1 pass).
+      2. ``27 <= K <= 52`` (when ``supports_az_aa_52=True``): ``direct_az_aa`` (52-option ``A..Z, AA..AZ``, 1 pass).
+      3. ``53 <= K <= 256`` (when ``supports_extended_255=True``): ``direct_universal_255`` (``UNIVERSAL_256_DECISION_CODES``, 1 pass).
+      4. ``K > 26`` with dense embeddings (``has_embeddings=True``): ``csls_shortlist_1pass`` (CSLS Top-20 + cosine ``prior_logits``, 1 pass).
+      5. ``K <= 176`` on multi-slot canvas (``supports_multi_slot_canvas=True``): ``mtp_partitioned_1pass`` (1 coarse + <= 7 disjoint fine bands, 1 pass).
+      6. Larger taxonomies without embeddings: ``hesitation_hybrid`` (2-level ``[A-Z]`` taxonomy with conditional Pass-2 beam, ~1.2 passes).
+
+    Unpartitioned 1-pass ``mtp_trie`` is intentionally omitted from recommendations because shared fine codes
+    marginalize across coarse parents when ``K > 26``.
+    """
+    if isinstance(num_options, bool) or not isinstance(num_options, int) or num_options < 2:
+        raise ValueError(f"num_options must be an integer >= 2, got {num_options!r}")
+
+    if num_options <= MAX_OPTIONS_PER_SLOT:
+        return WideRoutingRecommendation(
+            num_options=num_options,
+            strategy="direct_az",
+            label_scheme="az",
+            expected_passes=1.0,
+            avoids_unpartitioned_trie_aliasing=True,
+            rationale="Fits directly in a single-pass <= 26 [A-Z] decision slot.",
+        )
+
+    if supports_az_aa_52 and num_options <= 52:
+        return WideRoutingRecommendation(
+            num_options=num_options,
+            strategy="direct_az_aa",
+            label_scheme="az_aa",
+            expected_passes=1.0,
+            avoids_unpartitioned_trie_aliasing=True,
+            rationale="Fits in a single-pass 52-option (az_aa) slot without hierarchical fine-code aliasing.",
+        )
+
+    if supports_extended_255 and num_options <= MAX_EXTENDED_OPTIONS_PER_SLOT:
+        return WideRoutingRecommendation(
+            num_options=num_options,
+            strategy="direct_universal_255",
+            label_scheme="universal_256",
+            expected_passes=1.0,
+            avoids_unpartitioned_trie_aliasing=True,
+            rationale="Uses 256 BPE-safe single-token uppercase codes (UNIVERSAL_256_DECISION_CODES) in 1 pass.",
+        )
+
+    if has_embeddings:
+        return WideRoutingRecommendation(
+            num_options=num_options,
+            strategy="csls_shortlist_1pass",
+            label_scheme="az",
+            expected_passes=1.0,
+            avoids_unpartitioned_trie_aliasing=True,
+            rationale="Prunes wide catalog via CSLS Top-20 shortlist with log-softmax cosine prior_logits in 1 pass.",
+        )
+
+    max_partitioned_leaves = (MAX_SLOTS_PER_PASS - 1) * (MAX_OPTIONS_PER_SLOT - 1) + 1
+    if supports_multi_slot_canvas and num_options <= max_partitioned_leaves:
+        return WideRoutingRecommendation(
+            num_options=num_options,
+            strategy="mtp_partitioned_1pass",
+            label_scheme="az",
+            expected_passes=1.0,
+            avoids_unpartitioned_trie_aliasing=True,
+            rationale="Packs 1 coarse slot plus <= 7 disjoint fine bands onto an 8-slot canvas with zero aliasing.",
+        )
+
+    return WideRoutingRecommendation(
+        num_options=num_options,
+        strategy="hesitation_hybrid",
+        label_scheme="az",
+        expected_passes=1.2,
+        avoids_unpartitioned_trie_aliasing=True,
+        rationale="Executes Pass-2 conditional top-b beam refinement whenever coarse hesitation exceeds threshold.",
+    )
 
 
 @dataclass(frozen=True)

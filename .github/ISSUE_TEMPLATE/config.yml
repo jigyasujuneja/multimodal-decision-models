@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Architecture & Formal Guarantees Reference
+    url: https://github.com/jigyasujuneja/multimodal-decision-models/blob/main/docs/research_paper.md
+    about: Consult the mathematical formulations and empirical benchmark tables before filing a question.

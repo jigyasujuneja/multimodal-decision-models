@@ -1,0 +1,39 @@
+{
+  "examples": [
+    {
+      "name": "typical",
+      "unambiguous": true,
+      "variables": {
+        "agent_1": "Edit src/multimodal_decision_models/conformal.py to add hmac_uint64",
+        "agent_2": "Edit src/multimodal_decision_models/conformal.py to refactor nonconformity ranking",
+        "agent_3": "Edit docs/architecture.md to document HMAC tie-breaking",
+        "agent_4": "Run PYTHONPATH=src python -m unittest discover -s tests",
+        "samples": 1
+      },
+      "expected_answers": {
+        "agent_1_lock_action": "grant_lock",
+        "agent_2_lock_action": "serialize_after_peer",
+        "file_write_collision": true,
+        "shared_state_hazard": "same_file_edit_race"
+      }
+    },
+    {
+      "name": "edge",
+      "variables": {
+        "agent_1": "Edit pkg/mdm/conformal.go",
+        "agent_2": "Edit sdk/ts/src/calibration.ts",
+        "agent_3": "Edit deploy/terraform/main.tf",
+        "agent_4": "Edit docs/index.md",
+        "samples": 1
+      },
+      "expected_answers": {
+        "file_write_collision": false,
+        "shared_state_hazard": "disjoint_safe"
+      }
+    },
+    {
+      "name": "minimal",
+      "variables": {}
+    }
+  ]
+}

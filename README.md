@@ -204,8 +204,8 @@ See [`benchmarks/results/audio_video_v080_report.md`](benchmarks/results/audio_v
 
 | Public / Companion Suite | Scale & Modality | Standalone Baseline | Calibrated Stack (`multimodal-decision-models` + `dgem`) | Report Reference |
 | :--- | :--- | :---: | :---: | :--- |
-| **`Decision Index 0.2.1` (38 Suites)** | `155,390` requests (NLU, routing, safety) | Raw `DiffusionGemma`: `72.2%` acc (`0.203` ECE) | **`Decision Gemma rc3`: `86.4%` acc (`0.042` ECE, `55–62 ms`)** | `decision-lab` Preprint Table 1 & C.1 |
-| **`JevBench SystemOne`** | $n = 231 \times 3$ hard semantic multi-slot | Raw `DiffusionGemma`: `84.0%` acc (`0.847` AUROC) | **`Decision Gemma rc3`: `87.9%` acc (`0.935` AUROC, `p = 0.004`)** | `decision-lab` Preprint Table C.2 |
+| **`Decision Index 0.2.1` (38 Suites)** | `155,390` requests (NLU, routing, safety) | Raw `DiffusionGemma`: `72.2%` acc (`0.203` ECE) | **`Decision Gemma rc3`: `86.4%` acc (`0.042` ECE, `55–62 ms`)** | `DecisionGemma` Preprint Table 1 & C.1 |
+| **`JevBench SystemOne`** | $n = 231 \times 3$ hard semantic multi-slot | Raw `DiffusionGemma`: `84.0%` acc (`0.847` AUROC) | **`Decision Gemma rc3`: `87.9%` acc (`0.935` AUROC, `p = 0.004`)** | `DecisionGemma` Preprint Table C.2 |
 | **`ScreenSpot` & `RefCOCO` Grounding** | $n = 108$ GUI + $n = 120$ visual grounding | Continuous 21-bin coord regression: `11.6%` GUI hit | **Discrete Set-of-Marks (`SoM`) Readout: `78.1%` GUI center hit** | [`som_navigator.py`](src/multimodal_decision_models/som_navigator.py) |
 | **`LocalLLaMA/typed-decisions`** | $N = 500$ slice / $N = 2,000$ full (7 models) | `jev`: `75.83%` acc (`0.4090` Brier); `60.42%` 5-slot cov | **Pre-Gated PoE: `83.50%` acc (`0.2449` Brier); `97.92%` 5-slot cov** | [`real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) |
 | **`Hanno-Labs/decision-bench` (`arXiv:2610.03935`)** | $K \in [2, 255]$ bijection + $N = 300$ KD | Unstripped `<think>`: `31.33%` acc; `Kev-4B`: `65.33%` | **`255/255` single-token codes; Eq. (12) KD: `70.00%` acc (`0.2499` KL)** | [`real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) |

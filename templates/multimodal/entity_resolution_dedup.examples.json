@@ -1,0 +1,35 @@
+{
+  "examples": [
+    {
+      "name": "typical",
+      "unambiguous": true,
+      "variables": {
+        "title_a": "San Pellegrino Sparkling Natural Mineral Water 6x330ml Cans",
+        "title_b": "San Pellegrino Sparkling Mineral Water 330ml Single Can",
+        "samples": 1
+      },
+      "expected_answers": {
+        "entity_relation": "sibling_variant",
+        "pack_quantity_match": "multipack_vs_single_mismatch",
+        "merge_action": "link_as_variant_family"
+      }
+    },
+    {
+      "name": "edge",
+      "variables": {
+        "title_a": "Organic Oat Barista Edition 1L Carton (Pack of 6)",
+        "title_b": "Barista Oat Milk 6 x 1000ml Case",
+        "samples": 1
+      },
+      "expected_answers": {
+        "entity_relation": "exact_duplicate",
+        "pack_quantity_match": "identical_pack_and_volume",
+        "merge_action": "auto_merge_canonical"
+      }
+    },
+    {
+      "name": "minimal",
+      "variables": {}
+    }
+  ]
+}
