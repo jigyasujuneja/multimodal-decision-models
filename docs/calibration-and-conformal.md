@@ -66,7 +66,10 @@ On the 10-model calibration benchmark (`benchmarks/results/multimodel_benchmark_
 Stateful PRNG streams produce different prediction sets when requests arrive in different orders across worker threads. Passing `seed_key` and `item_key` switches `aps` and `raps` to stateless `HMAC-SHA256` randomization (`hmac_uint64` and `hmac_uniform_float64`), guaranteeing identical sets regardless of batch permutation across Python, Go, and TypeScript:
 
 ```python
-from multimodal_decision_models import conformal_prediction_set
+from multimodal_decision_models import (
+    STANDARD_CONFORMAL_ABSTAIN_KEYS,
+    conformal_prediction_set,
+)
 
 result = conformal_prediction_set(
     probs={"approve": 0.46, "manual_review": 0.46, "abstain": 0.08},
@@ -75,10 +78,13 @@ result = conformal_prediction_set(
     randomized=True,
     seed_key="dgem-conformal-v1",
     item_key="order-8841:disposition",
+    abstain_keys=STANDARD_CONFORMAL_ABSTAIN_KEYS,
 )
-# Escalate whenever |C_alpha(x)| != 1 or an abstain option enters C_alpha(x)
+# Escalate whenever |C_alpha(x)| != 1 or an opted-in abstain option enters C_alpha(x)
 should_escalate = result.should_escalate
 ```
+
+To prevent false singleton escalations on datasets where labels such as `"oos"` (`CLINC150`) or `"0"` are valid target classes, conformal abstain escalation is empty by default (`DEFAULT_CONFORMAL_ABSTAIN_KEYS = frozenset()`, Go `DefaultConformalConfig().AbstainKeys == nil`, and TypeScript `DEFAULT_ABSTAIN_LABELS = []`). Pass `STANDARD_CONFORMAL_ABSTAIN_KEYS` (Go `StandardConformalAbstainKeys()`, TypeScript `STANDARD_ABSTAIN_LABELS`) or custom catch-all keys when your schema includes explicit open-world abstention options. Likewise, logprob extractors (`OpenAILogprobBackend`, `VertexGeminiBackend`, and TypeScript `decideChatLogprobs`) aggregate whitespace-equivalent SentencePiece and BPE subword tokens (`"A"` and `" A"`) via log-space `logaddexp` rather than taking a single-token maximum, preserving full option probability mass before calibration.
 
 ## Bound multi-slot workflows with Joint Conformal
 
