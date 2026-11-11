@@ -17,8 +17,10 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import {
+  DEFAULT_ABSTAIN_LABELS,
   MDMClient,
   MDMValidationError,
+  STANDARD_ABSTAIN_LABELS,
   applyTemperature,
   calibrateConformalQuantile,
   calibrateMultiSlotJointConformal,
@@ -91,10 +93,30 @@ async function runTests() {
   });
   assert.deepEqual(setRun1.predictionSet, setRun2.predictionSet);
 
+  assert.equal(DEFAULT_ABSTAIN_LABELS.length, 0);
+  assert.equal(STANDARD_ABSTAIN_LABELS.length, 9);
+  const oosDefaultSingleton = conformalPredictionSet(
+    { oos: 0.96, balance: 0.04 },
+    0.2,
+    { method: "lac" },
+  );
+  assert.equal(oosDefaultSingleton.singleton, true);
+  assert.equal(oosDefaultSingleton.containsAbstain, false);
+  assert.equal(oosDefaultSingleton.shouldEscalate, false);
+
+  const oosOptInSingleton = conformalPredictionSet(
+    { oos: 0.96, balance: 0.04 },
+    0.2,
+    { method: "lac", abstainLabels: STANDARD_ABSTAIN_LABELS },
+  );
+  assert.equal(oosOptInSingleton.singleton, true);
+  assert.equal(oosOptInSingleton.containsAbstain, true);
+  assert.equal(oosOptInSingleton.shouldEscalate, true);
+
   const abstainSet = conformalPredictionSet(
     { approve: 0.48, abstain: 0.47, reject: 0.05 },
     0.85,
-    { method: "raps" },
+    { method: "raps", abstainLabels: STANDARD_ABSTAIN_LABELS },
   );
   assert.equal(abstainSet.containsAbstain, true);
   assert.equal(abstainSet.shouldEscalate, true);
@@ -550,6 +572,45 @@ async function runTests() {
   assert.ok(neutralizeUntrustedDelimiters(pathologicalSpaces, 50_000).startsWith("<untrusted_data>"));
   assert.ok(neutralizeUntrustedDelimiters(pathologicalDashes, 50_000).startsWith("<untrusted_data>"));
   assert.ok(performance.now() - redosStart < 250);
+
+  // 11. decideChatLogprobs aggregates whitespace-equivalent subword tokens ("A" + " A") via logaddexp.
+  const subwordClient = new MDMClient({
+    baseUrl: "https://api.example.com",
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              logprobs: {
+                content: [
+                  {
+                    top_logprobs: [
+                      { token: "A", logprob: Math.log(0.45) },
+                      { token: " A", logprob: Math.log(0.4) },
+                      { token: "B", logprob: Math.log(0.15) },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+  const subwordResp = await subwordClient.decideChatLogprobs({
+    model: "mock-logprob-v1",
+    state: "route ticket",
+    questions: {
+      q: {
+        type: "choice",
+        instructions: "Pick option",
+        criteria: { opt_a: "Alpha", opt_b: "Beta" },
+      },
+    },
+  });
+  assert.ok(Math.abs(subwordResp.slots.q.rawProbabilities.opt_a - 0.85) < 1e-6);
+  assert.ok(Math.abs(subwordResp.slots.q.rawProbabilities.opt_b - 0.15) < 1e-6);
 
   console.log("PASSED: @mdm/client TypeScript SDK tests (all assertions green).");
 }

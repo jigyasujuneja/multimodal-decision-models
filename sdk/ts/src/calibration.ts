@@ -31,7 +31,7 @@ export const DEFAULT_CONFORMAL_SEED_KEY = "dgem-conformal-v1";
 export const CONFORMAL_SCORE_TOLERANCE = 1e-12;
 export const MAX_TEMPERATURE = 20.0;
 
-export const DEFAULT_ABSTAIN_LABELS: readonly string[] = [
+export const STANDARD_ABSTAIN_LABELS: readonly string[] = [
   "0",
   "abstain",
   "insufficient_evidence",
@@ -42,6 +42,8 @@ export const DEFAULT_ABSTAIN_LABELS: readonly string[] = [
   "uncertain",
   "unknown",
 ];
+
+export const DEFAULT_ABSTAIN_LABELS: readonly string[] = [];
 
 interface OptionProbability {
   readonly name: string;

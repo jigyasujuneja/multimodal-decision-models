@@ -692,21 +692,35 @@ export class MDMClient {
         );
       }
 
-      const letterLogprobs = nullProtoRecord<number>();
+      const exactTokenLogprobs = nullProtoRecord<number>();
       for (const cand of topCandidates) {
         if (!cand || typeof cand !== "object") {
           continue;
         }
         const candObj = cand as Record<string, unknown>;
-        const rawTok = typeof candObj["token"] === "string" ? candObj["token"].trim() : "";
+        const unstrippedTok = typeof candObj["token"] === "string" ? candObj["token"] : "";
+        const trimmedTok = unstrippedTok.trim();
         const lp = candObj["logprob"];
         if (
-          Object.hasOwn(codeMap, rawTok) &&
+          Object.hasOwn(codeMap, trimmedTok) &&
           typeof lp === "number" &&
           Number.isFinite(lp) &&
-          !Object.hasOwn(letterLogprobs, rawTok)
+          (!Object.hasOwn(exactTokenLogprobs, unstrippedTok) ||
+            lp > (exactTokenLogprobs[unstrippedTok] as number))
         ) {
+          exactTokenLogprobs[unstrippedTok] = lp;
+        }
+      }
+      const letterLogprobs = nullProtoRecord<number>();
+      for (const [unstrippedTok, lp] of Object.entries(exactTokenLogprobs)) {
+        const rawTok = unstrippedTok.trim();
+        if (!Object.hasOwn(letterLogprobs, rawTok)) {
           letterLogprobs[rawTok] = lp;
+        } else {
+          const prevLp = letterLogprobs[rawTok] as number;
+          const hi = Math.max(prevLp, lp);
+          const lo = Math.min(prevLp, lp);
+          letterLogprobs[rawTok] = hi + Math.log1p(Math.exp(lo - hi));
         }
       }
       if (Object.keys(letterLogprobs).length === 0) {
