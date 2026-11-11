@@ -267,7 +267,7 @@ class V100AdaptersAndDynamicMcpTest(unittest.TestCase):
         self.assertIn("<untrusted_data>", str(seen_states[0]))
 
     def test_dynamic_mcp_tool_schemas_and_hmac_conformal_rpc(self) -> None:
-        self.assertEqual(mdm.MCP_SERVER_VERSION, "1.0.0")
+        self.assertEqual(mdm.MCP_SERVER_VERSION, "1.1.0")
         minimal_tools = mdm.build_mcp_tool_schemas(
             configured_backends=["dgem_systemone", "vertex_gemini"],
             enable_visual_compiler=False,

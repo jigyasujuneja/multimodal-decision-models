@@ -46,7 +46,7 @@ from .trajectory_control import NetExpectedValueController, polynomial_alpha_at_
 from .visual_compiler import ImageBuffer, compile_dual_buffer_contact_sheet, decode_png, decode_ppm
 
 MCP_SERVER_NAME = "dgem-catalog"
-MCP_SERVER_VERSION = "1.0.0"
+MCP_SERVER_VERSION = "1.1.0"
 SUPPORTED_BACKEND_PARADIGMS: tuple[str, ...] = (
     "dgem_systemone",
     "openai_logprobs",

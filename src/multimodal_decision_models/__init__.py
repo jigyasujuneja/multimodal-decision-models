@@ -324,7 +324,7 @@ from .visual_compiler import (
     shades_of_gray_white_balance,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "ADKToolGuardDecision",

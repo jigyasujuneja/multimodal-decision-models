@@ -1,6 +1,6 @@
 {
   "name": "@mdm/client",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Zero-dependency TypeScript SDK for Multimodal Decision Models (MDM): /v1/systemone, Vertex :rawPredict, and /v1/chat/completions logprob clients, stateless HMAC conformal prediction, multi-slot joint conformal, Bayesian PoE fusion, and Genkit JS Action-Stakes tool guards.",
   "license": "Apache-2.0",
   "type": "module",
