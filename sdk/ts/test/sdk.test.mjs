@@ -27,12 +27,14 @@ import {
   conformalPredictionSet,
   createGenkitDecisionStep,
   createGenkitToolGuard,
+  evaluateNevcGate,
   fusePriorProbabilities,
   hmacUint64,
   hmacUniformFloat64,
   multiSlotJointConformalSets,
   neutralizeUntrustedDelimiters,
   normalizeCosinePriorLogits,
+  polynomialAlphaAtStep,
 } from "../dist/index.js";
 
 function listenLoopback(handler) {
@@ -611,6 +613,54 @@ async function runTests() {
   });
   assert.ok(Math.abs(subwordResp.slots.q.rawProbabilities.opt_a - 0.85) < 1e-6);
   assert.ok(Math.abs(subwordResp.slots.q.rawProbabilities.opt_b - 0.15) < 1e-6);
+
+  // 12. Trajectory polynomial alpha-spending and NEVC controller gate parity with Python/Go.
+  let sumAlpha = 0.0;
+  for (let step = 1; step <= 10; step += 1) {
+    sumAlpha += polynomialAlphaAtStep(step, {
+      alphaTotal: 0.1,
+      exponentP: 1.6,
+      horizonMaxSteps: 10,
+    });
+  }
+  assert.ok(Math.abs(sumAlpha - 0.1) < 1e-9);
+  assert.throws(
+    () => polynomialAlphaAtStep(11, { alphaTotal: 0.1, exponentP: 1.6, horizonMaxSteps: 10 }),
+    MDMValidationError,
+  );
+  let smallSumAlpha = 0.0;
+  for (let step = 1; step <= 2000; step += 1) {
+    smallSumAlpha += polynomialAlphaAtStep(step, {
+      alphaTotal: 0.001,
+      exponentP: 1.6,
+      horizonMaxSteps: 2000,
+    });
+  }
+  assert.ok(Math.abs(smallSumAlpha - 0.001) < 1e-12);
+  assert.throws(
+    () => polynomialAlphaAtStep(1, { alphaTotal: 0.1, exponentP: 0.8 }),
+    MDMValidationError,
+  );
+
+  const nevcSkip = evaluateNevcGate(0.5, {
+    taskValue: 1.0,
+    interventionCost: 0.08,
+    fixProbabilityIfFailing: 0.45,
+    regressionProbabilityIfPassing: 0.04,
+    plattSlope: 1.0,
+    plattIntercept: -1.9,
+  });
+  assert.equal(nevcSkip.shouldIntervene, false);
+  const nevcFire = evaluateNevcGate(0.95, {
+    taskValue: 1.0,
+    interventionCost: 0.08,
+    fixProbabilityIfFailing: 0.45,
+    regressionProbabilityIfPassing: 0.04,
+    plattSlope: 1.0,
+    plattIntercept: -1.9,
+  });
+  assert.equal(nevcFire.shouldIntervene, true);
+  assert.ok(nevcFire.netExpectedValue > 0);
 
   console.log("PASSED: @mdm/client TypeScript SDK tests (all assertions green).");
 }

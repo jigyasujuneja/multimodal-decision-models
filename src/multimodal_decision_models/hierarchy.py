@@ -948,3 +948,398 @@ class HierarchicalDecisionRouter:
             backend_name=self.backend.name,
             passes_used=passes_so_far + 1,
         )
+
+
+@dataclass(frozen=True)
+class ConstrainedJointTupleResult:
+    """Result of 0-extra-RPC MAP decoding over catalog-valid multi-slot tuples."""
+
+    slot_order: tuple[str, ...]
+    predicted_tuple: dict[str, str]
+    marginal_argmax_tuple: dict[str, str]
+    marginal_was_invalid: bool
+    tuple_posteriors: list[tuple[tuple[str, ...], float]]
+    winning_tuple_probability: float
+    invalid_support_mass_pruned: float
+
+
+@dataclass(frozen=True)
+class CoupledDemaskResult:
+    """Result of dependency-guided 2-step coupled slot unmasking (DEMASK)."""
+
+    resolved_tuple: dict[str, str]
+    slot_probabilities: dict[str, dict[str, float]]
+    anchor_slots: tuple[str, ...]
+    refined_child_slots: tuple[str, ...]
+    passes_used: int
+    mutual_information_bits: dict[tuple[str, str], float]
+
+
+def decode_constrained_joint_tuple(
+    slot_probabilities: Mapping[str, Mapping[str, float]],
+    valid_tuples: Sequence[Mapping[str, str] | Sequence[str]],
+    *,
+    slot_order: Sequence[str] | None = None,
+) -> ConstrainedJointTupleResult:
+    """Decode the exact MAP catalog-valid multi-slot tuple in 0 extra RPCs (arXiv:2610.15864).
+
+    Given parallel 1-pass marginal slot posteriors `p_s(y_s | x)` and a non-empty catalog support
+    set `T subseteq V_1 x ... x V_S` of valid cross-slot combinations, computes exact
+    product-of-marginals scores `sum_{s=1}^S log p_s(t_s | x)` strictly over `t in T` and returns
+    renormalized valid-support posteriors while flagging when unconstrained marginal argmax would
+    emit an invalid combination.
+
+    Args:
+        slot_probabilities: Mapping from `slot_id` to probability dict over that slot's options.
+        valid_tuples: Non-empty sequence of valid combinations (each a `Mapping[slot_id, option]`
+            or a positional `Sequence[str]` matching `slot_order`).
+        slot_order: Optional explicit slot key ordering (defaults to `sorted(slot_probabilities)`).
+
+    Returns:
+        `ConstrainedJointTupleResult` with exact MAP valid tuple and support renormalization stats.
+
+    Raises:
+        ValueError: If `slot_probabilities` or `valid_tuples` is empty or malformed.
+    """
+    if not isinstance(slot_probabilities, Mapping) or not slot_probabilities:
+        raise ValueError("slot_probabilities must be a non-empty Mapping")
+    if not isinstance(valid_tuples, Sequence) or isinstance(valid_tuples, (str, bytes)) or not valid_tuples:
+        raise ValueError("valid_tuples must be a non-empty Sequence")
+
+    ordered_slots = (
+        tuple(str(s) for s in slot_order)
+        if slot_order is not None
+        else tuple(sorted(str(s) for s in slot_probabilities.keys()))
+    )
+    if (
+        not ordered_slots
+        or len(set(ordered_slots)) != len(ordered_slots)
+        or any(s not in slot_probabilities for s in ordered_slots)
+    ):
+        raise ValueError("slot_order must list unique existing keys in slot_probabilities")
+
+    norm_slots: dict[str, dict[str, float]] = {}
+    marginal_argmax: dict[str, str] = {}
+    for slot_id in ordered_slots:
+        raw_dist = slot_probabilities[slot_id]
+        if not isinstance(raw_dist, Mapping) or not raw_dist:
+            raise ValueError(f"slot_probabilities[{slot_id!r}] must be non-empty")
+        clean_raw: dict[str, float] = {}
+        tot = 0.0
+        for raw_opt, raw_val in raw_dist.items():
+            if not isinstance(raw_opt, str) or not raw_opt:
+                raise ValueError(f"slot_probabilities[{slot_id!r}] option keys must be non-empty strings")
+            if (
+                isinstance(raw_val, bool)
+                or not isinstance(raw_val, (int, float))
+                or not math.isfinite(float(raw_val))
+                or float(raw_val) < 0.0
+            ):
+                raise ValueError(
+                    f"slot_probabilities[{slot_id!r}][{raw_opt!r}] must be finite and >= 0"
+                )
+            fval = float(raw_val)
+            clean_raw[raw_opt] = fval
+            tot += fval
+        if tot <= 0.0 or not math.isfinite(tot):
+            raise ValueError(f"slot_probabilities[{slot_id!r}] must sum to > 0")
+        clean = {opt_k: val / tot for opt_k, val in clean_raw.items()}
+        norm_slots[slot_id] = clean
+        marginal_argmax[slot_id] = sorted(clean.keys(), key=lambda opt: (-clean[opt], opt))[0]
+
+    canonical_tuples: list[tuple[str, ...]] = []
+    seen_tuples: set[tuple[str, ...]] = set()
+    for raw_tuple in valid_tuples:
+        if isinstance(raw_tuple, Mapping):
+            missing_slots = [slot_id for slot_id in ordered_slots if slot_id not in raw_tuple]
+            if missing_slots:
+                raise ValueError(f"tuple mapping missing required slots: {missing_slots!r}")
+            tup = tuple(str(raw_tuple[s]) for s in ordered_slots)
+        elif isinstance(raw_tuple, Sequence) and not isinstance(raw_tuple, (str, bytes)):
+            if len(raw_tuple) != len(ordered_slots):
+                raise ValueError("positional tuple length must match slot_order length")
+            tup = tuple(str(x) for x in raw_tuple)
+        else:
+            raise ValueError("each entry in valid_tuples must be a Mapping or Sequence[str]")
+        for slot_id, opt_val in zip(ordered_slots, tup):
+            if opt_val not in norm_slots[slot_id]:
+                raise ValueError(
+                    f"unknown option {opt_val!r} in valid_tuples for slot {slot_id!r}"
+                )
+        if tup not in seen_tuples:
+            seen_tuples.add(tup)
+            canonical_tuples.append(tup)
+
+    log_scores: dict[tuple[str, ...], float] = {}
+    raw_product_mass = 0.0
+    for tup in canonical_tuples:
+        log_sum = 0.0
+        prod_val = 1.0
+        zero_factor = False
+        for slot_id, opt_val in zip(ordered_slots, tup):
+            prob_val = norm_slots[slot_id][opt_val]
+            prod_val *= prob_val
+            if prob_val <= 0.0:
+                zero_factor = True
+            elif not zero_factor:
+                log_sum += math.log(prob_val)
+        log_scores[tup] = -math.inf if zero_factor else log_sum
+        raw_product_mass += 0.0 if zero_factor else prod_val
+
+    finite_scores = [score for score in log_scores.values() if math.isfinite(score)]
+    if not finite_scores:
+        raise ValueError("all valid_tuples have zero joint probability under slot_probabilities")
+    max_log = max(finite_scores)
+    unnorm = {
+        tup: (math.exp(score - max_log) if math.isfinite(score) else 0.0)
+        for tup, score in log_scores.items()
+    }
+    z_norm = sum(unnorm.values())
+    ranked_posteriors = sorted(
+        ((tup, val / z_norm) for tup, val in unnorm.items()),
+        key=lambda pair: (-pair[1], pair[0]),
+    )
+    best_tup, best_prob = ranked_posteriors[0]
+    marginal_tup = tuple(marginal_argmax[s] for s in ordered_slots)
+    pruned_mass = min(1.0, max(0.0, 1.0 - raw_product_mass))
+
+    return ConstrainedJointTupleResult(
+        slot_order=ordered_slots,
+        predicted_tuple=dict(zip(ordered_slots, best_tup)),
+        marginal_argmax_tuple=marginal_argmax,
+        marginal_was_invalid=(marginal_tup not in seen_tuples),
+        tuple_posteriors=ranked_posteriors,
+        winning_tuple_probability=round(best_prob, 8),
+        invalid_support_mass_pruned=round(pruned_mass, 8),
+    )
+
+
+def estimate_slot_mutual_information_matrix(
+    calib_slot_labels: Sequence[Mapping[str, str]],
+) -> dict[tuple[str, str], float]:
+    """Estimate pairwise empirical Mutual Information `I(Y_a; Y_b)` (bits) across multi-slot labels.
+
+    Args:
+        calib_slot_labels: Non-empty sequence of calibration multi-slot label dicts.
+
+    Returns:
+        Symmetric mapping `(slot_a, slot_b) -> mutual_information_bits` for `slot_a != slot_b`.
+    """
+    if not calib_slot_labels:
+        raise ValueError("calib_slot_labels must be non-empty")
+    first_row = calib_slot_labels[0]
+    if not isinstance(first_row, Mapping) or not first_row:
+        raise ValueError("calib_slot_labels[0] must be a non-empty Mapping")
+    slot_names = sorted(str(k) for k in first_row.keys())
+    expected_slot_set = set(slot_names)
+    for row_idx, row in enumerate(calib_slot_labels):
+        if not isinstance(row, Mapping) or {str(k) for k in row.keys()} != expected_slot_set:
+            raise ValueError(
+                f"calib_slot_labels[{row_idx}] must contain identical slot keys {slot_names!r}"
+            )
+    if len(slot_names) < 2:
+        return {}
+
+    n_rows = float(len(calib_slot_labels))
+    mi_map: dict[tuple[str, str], float] = {}
+    for idx_a in range(len(slot_names)):
+        slot_a = slot_names[idx_a]
+        counts_a: dict[str, int] = {}
+        for row in calib_slot_labels:
+            val_a = str(row[slot_a])
+            counts_a[val_a] = counts_a.get(val_a, 0) + 1
+        for idx_b in range(idx_a + 1, len(slot_names)):
+            slot_b = slot_names[idx_b]
+            counts_b: dict[str, int] = {}
+            joint_counts: dict[tuple[str, str], int] = {}
+            for row in calib_slot_labels:
+                val_a = str(row[slot_a])
+                val_b = str(row[slot_b])
+                counts_b[val_b] = counts_b.get(val_b, 0) + 1
+                joint_counts[(val_a, val_b)] = joint_counts.get((val_a, val_b), 0) + 1
+
+            mi_val = 0.0
+            for (val_a, val_b), c_ab in joint_counts.items():
+                p_ab = float(c_ab) / n_rows
+                p_a = float(counts_a[val_a]) / n_rows
+                p_b = float(counts_b[val_b]) / n_rows
+                if p_ab > 0.0 and p_a > 0.0 and p_b > 0.0:
+                    mi_val += p_ab * math.log2(p_ab / (p_a * p_b))
+            clean_mi = max(0.0, round(mi_val, 8))
+            mi_map[(slot_a, slot_b)] = clean_mi
+            mi_map[(slot_b, slot_a)] = clean_mi
+    return mi_map
+
+
+def demask_coupled_slots(
+    state: object,
+    questions: Mapping[str, DecisionQuestion],
+    backend: DecisionBackend,
+    *,
+    calib_slot_labels: Sequence[Mapping[str, str]] | None = None,
+    mi_coupling_threshold_bits: float = 0.10,
+    anchor_hesitation_threshold: float = DEFAULT_HESITATION_THRESHOLD,
+    valid_tuples: Sequence[Mapping[str, str] | Sequence[str]] | None = None,
+    images: list[str] | None = None,
+) -> CoupledDemaskResult:
+    """Execute dependency-guided 2-step coupled slot unmasking (DEMASK / arXiv:2610.15864).
+
+    Scores all slots in parallel in Pass 1. Identifies coupled `(anchor, child)` slot pairs whose
+    empirical mutual information exceeds `mi_coupling_threshold_bits`. When an anchor slot exhibits
+    hesitation (`normalized_entropy >= anchor_hesitation_threshold`) or child ambiguity, executes a
+    single consolidated Pass-2 RPC conditioning child slot instructions on committed anchor choices,
+    followed by optional `valid_tuples` MAP projection.
+
+    Args:
+        state: Decision input state passed to `backend.score_questions`.
+        questions: Multi-slot `DecisionQuestion` mapping (`>= 2` slots).
+        backend: Synchronous `DecisionBackend`.
+        calib_slot_labels: Optional calibration multi-slot labels to estimate pairwise MI.
+        mi_coupling_threshold_bits: Minimum `I(Y_a; Y_b)` (bits) marking two slots as coupled.
+        anchor_hesitation_threshold: Normalized entropy threshold triggering Pass-2 conditioning.
+        valid_tuples: Optional catalog-valid tuple support enforced on the final distribution.
+        images: Optional multimodal image list.
+
+    Returns:
+        `CoupledDemaskResult` with final tuple, pass count (`1` or `2`), and refined child slots.
+    """
+    if not isinstance(questions, Mapping) or len(questions) < 2:
+        raise ValueError("demask_coupled_slots requires at least 2 DecisionQuestion slots")
+    if (
+        isinstance(mi_coupling_threshold_bits, bool)
+        or not isinstance(mi_coupling_threshold_bits, (int, float))
+        or not math.isfinite(float(mi_coupling_threshold_bits))
+        or float(mi_coupling_threshold_bits) < 0.0
+    ):
+        raise ValueError("mi_coupling_threshold_bits must be finite and >= 0")
+    if (
+        isinstance(anchor_hesitation_threshold, bool)
+        or not isinstance(anchor_hesitation_threshold, (int, float))
+        or not math.isfinite(float(anchor_hesitation_threshold))
+        or float(anchor_hesitation_threshold) < 0.0
+        or float(anchor_hesitation_threshold) > 1.0
+    ):
+        raise ValueError("anchor_hesitation_threshold must lie in [0, 1]")
+
+    def _normalize_question_dist(
+        raw_dist: object, slot_id: str, question: DecisionQuestion, pass_label: str
+    ) -> dict[str, float]:
+        if not isinstance(raw_dist, Mapping) or not raw_dist:
+            raise ValueError(f"{pass_label} distribution for slot {slot_id!r} must be non-empty")
+        declared_keys = set(question.option_keys())
+        filtered_raw: dict[str, float] = {}
+        tot = 0.0
+        for raw_k, raw_v in raw_dist.items():
+            opt_k = str(raw_k)
+            if declared_keys and opt_k not in declared_keys:
+                continue
+            if (
+                isinstance(raw_v, bool)
+                or not isinstance(raw_v, (int, float))
+                or not math.isfinite(float(raw_v))
+                or float(raw_v) < 0.0
+            ):
+                raise ValueError(
+                    f"{pass_label} probability for slot {slot_id!r} option {opt_k!r} must be finite >= 0"
+                )
+            fval = float(raw_v)
+            filtered_raw[opt_k] = fval
+            tot += fval
+        if tot <= 0.0 or not math.isfinite(tot):
+            raise ValueError(f"{pass_label} distribution for slot {slot_id!r} summed to zero")
+        return {opt_k: val / tot for opt_k, val in filtered_raw.items()}
+
+    pass1_raw = backend.score_questions(state, questions, images)
+    slot_ids = sorted(str(k) for k in questions.keys())
+    slot_probs: dict[str, dict[str, float]] = {}
+    slot_entropies: dict[str, float] = {}
+    for slot_id in slot_ids:
+        norm = _normalize_question_dist(pass1_raw.get(slot_id), slot_id, questions[slot_id], "Pass-1")
+        slot_probs[slot_id] = norm
+        slot_entropies[slot_id] = normalized_entropy(norm)
+
+    mi_matrix = (
+        estimate_slot_mutual_information_matrix(calib_slot_labels)
+        if calib_slot_labels
+        else {}
+    )
+    # Partition into lower-entropy anchors and higher-entropy coupled children.
+    ordered_by_certainty = sorted(slot_ids, key=lambda sid: (slot_entropies[sid], sid))
+    midpoint = max(1, len(ordered_by_certainty) // 2)
+    anchor_candidates = ordered_by_certainty[:midpoint]
+    child_candidates = ordered_by_certainty[midpoint:]
+
+    coupled_anchors_by_child: dict[str, list[str]] = {}
+    children_to_refine: list[str] = []
+    for child_id in child_candidates:
+        coupled_anchors = [
+            anc_id
+            for anc_id in anchor_candidates
+            if not mi_matrix
+            or mi_matrix.get((anc_id, child_id), 0.0) >= float(mi_coupling_threshold_bits)
+        ]
+        child_or_anchor_hesitant = (
+            slot_entropies[child_id] >= float(anchor_hesitation_threshold)
+            or any(
+                slot_entropies[anc_id] >= float(anchor_hesitation_threshold)
+                for anc_id in coupled_anchors
+            )
+        )
+        if coupled_anchors and child_or_anchor_hesitant:
+            coupled_anchors_by_child[child_id] = coupled_anchors
+            children_to_refine.append(child_id)
+
+    passes_used = 1
+    if children_to_refine:
+        anchor_commitments = {
+            anc_id: sorted(
+                slot_probs[anc_id].keys(),
+                key=lambda opt: (-slot_probs[anc_id][opt], opt),
+            )[0]
+            for anc_id in anchor_candidates
+        }
+        pass2_questions: dict[str, DecisionQuestion] = {}
+        for child_id in children_to_refine:
+            child_anchors = coupled_anchors_by_child[child_id]
+            anchor_context_summary = ", ".join(
+                f"{anc_id}={anchor_commitments[anc_id]}" for anc_id in sorted(child_anchors)
+            )
+            orig_q = questions[child_id]
+            pass2_questions[child_id] = DecisionQuestion(
+                type=orig_q.type,
+                instructions=(
+                    f"{orig_q.instructions} [Conditioned on committed anchor slots: "
+                    f"{anchor_context_summary}]"
+                ),
+                criteria=orig_q.criteria,
+                levels=orig_q.levels,
+                order=orig_q.order,
+                prior_logits=orig_q.prior_logits,
+            )
+        pass2_scored = backend.score_questions(state, pass2_questions, images)
+        passes_used = 2
+        for child_id in children_to_refine:
+            slot_probs[child_id] = _normalize_question_dist(
+                pass2_scored.get(child_id), child_id, questions[child_id], "Pass-2"
+            )
+
+    if valid_tuples is not None:
+        constrained = decode_constrained_joint_tuple(
+            slot_probs, valid_tuples, slot_order=slot_ids
+        )
+        resolved = constrained.predicted_tuple
+    else:
+        resolved = {
+            sid: sorted(slot_probs[sid].keys(), key=lambda opt: (-slot_probs[sid][opt], opt))[0]
+            for sid in slot_ids
+        }
+
+    return CoupledDemaskResult(
+        resolved_tuple=resolved,
+        slot_probabilities=slot_probs,
+        anchor_slots=tuple(anchor_candidates),
+        refined_child_slots=tuple(children_to_refine),
+        passes_used=passes_used,
+        mutual_information_bits=mi_matrix,
+    )
+

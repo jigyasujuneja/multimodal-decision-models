@@ -157,3 +157,27 @@ export interface BayesianPoEResult {
   readonly hRaw: number;
   readonly escalated: boolean;
 }
+
+export interface PolynomialAlphaConfig {
+  readonly alphaTotal?: number;
+  readonly exponentP?: number;
+  readonly horizonMaxSteps?: number;
+  readonly markovSlackFactor?: number;
+}
+
+export interface NevControllerPolicy {
+  readonly taskValue?: number;
+  readonly interventionCost?: number;
+  readonly fixProbabilityIfFailing?: number;
+  readonly regressionProbabilityIfPassing?: number;
+  readonly plattSlope?: number;
+  readonly plattIntercept?: number;
+}
+
+export interface NevDecisionResult {
+  readonly shouldIntervene: boolean;
+  readonly rawFailProbability: number;
+  readonly calibratedFailProbability: number;
+  readonly netExpectedValue: number;
+  readonly minFailProbabilityThreshold: number;
+}
