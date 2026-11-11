@@ -384,16 +384,38 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
             method="raps",
         )
         self.assertTrue(math.isinf(tiny_cal.q_hat))
-        full_set = mdm.conformal_prediction_set({"a": 0.7, "b": 0.2, "none_of_the_above": 0.1}, tiny_cal.q_hat)
+        full_set_default = mdm.conformal_prediction_set(
+            {"a": 0.7, "b": 0.2, "none_of_the_above": 0.1},
+            tiny_cal.q_hat,
+        )
+        self.assertEqual(len(full_set_default.prediction_set), 3)
+        self.assertFalse(full_set_default.contains_abstain)
+        self.assertTrue(full_set_default.should_escalate)
+
+        full_set = mdm.conformal_prediction_set(
+            {"a": 0.7, "b": 0.2, "none_of_the_above": 0.1},
+            tiny_cal.q_hat,
+            abstain_keys=mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS,
+        )
         self.assertEqual(len(full_set.prediction_set), 3)
         self.assertTrue(full_set.contains_abstain)
         self.assertTrue(full_set.should_escalate)
 
-        # Singleton abstain option also triggers should_escalate
+        # Singleton abstain option escalates only when opted in via abstain_keys
+        abstain_default = mdm.conformal_prediction_set(
+            {"none_of_the_above": 0.96, "sku_a": 0.04},
+            q_hat=0.10,
+            method="lac",
+        )
+        self.assertTrue(abstain_default.singleton)
+        self.assertFalse(abstain_default.contains_abstain)
+        self.assertFalse(abstain_default.should_escalate)
+
         abstain_singleton = mdm.conformal_prediction_set(
             {"none_of_the_above": 0.96, "sku_a": 0.04},
             q_hat=0.10,
             method="lac",
+            abstain_keys=mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS,
         )
         self.assertTrue(abstain_singleton.singleton)
         self.assertTrue(abstain_singleton.contains_abstain)
@@ -1792,12 +1814,13 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             "uncertain",
             "unknown",
         }
-        self.assertEqual(set(mdm.DEFAULT_CONFORMAL_ABSTAIN_KEYS), expected_9)
+        self.assertEqual(set(mdm.DEFAULT_CONFORMAL_ABSTAIN_KEYS), set())
+        self.assertEqual(set(mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS), expected_9)
         for key in [*sorted(expected_9), " OOS ", "ABSTAIN", " Uncertain "]:
             res_def = mdm.conformal_prediction_set({key: 0.96, "sku_1": 0.04}, 0.20, method="lac")
             self.assertTrue(res_def.singleton)
-            self.assertTrue(res_def.contains_abstain, msg=f"key={key!r}")
-            self.assertTrue(res_def.should_escalate, msg=f"key={key!r}")
+            self.assertFalse(res_def.contains_abstain, msg=f"key={key!r}")
+            self.assertFalse(res_def.should_escalate, msg=f"key={key!r}")
 
             res_none = mdm.conformal_prediction_set(
                 {key: 0.96, "sku_1": 0.04},
@@ -1805,17 +1828,18 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
                 method="lac",
                 abstain_keys=None,
             )
-            self.assertTrue(res_none.contains_abstain)
-            self.assertTrue(res_none.should_escalate)
+            self.assertFalse(res_none.contains_abstain)
+            self.assertFalse(res_none.should_escalate)
 
-            res_opt_out = mdm.conformal_prediction_set(
+            res_opt_in = mdm.conformal_prediction_set(
                 {key: 0.96, "sku_1": 0.04},
                 0.20,
                 method="lac",
-                abstain_keys=(),
+                abstain_keys=mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS,
             )
-            self.assertFalse(res_opt_out.contains_abstain)
-            self.assertFalse(res_opt_out.should_escalate)
+            self.assertTrue(res_opt_in.singleton)
+            self.assertTrue(res_opt_in.contains_abstain, msg=f"key={key!r}")
+            self.assertTrue(res_opt_in.should_escalate, msg=f"key={key!r}")
 
     def test_iter4_positive_allowlist_draw_grammar_and_constructor_contracts(self) -> None:
         q_open = {
@@ -2165,6 +2189,125 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             )
             assert err is not None
             self.assertEqual(err["error"]["code"], -32602)
+
+    def test_subword_logaddexp_aggregation_and_opt_in_abstain_contracts(self) -> None:
+        # 1. OpenAILogprobBackend aggregates whitespace-equivalent subword tokens ("A" + " A") via logaddexp
+        dist_openai = mdm.OpenAILogprobBackend.extract_letter_distribution(
+            {"A": math.log(0.45), " A": math.log(0.40), "B": math.log(0.15)},
+            {"A": "opt_a", "B": "opt_b"},
+            min_captured_mass=0.80,
+        )
+        self.assertAlmostEqual(dist_openai["opt_a"], 0.85, places=6)
+        self.assertAlmostEqual(dist_openai["opt_b"], 0.15, places=6)
+
+        # 2. VertexGeminiBackend aggregates distinct SentencePiece subword variants via logaddexp
+        q_vertex = {
+            "intent": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Classify banking intent.",
+                criteria={"opt_a": "Transfer", "opt_b": "Balance"},
+                order=["opt_a", "opt_b"],
+            )
+        }
+        vertex_payload = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": json.dumps({"intent": "A"})}]},
+                    "logprobsResult": {
+                        "chosenCandidates": [{"token": '"A"', "logProbability": math.log(0.45)}],
+                        "topCandidates": [
+                            {
+                                "candidates": [
+                                    {"token": '"A"', "tokenId": 101, "logProbability": math.log(0.45)},
+                                    {"token": " A", "tokenId": 102, "logProbability": math.log(0.40)},
+                                    {"token": "B", "tokenId": 103, "logProbability": math.log(0.15)},
+                                ]
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        dist_vertex, _ = mdm.VertexGeminiBackend.parse_generate_content_response(
+            vertex_payload, q_vertex
+        )
+        self.assertAlmostEqual(dist_vertex["intent"]["opt_a"], 0.85, places=6)
+        self.assertAlmostEqual(dist_vertex["intent"]["opt_b"], 0.15, places=6)
+
+        # 3. CascadeDecisionOrchestrator honors oos_keys=() without re-injecting "oos"
+        q_clinc = {
+            "intent": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Classify CLINC150 intent including valid 'oos' class.",
+                criteria={"oos": "Out of scope intent", "balance": "Account balance"},
+                order=["oos", "balance"],
+            )
+        }
+        s1_clinc = mdm.MockCallableBackend(
+            "s1_clinc",
+            lambda _st, _qs, _imgs: {"intent": {"oos": 0.985, "balance": 0.015}},
+        )
+        s2_clinc = mdm.MockCallableBackend(
+            "s2_clinc",
+            lambda _st, _qs, _imgs: {"intent": {"oos": 0.99, "balance": 0.01}},
+        )
+        orch_closed = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=s1_clinc,
+            stage2_backend=s2_clinc,
+            oos_keys=(),
+            conformal_q_hat=0.10,
+            conformal_method="lac",
+        )
+        res_closed = orch_closed.evaluate({"utterance": "tell me a joke"}, q_clinc)
+        self.assertEqual(res_closed.terminal_state, mdm.DecisionTerminalState.STAGE1_RESOLVED)
+        self.assertEqual(res_closed.slots["intent"].predicted, "oos")
+
+        orch_open = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=s1_clinc,
+            stage2_backend=s2_clinc,
+            conformal_q_hat=0.10,
+            conformal_method="lac",
+        )
+        res_open = orch_open.evaluate({"utterance": "tell me a joke"}, q_clinc)
+        self.assertEqual(res_open.terminal_state, mdm.DecisionTerminalState.ABSTAIN_OOS)
+
+        # 4. MCP evaluate_conformal_decision keeps abstain_keys empty by default and honors opt-in
+        mcp_default = mdm.handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 201,
+                "method": "tools/call",
+                "params": {
+                    "name": "evaluate_conformal_decision",
+                    "arguments": {"probabilities": {"oos": 0.97, "balance": 0.03}, "q_hat": 0.10, "method": "lac"},
+                },
+            }
+        )
+        assert mcp_default is not None
+        mcp_def_body = json.loads(mcp_default["result"]["content"][0]["text"])
+        self.assertFalse(mcp_def_body["contains_abstain"])
+        self.assertFalse(mcp_def_body["conformal_escalate"])
+
+        mcp_opt_in = mdm.handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 202,
+                "method": "tools/call",
+                "params": {
+                    "name": "evaluate_conformal_decision",
+                    "arguments": {
+                        "probabilities": {"oos": 0.97, "balance": 0.03},
+                        "q_hat": 0.10,
+                        "method": "lac",
+                        "abstain_keys": ["oos"],
+                    },
+                },
+            }
+        )
+        assert mcp_opt_in is not None
+        mcp_opt_body = json.loads(mcp_opt_in["result"]["content"][0]["text"])
+        self.assertTrue(mcp_opt_body["contains_abstain"])
+        self.assertTrue(mcp_opt_body["conformal_escalate"])
 
 
 if __name__ == "__main__":

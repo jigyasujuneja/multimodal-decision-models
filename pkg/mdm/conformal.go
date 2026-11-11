@@ -41,7 +41,7 @@ var (
 	seededConformalKeys []int64
 )
 
-var defaultConformalAbstainKeys = []string{
+var standardConformalAbstainKeys = []string{
 	"0",
 	"abstain",
 	"insufficient_evidence",
@@ -51,6 +51,12 @@ var defaultConformalAbstainKeys = []string{
 	"oos",
 	"uncertain",
 	"unknown",
+}
+
+// StandardConformalAbstainKeys returns a fresh copy of the 9 standard catch-all/abstain option keys
+// for open-world callers that opt in to singleton abstain escalation.
+func StandardConformalAbstainKeys() []string {
+	return append([]string(nil), standardConformalAbstainKeys...)
 }
 
 // ConformalConfig parameterizes Split Conformal Prediction across LAC, APS, and RAPS.
@@ -64,7 +70,7 @@ type ConformalConfig struct {
 	SeedKey     string     `json:"seed_key,omitempty"`     // stateless HMAC-SHA256 seed key for cross-language deterministic randomized conformal sets
 	ItemKey     string     `json:"item_key,omitempty"`     // per-example identifier used with SeedKey (or DefaultConformalSeedKey) when Randomized is true
 	RNG         *rand.Rand `json:"-"`                      // optional caller-managed RNG stream when Randomized is true
-	AbstainKeys []string   `json:"abstain_keys,omitempty"` // custom abstain/catch-all keys; defaults to defaultConformalAbstainKeys when nil
+	AbstainKeys []string   `json:"abstain_keys,omitempty"` // opt-in abstain/catch-all keys; empty/nil disables automatic abstain escalation
 }
 
 // HmacUint64 returns the big-endian uint64 unpacked from the first 8 bytes of HMAC-SHA256(seedKey, itemKey+"\x00"+tag).
@@ -111,14 +117,13 @@ func drawStatelessHMACOrderAndU(groups [][]string, seedKey, itemKey string) (flo
 }
 
 // DefaultConformalConfig returns the standard RAPS configuration (Method: "raps", Alpha: 0.10, LamReg: 0.01, KReg: 1)
-// with a fresh copy of the 9-key default abstain union.
+// with opt-in (empty) AbstainKeys; pass StandardConformalAbstainKeys() for open-world catch-all escalation.
 func DefaultConformalConfig() ConformalConfig {
 	return ConformalConfig{
-		Method:      "raps",
-		Alpha:       0.10,
-		LamReg:      0.01,
-		KReg:        1,
-		AbstainKeys: append([]string(nil), defaultConformalAbstainKeys...),
+		Method: "raps",
+		Alpha:  0.10,
+		LamReg: 0.01,
+		KReg:   1,
 	}
 }
 
@@ -259,9 +264,6 @@ func resolveConformalConfig(cfg ConformalConfig) (ConformalConfig, error) {
 	}
 	if resolved.KReg < 0 {
 		return ConformalConfig{}, fmt.Errorf("mdm: KReg must be >= 0, got %d", resolved.KReg)
-	}
-	if resolved.AbstainKeys == nil {
-		resolved.AbstainKeys = defaultConformalAbstainKeys
 	}
 	return resolved, nil
 }

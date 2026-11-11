@@ -90,6 +90,19 @@ OPENAI_MAX_TOP_LOGPROBS = 20
 _THINKING_TAG_TOKENS = frozenset({"<think>", "</think>", "<|thought|>", "<thought>", "thought"})
 
 
+def _logaddexp(log_a: float, log_b: float) -> float:
+    """Compute log(exp(log_a) + exp(log_b)) stably without overflow or underflow."""
+    if log_a == float("-inf"):
+        return log_b
+    if log_b == float("-inf"):
+        return log_a
+    if log_a < log_b:
+        log_a, log_b = log_b, log_a
+    if math.isinf(log_a):
+        return log_a
+    return log_a + math.log1p(math.exp(log_b - log_a))
+
+
 def build_extended_255_code_bijection(
     option_keys: Sequence[str],
     vocab: Collection[str] | None = None,
@@ -1361,12 +1374,12 @@ class OpenAILogprobBackend:
             )
 
         for letter, key in letter_to_key.items():
-            best_lp = float("-inf")
+            accumulated_lp = float("-inf")
             for tok, lp in top_logprobs.items():
                 val = float(lp)
-                if tok.strip() == letter and val > best_lp:
-                    best_lp = val
-            letter_logits[key] = best_lp
+                if tok.strip() == letter:
+                    accumulated_lp = _logaddexp(accumulated_lp, val)
+            letter_logits[key] = accumulated_lp
 
         finite_vals = [v for v in letter_logits.values() if math.isfinite(v)]
         if not finite_vals:
@@ -1734,29 +1747,37 @@ class VertexGeminiBackend:
                     raise SchemaContractViolationError(
                         "Vertex Gemini topCandidates.candidates must be a JSON array"
                     )
+                dedup_cands: dict[tuple[str, Any], float] = {}
+                for c_entry in cands or []:
+                    if not isinstance(c_entry, Mapping):
+                        raise SchemaContractViolationError(
+                            "Vertex Gemini topCandidates entry must be a JSON object"
+                        )
+                    raw_tok_obj = c_entry.get("token", "")
+                    ct = str(raw_tok_obj).strip('" ')
+                    if ct in letter_to_key or ct in key_to_letter:
+                        raw_lp = c_entry.get("logProbability", float("-inf"))
+                        if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, float)):
+                            raise SchemaContractViolationError(
+                                f"non-numeric logProbability on slot {qid!r}: {raw_lp!r}"
+                            )
+                        lp = float(raw_lp)
+                        if math.isnan(lp) or (math.isinf(lp) and lp > 0.0):
+                            raise LogprobAlignmentError(
+                                f"invalid non-finite logProbability {lp!r} on slot {qid!r}"
+                            )
+                        dedup_key = (str(raw_tok_obj), c_entry.get("tokenId"))
+                        if dedup_key not in dedup_cands or lp > dedup_cands[dedup_key]:
+                            dedup_cands[dedup_key] = lp
+
                 logits: dict[str, float] = {}
                 for ltr, k in letter_to_key.items():
-                    best_lp = float("-inf")
-                    for c_entry in cands or []:
-                        if not isinstance(c_entry, Mapping):
-                            raise SchemaContractViolationError(
-                                "Vertex Gemini topCandidates entry must be a JSON object"
-                            )
-                        ct = str(c_entry.get("token", "")).strip('" ')
+                    accumulated_lp = float("-inf")
+                    for (raw_tok_str, _tok_id), lp in dedup_cands.items():
+                        ct = raw_tok_str.strip('" ')
                         if ct == ltr or ct == k:
-                            raw_lp = c_entry.get("logProbability", float("-inf"))
-                            if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, float)):
-                                raise SchemaContractViolationError(
-                                    f"non-numeric logProbability on slot {qid!r}: {raw_lp!r}"
-                                )
-                            lp = float(raw_lp)
-                            if math.isnan(lp) or (math.isinf(lp) and lp > 0.0):
-                                raise LogprobAlignmentError(
-                                    f"invalid non-finite logProbability {lp!r} on slot {qid!r}"
-                                )
-                            if lp > best_lp:
-                                best_lp = lp
-                    logits[k] = best_lp
+                            accumulated_lp = _logaddexp(accumulated_lp, lp)
+                    logits[k] = accumulated_lp
 
                 finite = [v for v in logits.values() if math.isfinite(v)]
                 if finite and math.isfinite(logits.get(selected_key, float("-inf"))):
@@ -3257,7 +3278,7 @@ class CascadeDecisionOrchestrator:
                         method=self.conformal_method,
                         lam_reg=self.conformal_lam_reg,
                         k_reg=self.conformal_k_reg,
-                        abstain_keys=self.oos_keys | DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+                        abstain_keys=self.oos_keys,
                         randomized=self.conformal_randomized,
                         seed=self.conformal_seed,
                         rng=self.conformal_rng,

@@ -37,7 +37,7 @@ from typing import Collection, Mapping, Sequence
 
 DEFAULT_CONFORMAL_SEED_KEY: str = "dgem-conformal-v1"
 
-DEFAULT_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset(
+STANDARD_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset(
     {
         "0",
         "abstain",
@@ -50,6 +50,8 @@ DEFAULT_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset(
         "unknown",
     }
 )
+
+DEFAULT_CONFORMAL_ABSTAIN_KEYS: frozenset[str] = frozenset()
 
 _VALID_CONFORMAL_METHODS: frozenset[str] = frozenset({"lac", "aps", "raps"})
 _TIE_TOL: float = 1e-12

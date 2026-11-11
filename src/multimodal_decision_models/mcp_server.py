@@ -33,7 +33,7 @@ import json
 import math
 import re
 import sys
-from typing import Any, BinaryIO, Mapping, Sequence
+from typing import Any, BinaryIO, Collection, Mapping, Sequence
 
 from .calibration import VALID_PRIOR_GATE_MODES, effective_top_m_entropy, pre_gated_bayesian_poe_fusion
 from .conformal import (
@@ -212,6 +212,14 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "method": {"type": "string", "enum": ["lac", "aps", "raps"], "default": "raps"},
                 "lam_reg": {"type": "number", "default": 0.01},
                 "k_reg": {"type": "integer", "default": 1},
+                "abstain_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional explicit abstain/catch-all option keys whose presence in the "
+                        "prediction set triggers escalation (empty by default)."
+                    ),
+                },
                 "prior_logits": {"type": "object", "additionalProperties": {"type": "number"}},
                 "prior_weight": {"type": "number", "default": 0.0},
                 "prior_gate_mode": {
@@ -489,6 +497,14 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
             "provide either q_hat, q_hat_infinite=true, or (calib_probs and calib_labels)"
         )
 
+    abstain_keys_resolved: Collection[str] = DEFAULT_CONFORMAL_ABSTAIN_KEYS
+    if "abstain_keys" in args and args["abstain_keys"] is not None:
+        ak_seq = _require_sequence(args["abstain_keys"], "abstain_keys")
+        abstain_keys_resolved = [
+            _require_str(ak, f"abstain_keys[{i}]", non_empty=True)
+            for i, ak in enumerate(ak_seq)
+        ]
+
     # Evaluate conformal prediction set strictly on raw_probs BEFORE prior fusion.
     conf_res = conformal_prediction_set(
         probs,
@@ -496,7 +512,7 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         method=method,
         lam_reg=lam_reg,
         k_reg=k_reg,
-        abstain_keys=DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+        abstain_keys=abstain_keys_resolved,
     )
 
     prior_logits_raw = args.get("prior_logits")
