@@ -66,10 +66,8 @@ export interface GenkitToolGuardVerdict {
   readonly reason: string;
 }
 
-const INVISIBLE_SMUGGLING_AND_CONTROL_RE =
-  /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\u{e0000}-\u{e007f}]/gu;
 const INJECTION_DIRECTIVE_RE =
-  /(?:^|\n|\[escaped_untrusted_tag\])[ \t]*(?:ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?|disregard\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?|forget\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?|reply\s+with\s+the\s+single\s+uppercase\s+option\s+letter|system\s*:|developer\s*:|assistant\s*:)/gi;
+  /(?:^|\n|\[escaped_untrusted_tag\])[ \t]*(?:ignore\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)|disregard\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)|forget\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)|reply\s+with\s+the\s+single\s+uppercase\s+option\s+letter|system\s*:|developer\s*:|assistant\s*:)/gi;
 
 function isAsciiOrTagWhitespace(code: number): boolean {
   return (
@@ -145,6 +143,81 @@ export function escapeUntrustedTagVariants(input: string): string {
   return parts.join("");
 }
 
+const ANGLE_HOMOGLYPH_MAP: Readonly<Record<number, string>> = {
+  0x2039: "<",
+  0x203a: ">",
+  0x2329: "<",
+  0x232a: ">",
+  0x27e8: "<",
+  0x27e9: ">",
+  0x3008: "<",
+  0x3009: ">",
+  0xfe64: "<",
+  0xfe65: ">",
+};
+
+export function normalizeAndStripInvisibleSmuggling(rawText: string): string {
+  if (typeof rawText !== "string") {
+    throw new MDMValidationError("rawText must be a string");
+  }
+  const out: string[] = [];
+  for (const ch of rawText) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (
+      (code >= 0xe0000 && code <= 0xe007f) ||
+      (code >= 0xe0100 && code <= 0xe01ef) ||
+      (code >= 0xfe00 && code <= 0xfe0f)
+    ) {
+      continue;
+    }
+    if (
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
+      code === 0x061c ||
+      code === 0x200e ||
+      code === 0x200f
+    ) {
+      continue;
+    }
+    if (
+      (code >= 0x200b && code <= 0x200d) ||
+      (code >= 0x2060 && code <= 0x2064) ||
+      code === 0x00ad ||
+      code === 0xfeff
+    ) {
+      continue;
+    }
+    if (
+      (code >= 0x00 && code <= 0x08) ||
+      code === 0x0b ||
+      code === 0x0c ||
+      (code >= 0x0e && code <= 0x1f) ||
+      (code >= 0x7f && code <= 0x9f)
+    ) {
+      continue;
+    }
+    if (code >= 0x1d400 && code <= 0x1d7ff) {
+      out.push(ch.normalize("NFKC"));
+      continue;
+    }
+    if (code >= 0xff01 && code <= 0xff5e) {
+      out.push(String.fromCodePoint(code - 0xfee0));
+      continue;
+    }
+    if (code === 0x3000) {
+      out.push(" ");
+      continue;
+    }
+    const mapped = ANGLE_HOMOGLYPH_MAP[code];
+    if (mapped !== undefined) {
+      out.push(mapped);
+      continue;
+    }
+    out.push(ch);
+  }
+  return out.join("");
+}
+
 export function neutralizeUntrustedDelimiters(
   rawText: string,
   maxChars = 16_384,
@@ -155,9 +228,8 @@ export function neutralizeUntrustedDelimiters(
   if (!Number.isInteger(maxChars) || maxChars <= 0) {
     throw new MDMValidationError("maxChars must be a positive integer");
   }
-  const normalized = rawText.normalize("NFKC");
-  const withoutControls = normalized.replace(INVISIBLE_SMUGGLING_AND_CONTROL_RE, "");
-  const withoutTagBreakouts = escapeUntrustedTagVariants(withoutControls);
+  const normalized = normalizeAndStripInvisibleSmuggling(rawText);
+  const withoutTagBreakouts = escapeUntrustedTagVariants(normalized);
   const withoutDirectives = withoutTagBreakouts.replace(
     INJECTION_DIRECTIVE_RE,
     (matched) => {
@@ -170,10 +242,14 @@ export function neutralizeUntrustedDelimiters(
       return "[neutralized_directive]";
     },
   );
+  const bodyDirectivesNeutralized = withoutDirectives.replace(
+    /\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)\b/gi,
+    "[neutralized_directive]",
+  );
   const clipped =
-    withoutDirectives.length > maxChars
-      ? withoutDirectives.slice(0, maxChars)
-      : withoutDirectives;
+    bodyDirectivesNeutralized.length > maxChars
+      ? bodyDirectivesNeutralized.slice(0, maxChars)
+      : bodyDirectivesNeutralized;
   return `<untrusted_data>\n${clipped}\n</untrusted_data>`;
 }
 

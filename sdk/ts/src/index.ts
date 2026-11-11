@@ -18,3 +18,4 @@ export * from "./types.js";
 export * from "./calibration.js";
 export * from "./client.js";
 export * from "./genkit.js";
+export * from "./security.js";
