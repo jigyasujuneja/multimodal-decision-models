@@ -1982,8 +1982,13 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             criteria={"sku_a": "A", "sku_b": "B"},
         )
         qs = {"slot": q}
-        s1_fn = lambda _s, _q, _i=None: {"slot": {"sku_a": 0.52, "sku_b": 0.48}}
-        s2_fn = lambda _s, _q, _i=None: {"slot": {"sku_a": 0.05, "sku_b": 0.95}}
+
+        def s1_fn(_s, _q, _i=None):
+            return {"slot": {"sku_a": 0.52, "sku_b": 0.48}}
+
+        def s2_fn(_s, _q, _i=None):
+            return {"slot": {"sku_a": 0.05, "sku_b": 0.95}}
+
         s1 = mdm.MockCallableBackend("s1", s1_fn)
 
         # 1. All 6 prior_gate_mode values across calibration, orchestrator, and MCP

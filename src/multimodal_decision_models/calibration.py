@@ -1345,9 +1345,9 @@ def estimate_saerens_em_prior_logits(
     damping_lambda: float = 0.70,
     max_effective_classes: int = 2,
 ) -> SaerensEMPriorResult:
-    """Estimate target-domain class priors via damped Saerens et al. (2002) EM with EXP-48 K-guard.
+    """Estimate target-domain class priors via damped Saerens et al. (2002) EM with K-guard.
 
-    Live EXP-48 demonstrated two empirical regimes:
+    Empirical label-shift evaluation demonstrated two regimes:
       1. Binary suites (`K == 2`): 5-step damped EM (`lambda = 0.70`) combined with
          `gate_mode="hesitant"` (`w = 1.00`) cuts Brier score by `-19.5%` to `-41.9%` under `5%`
          and `90%` prevalence shifts with zero adversarial AUROC loss (`+0.0005`).

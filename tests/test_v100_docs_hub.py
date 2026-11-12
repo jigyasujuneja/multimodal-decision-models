@@ -75,16 +75,39 @@ class V100DocumentationHubTest(unittest.TestCase):
         self.assertIn("v1.1.0", readme_text)
         self.assertIn("docs/architectural-boundaries.md", readme_text)
         self.assertIn("docs/security-and-eval-science.md", readme_text)
+        self.assertIn("GeminiDecisionsBackend", readme_text)
+        self.assertIn("experiment_protocol.py", readme_text)
+        self.assertIn("MDM-EpisodeBench", readme_text)
+        self.assertIn("Receipt-Grounded Replay", readme_text)
 
         changelog_text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn("## [1.1.0]", changelog_text)
         self.assertIn("## [1.0.0]", changelog_text)
+        self.assertIn("GeminiDecisionsBackend", changelog_text)
+        self.assertIn("experiment_protocol.py", changelog_text)
 
         prod_deploy_text = (REPO_ROOT / "docs" / "production-deployment.md").read_text(encoding="utf-8")
         self.assertIn(
             f"version `{mdm.mcp_server.MCP_SERVER_VERSION}`",
             prod_deploy_text,
         )
+        self.assertIn("GeminiDecisionsBackend", prod_deploy_text)
+        self.assertIn("VertexGeminiBackend.from_ga_preset", prod_deploy_text)
+        self.assertIn("x-goog-api-key", prod_deploy_text)
+
+        arch_boundaries_text = (REPO_ROOT / "docs" / "architectural-boundaries.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("GeminiDecisionsBackend", arch_boundaries_text)
+        self.assertIn("PrimalDualParetoBanditRouter", arch_boundaries_text)
+
+        security_eval_text = (REPO_ROOT / "docs" / "security-and-eval-science.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Receipt-Grounded Replay", security_eval_text)
+        self.assertIn("fit_oof_calibrated_conformal_bundle", security_eval_text)
+        self.assertIn("compute_exact_shapley_values", security_eval_text)
+        self.assertIn("compute_factorial_interactions_and_shapley", security_eval_text)
 
         completed = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "docs_link_check.py")],
@@ -157,7 +180,7 @@ class V100DocumentationHubTest(unittest.TestCase):
                         )
                         go_blocks_compiled += 1
 
-        self.assertGreaterEqual(python_blocks_executed, 19)
+        self.assertGreaterEqual(python_blocks_executed, 22)
         self.assertGreaterEqual(go_blocks_compiled, 1)
 
 

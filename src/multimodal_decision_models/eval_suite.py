@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from .conformal import calibrate_conformal_quantile, conformal_prediction_set, nonconformity_score
+from .conformal import calibrate_conformal_quantile, conformal_prediction_set, hmac_uint64, nonconformity_score
 
 
 @dataclass(frozen=True)
@@ -568,9 +569,9 @@ def tango_paired_non_inferiority_test(
         raise ValueError(f"gamma must lie in (0, 0.1), got {gamma!r}")
 
     w = int(wins)
-    l = int(losses)
-    d = w + l
-    delta_hat = float(w - l) / float(n_total)
+    loss_count = int(losses)
+    d = w + loss_count
+    delta_hat = float(w - loss_count) / float(n_total)
     zero_ub = 1.0 - (alpha ** (1.0 / float(n_total)))
 
     if d == 0:
@@ -578,7 +579,7 @@ def tango_paired_non_inferiority_test(
         p_bb = min(1.0, gamma + p_null)
         return NonInferiorityTestResult(
             wins=w,
-            losses=l,
+            losses=loss_count,
             n_total=n_total,
             margin=margin,
             delta_hat=0.0,
@@ -598,13 +599,17 @@ def tango_paired_non_inferiority_test(
         p_same = 1.0 - q
         if p10 <= 0.0 or p01 <= 0.0 or p_same <= 0.0:
             continue
-        ll = float(l) * math.log(p10) + float(w) * math.log(p01) + float(n_total - d) * math.log(p_same)
+        ll = (
+            float(loss_count) * math.log(p10)
+            + float(w) * math.log(p01)
+            + float(n_total - d) * math.log(p_same)
+        )
         if ll > best_ll:
             best_ll = ll
             best_q = q
 
     var_h0 = float(n_total) * max(best_q - margin * margin, 1e-12)
-    z_stat = (float(w - l) + float(n_total) * margin) / math.sqrt(var_h0)
+    z_stat = (float(w - loss_count) + float(n_total) * margin) / math.sqrt(var_h0)
     p_asym = 0.5 * math.erfc(z_stat / math.sqrt(2.0))
 
     z_gamma = 3.890592
@@ -617,7 +622,7 @@ def tango_paired_non_inferiority_test(
     for idx in range(51):
         q_cand = q_lo + (q_hi - q_lo) * (float(idx) / 50.0)
         var_cand = float(n_total) * max(q_cand - margin * margin, 1e-12)
-        z_cand = (float(w - l) + float(n_total) * margin) / math.sqrt(var_cand)
+        z_cand = (float(w - loss_count) + float(n_total) * margin) / math.sqrt(var_cand)
         tail_cand = 0.5 * math.erfc(z_cand / math.sqrt(2.0))
         if tail_cand > worst_tail:
             worst_tail = tail_cand
@@ -625,7 +630,7 @@ def tango_paired_non_inferiority_test(
     p_bb = min(1.0, gamma + worst_tail)
     return NonInferiorityTestResult(
         wins=w,
-        losses=l,
+        losses=loss_count,
         n_total=n_total,
         margin=margin,
         delta_hat=delta_hat,
@@ -1565,6 +1570,392 @@ def evaluate_4stage_trajectory_judge(
         },
         first_fault_stage_by_id=first_fault_map,
     )
+
+
+@dataclass(frozen=True)
+class FactorialEffectSummary:
+    """Yates/ANOVA main effects, two-way synergies, and exact Shapley values on a 2^k cube."""
+
+    factor_names: tuple[str, ...]
+    n_episodes: int
+    n_clusters: int
+    n_bootstrap: int
+    coalition_means: dict[str, float]
+    total_gain: float
+    main_effects: dict[str, float]
+    main_effect_cis: dict[str, tuple[float, float]]
+    two_way_interactions: dict[str, float]
+    two_way_interaction_cis: dict[str, tuple[float, float]]
+    shapley_values: dict[str, float]
+    shapley_cis: dict[str, tuple[float, float]]
+    raw_p_values: dict[str, float]
+    holm_adjusted_p_values: dict[str, float]
+    significant_effects: dict[str, bool]
+    shapley_holm_p_values: dict[str, float]
+
+
+def _percentile_from_sorted(sorted_values: Sequence[float], quantile_prob: float) -> float:
+    """Compute linear-interpolated empirical quantile from an ascending numeric sequence."""
+    count = len(sorted_values)
+    if count == 0:
+        raise ValueError("sorted_values must be non-empty")
+    if count == 1:
+        return float(sorted_values[0])
+    clamped = min(1.0, max(0.0, float(quantile_prob)))
+    position = clamped * float(count - 1)
+    lower_idx = int(math.floor(position))
+    upper_idx = min(count - 1, lower_idx + 1)
+    weight = position - float(lower_idx)
+    return float(sorted_values[lower_idx]) * (1.0 - weight) + float(sorted_values[upper_idx]) * weight
+
+
+def _two_sided_bootstrap_wald_p(estimate: float, bootstrap_draws: Sequence[float]) -> float:
+    """Compute two-sided asymptotic cluster-bootstrap Wald p-value."""
+    if not bootstrap_draws:
+        return 1.0
+    std_err = statistics.pstdev(bootstrap_draws)
+    if std_err <= 1e-15:
+        return 0.0 if abs(estimate) > 1e-15 else 1.0
+    z_abs = abs(estimate) / std_err
+    return min(1.0, max(0.0, math.erfc(z_abs / math.sqrt(2.0))))
+
+
+def compute_exact_shapley_values(
+    coalition_utilities: Mapping[str, float],
+    factor_names: Sequence[str] = ("C", "M", "K", "P"),
+) -> dict[str, float]:
+    """Compute exact Shapley attributions over a complete 2^k factorial utility map.
+
+    Args:
+        coalition_utilities: Mapping from k-bit binary string (for example, '1010') to scalar utility.
+        factor_names: Ordered sequence of k unique factor identifiers.
+
+    Returns:
+        Dictionary mapping each factor name to its exact Shapley value summing to U(1..1) - U(0..0).
+
+    Raises:
+        ValueError: If factor_names is empty, duplicated, or any of the 2^k bit codes is missing.
+    """
+    if isinstance(factor_names, (str, bytes)) or not isinstance(factor_names, Sequence):
+        raise ValueError("factor_names must be a non-empty sequence of unique strings")
+    clean_factors = [str(name).strip() for name in factor_names]
+    num_factors = len(clean_factors)
+    if num_factors == 0 or any(not name for name in clean_factors) or len(set(clean_factors)) != num_factors:
+        raise ValueError("factor_names must be non-empty and unique")
+    if not isinstance(coalition_utilities, Mapping):
+        raise ValueError("coalition_utilities must be a mapping of k-bit codes to finite numbers")
+
+    expected_codes = {format(mask, f"0{num_factors}b") for mask in range(1 << num_factors)}
+    missing_codes = expected_codes - set(coalition_utilities.keys())
+    if missing_codes:
+        raise ValueError(f"missing factorial coalition codes: {sorted(missing_codes)}")
+
+    validated_utilities: dict[str, float] = {}
+    for code in expected_codes:
+        raw_val = coalition_utilities[code]
+        if isinstance(raw_val, bool) or not isinstance(raw_val, (int, float)) or not math.isfinite(float(raw_val)):
+            raise ValueError(f"coalition utility for {code!r} must be a finite number, got {raw_val!r}")
+        validated_utilities[code] = float(raw_val)
+
+    factorial_n = math.factorial(num_factors)
+    shapley: dict[str, float] = {}
+    for idx, name in enumerate(clean_factors):
+        bit = 1 << (num_factors - 1 - idx)
+        accum = 0.0
+        for mask in range(1 << num_factors):
+            if mask & bit:
+                continue
+            subset_size = mask.bit_count()
+            weight = (
+                math.factorial(subset_size)
+                * math.factorial(num_factors - subset_size - 1)
+                / float(factorial_n)
+            )
+            code_without = format(mask, f"0{num_factors}b")
+            code_with = format(mask | bit, f"0{num_factors}b")
+            accum += weight * (validated_utilities[code_with] - validated_utilities[code_without])
+        shapley[name] = accum
+    return shapley
+
+
+def _build_factorial_linear_weights(
+    factor_names: Sequence[str],
+) -> tuple[
+    list[str],
+    dict[str, list[float]],
+    dict[str, list[float]],
+    dict[str, list[float]],
+]:
+    """Precompute linear contrast weight vectors over ordered bit masks 0..(2^k - 1)."""
+    num_factors = len(factor_names)
+    num_cells = 1 << num_factors
+    ordered_codes = [format(mask, f"0{num_factors}b") for mask in range(num_cells)]
+
+    main_weights: dict[str, list[float]] = {}
+    half_cells = float(1 << (num_factors - 1))
+    for idx, fname in enumerate(factor_names):
+        bit = 1 << (num_factors - 1 - idx)
+        main_weights[fname] = [
+            (1.0 / half_cells if (mask & bit) else -1.0 / half_cells)
+            for mask in range(num_cells)
+        ]
+
+    interaction_weights: dict[str, list[float]] = {}
+    if num_factors >= 2:
+        bg_cells = float(1 << (num_factors - 2))
+        for first_idx in range(num_factors):
+            for second_idx in range(first_idx + 1, num_factors):
+                pair_label = f"{factor_names[first_idx]}{factor_names[second_idx]}"
+                bit_a = 1 << (num_factors - 1 - first_idx)
+                bit_b = 1 << (num_factors - 1 - second_idx)
+                weights_pair: list[float] = []
+                for mask in range(num_cells):
+                    has_a = bool(mask & bit_a)
+                    has_b = bool(mask & bit_b)
+                    sign = 1.0 if (has_a == has_b) else -1.0
+                    weights_pair.append(sign / bg_cells)
+                interaction_weights[pair_label] = weights_pair
+
+    factorial_n = float(math.factorial(num_factors))
+    shapley_weights: dict[str, list[float]] = {}
+    for idx, fname in enumerate(factor_names):
+        bit = 1 << (num_factors - 1 - idx)
+        s_vec = [0.0] * num_cells
+        for mask in range(num_cells):
+            if mask & bit:
+                continue
+            subset_size = mask.bit_count()
+            coeff = (
+                math.factorial(subset_size)
+                * math.factorial(num_factors - subset_size - 1)
+                / factorial_n
+            )
+            s_vec[mask | bit] += coeff
+            s_vec[mask] -= coeff
+        shapley_weights[fname] = s_vec
+
+    return ordered_codes, main_weights, interaction_weights, shapley_weights
+
+
+def compute_factorial_interactions_and_shapley(
+    episode_coalition_outcomes: Mapping[str, Sequence[float]],
+    *,
+    cluster_ids: Sequence[str] | None = None,
+    factor_names: Sequence[str] = ("C", "M", "K", "P"),
+    n_bootstrap: int = 2000,
+    alpha: float = 0.05,
+    seed_key: str = "mdm-factorial-bootstrap-v1",
+) -> FactorialEffectSummary:
+    """Compute Yates/ANOVA main effects, two-way synergies, exact Shapley values, and bootstrap CIs.
+
+    Args:
+        episode_coalition_outcomes: Mapping from k-bit coalition code ('0000'..'1111') to a
+            per-episode outcome sequence of identical length N.
+        cluster_ids: Optional length-N episode cluster identifiers for cluster-robust resampling.
+        factor_names: Ordered sequence of k unique factor identifiers.
+        n_bootstrap: Number of deterministic HMAC-seeded cluster bootstrap draws (default 2,000).
+        alpha: Family-wise significance level for confidence intervals and Holm-Bonferroni tests.
+        seed_key: Deterministic HMAC seed domain string.
+
+    Returns:
+        ``FactorialEffectSummary`` with main effects, all two-way synergies, exact Shapley values,
+        95% cluster-bootstrap confidence intervals, and Holm-Bonferroni adjusted p-values.
+
+    Raises:
+        ValueError: If inputs have missing codes, mismatched episode counts, non-finite values,
+            or invalid bootstrap/alpha parameters.
+    """
+    if isinstance(factor_names, (str, bytes)) or not isinstance(factor_names, Sequence):
+        raise ValueError("factor_names must be a non-empty sequence of unique strings")
+    clean_factors = tuple(str(name).strip() for name in factor_names)
+    num_factors = len(clean_factors)
+    if num_factors == 0 or any(not name for name in clean_factors) or len(set(clean_factors)) != num_factors:
+        raise ValueError("factor_names must be non-empty and unique")
+    if isinstance(n_bootstrap, bool) or not isinstance(n_bootstrap, int) or n_bootstrap < 100:
+        raise ValueError(f"n_bootstrap must be an integer >= 100, got {n_bootstrap!r}")
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not (0.0 < float(alpha) < 1.0):
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
+    if not isinstance(seed_key, str) or not seed_key.strip():
+        raise ValueError("seed_key must be a non-empty string")
+    if not isinstance(episode_coalition_outcomes, Mapping):
+        raise ValueError("episode_coalition_outcomes must be a mapping")
+
+    ordered_codes, main_weights, interaction_weights, shapley_weights = _build_factorial_linear_weights(
+        clean_factors
+    )
+    missing_codes = set(ordered_codes) - set(episode_coalition_outcomes.keys())
+    if missing_codes:
+        raise ValueError(f"missing factorial coalition codes: {sorted(missing_codes)}")
+
+    num_cells = len(ordered_codes)
+    first_seq = episode_coalition_outcomes[ordered_codes[0]]
+    n_episodes = len(first_seq)
+    if n_episodes < 2:
+        raise ValueError(f"at least 2 episodes are required for factorial inference, got {n_episodes}")
+
+    matrix_by_cell: list[list[float]] = []
+    for code in ordered_codes:
+        seq = episode_coalition_outcomes[code]
+        if len(seq) != n_episodes:
+            raise ValueError(
+                f"coalition {code!r} has {len(seq)} episodes, expected {n_episodes}"
+            )
+        clean_col: list[float] = []
+        for idx, raw_val in enumerate(seq):
+            if isinstance(raw_val, bool) or not isinstance(raw_val, (int, float)) or not math.isfinite(float(raw_val)):
+                raise ValueError(f"non-finite outcome at coalition {code!r}, episode {idx}: {raw_val!r}")
+            clean_col.append(float(raw_val))
+        matrix_by_cell.append(clean_col)
+
+    if cluster_ids is not None:
+        if len(cluster_ids) != n_episodes:
+            raise ValueError(
+                f"cluster_ids length {len(cluster_ids)} must match n_episodes {n_episodes}"
+            )
+        resolved_clusters = [str(cid).strip() for cid in cluster_ids]
+        if any(not cid for cid in resolved_clusters):
+            raise ValueError("cluster_ids entries must be non-empty strings")
+    else:
+        resolved_clusters = [f"ep_{idx:06d}" for idx in range(n_episodes)]
+
+    cluster_order: list[str] = []
+    cluster_index_map: dict[str, int] = {}
+    cluster_sums: list[list[float]] = []
+    cluster_counts: list[int] = []
+
+    for ep_idx, cid in enumerate(resolved_clusters):
+        c_pos = cluster_index_map.get(cid)
+        if c_pos is None:
+            c_pos = len(cluster_order)
+            cluster_index_map[cid] = c_pos
+            cluster_order.append(cid)
+            cluster_sums.append([0.0] * num_cells)
+            cluster_counts.append(0)
+        row_acc = cluster_sums[c_pos]
+        for cell_idx in range(num_cells):
+            row_acc[cell_idx] += matrix_by_cell[cell_idx][ep_idx]
+        cluster_counts[c_pos] += 1
+
+    n_clusters = len(cluster_order)
+    if n_clusters < 2:
+        raise ValueError(f"at least 2 distinct clusters are required for bootstrap CIs, got {n_clusters}")
+
+    point_means_vec = [
+        sum(matrix_by_cell[cell_idx]) / float(n_episodes) for cell_idx in range(num_cells)
+    ]
+    coalition_means = {ordered_codes[idx]: point_means_vec[idx] for idx in range(num_cells)}
+    total_gain = point_means_vec[-1] - point_means_vec[0]
+
+    main_effects = {
+        fname: sum(w * m for w, m in zip(w_vec, point_means_vec))
+        for fname, w_vec in main_weights.items()
+    }
+    two_way_interactions = {
+        pair_name: sum(w * m for w, m in zip(w_vec, point_means_vec))
+        for pair_name, w_vec in interaction_weights.items()
+    }
+    shapley_values = compute_exact_shapley_values(coalition_means, clean_factors)
+
+    boot_main: dict[str, list[float]] = {fname: [] for fname in main_weights}
+    boot_inter: dict[str, list[float]] = {pname: [] for pname in interaction_weights}
+    boot_shapley: dict[str, list[float]] = {fname: [] for fname in shapley_weights}
+
+    for draw_idx in range(n_bootstrap):
+        sampled_totals = [0.0] * num_cells
+        sampled_episode_count = 0
+        for pick_idx in range(n_clusters):
+            chosen_cluster = (
+                hmac_uint64(seed_key, f"b{draw_idx}:g{pick_idx}", "cluster_bootstrap") % n_clusters
+            )
+            c_vec = cluster_sums[chosen_cluster]
+            sampled_episode_count += cluster_counts[chosen_cluster]
+            for cell_idx in range(num_cells):
+                sampled_totals[cell_idx] += c_vec[cell_idx]
+        inv_count = 1.0 / float(sampled_episode_count)
+        draw_means = [val * inv_count for val in sampled_totals]
+
+        for fname, w_vec in main_weights.items():
+            boot_main[fname].append(sum(w * m for w, m in zip(w_vec, draw_means)))
+        for pname, w_vec in interaction_weights.items():
+            boot_inter[pname].append(sum(w * m for w, m in zip(w_vec, draw_means)))
+        for fname, w_vec in shapley_weights.items():
+            boot_shapley[fname].append(sum(w * m for w, m in zip(w_vec, draw_means)))
+
+    lower_q = 0.5 * float(alpha)
+    upper_q = 1.0 - lower_q
+
+    main_effect_cis: dict[str, tuple[float, float]] = {}
+    for fname, draws in boot_main.items():
+        sorted_draws = sorted(draws)
+        main_effect_cis[fname] = (
+            _percentile_from_sorted(sorted_draws, lower_q),
+            _percentile_from_sorted(sorted_draws, upper_q),
+        )
+
+    two_way_interaction_cis: dict[str, tuple[float, float]] = {}
+    for pname, draws in boot_inter.items():
+        sorted_draws = sorted(draws)
+        two_way_interaction_cis[pname] = (
+            _percentile_from_sorted(sorted_draws, lower_q),
+            _percentile_from_sorted(sorted_draws, upper_q),
+        )
+
+    shapley_cis: dict[str, tuple[float, float]] = {}
+    shapley_raw_p_list: list[float] = []
+    shapley_keys_ordered = list(clean_factors)
+    for fname in shapley_keys_ordered:
+        draws = boot_shapley[fname]
+        sorted_draws = sorted(draws)
+        shapley_cis[fname] = (
+            _percentile_from_sorted(sorted_draws, lower_q),
+            _percentile_from_sorted(sorted_draws, upper_q),
+        )
+        shapley_raw_p_list.append(_two_sided_bootstrap_wald_p(shapley_values[fname], draws))
+
+    effect_keys_ordered: list[str] = list(main_weights.keys()) + list(interaction_weights.keys())
+    raw_p_list: list[float] = []
+    raw_p_values: dict[str, float] = {}
+    for fname in main_weights:
+        p_val = _two_sided_bootstrap_wald_p(main_effects[fname], boot_main[fname])
+        raw_p_values[fname] = p_val
+        raw_p_list.append(p_val)
+    for pname in interaction_weights:
+        p_val = _two_sided_bootstrap_wald_p(two_way_interactions[pname], boot_inter[pname])
+        raw_p_values[pname] = p_val
+        raw_p_list.append(p_val)
+
+    adjusted_p_list, rejected_list = holm_bonferroni_adjust(raw_p_list, alpha=float(alpha))
+    holm_adjusted_p_values = {
+        key: adjusted_p_list[idx] for idx, key in enumerate(effect_keys_ordered)
+    }
+    significant_effects = {
+        key: rejected_list[idx] for idx, key in enumerate(effect_keys_ordered)
+    }
+
+    shapley_adj_p_list, _ = holm_bonferroni_adjust(shapley_raw_p_list, alpha=float(alpha))
+    shapley_holm_p_values = {
+        key: shapley_adj_p_list[idx] for idx, key in enumerate(shapley_keys_ordered)
+    }
+
+    return FactorialEffectSummary(
+        factor_names=clean_factors,
+        n_episodes=n_episodes,
+        n_clusters=n_clusters,
+        n_bootstrap=n_bootstrap,
+        coalition_means=coalition_means,
+        total_gain=total_gain,
+        main_effects=main_effects,
+        main_effect_cis=main_effect_cis,
+        two_way_interactions=two_way_interactions,
+        two_way_interaction_cis=two_way_interaction_cis,
+        shapley_values=shapley_values,
+        shapley_cis=shapley_cis,
+        raw_p_values=raw_p_values,
+        holm_adjusted_p_values=holm_adjusted_p_values,
+        significant_effects=significant_effects,
+        shapley_holm_p_values=shapley_holm_p_values,
+    )
+
 
 
 

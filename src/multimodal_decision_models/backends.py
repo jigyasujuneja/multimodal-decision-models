@@ -31,6 +31,7 @@ Supports:
 
 from __future__ import annotations
 
+import copy
 import concurrent.futures as cf
 import http.client
 import inspect
@@ -50,41 +51,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .calibration import (
-    VALID_PRIOR_GATE_MODES,
-    apply_layer5_deterministic_guards,
-    inject_evidence_slot,
-    normalized_entropy,
-    pre_gated_bayesian_poe_fusion,
-    stage2a_fast_exit_gate,
-)
-from .conformal import (
-    DEFAULT_CONFORMAL_ABSTAIN_KEYS,
-    conformal_prediction_set,
-)
-from .contracts import (
-    UNTRUSTED_BOUNDARY_NOTICE,
-    ContentAddressedDecisionCache,
-    DecisionContractError,
-    LogprobAlignmentError,
-    SchemaContractViolationError,
-    UpstreamTransientError,
-    _sanitize_value,
-    compute_decision_cache_key,
-    wrap_untrusted_state,
-)
-from .shortlist import shortlist_wide_question
-from .types import (
-    DEFAULT_HESITATION_THRESHOLD,
-    MAX_EXTENDED_OPTIONS_PER_SLOT,
-    MAX_OPTIONS_PER_SLOT,
-    UNIVERSAL_256_DECISION_CODES,
-    DecisionQuestion,
-    DecisionResult,
-    DecisionTerminalState,
-    FailureCategory,
-    SlotReadout,
-)
+from .calibration import VALID_PRIOR_GATE_MODES, apply_layer5_deterministic_guards, inject_evidence_slot, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
+from .conformal import conformal_prediction_set
+from .contracts import UNTRUSTED_BOUNDARY_NOTICE, ContentAddressedDecisionCache, DecisionContractError, LogprobAlignmentError, SchemaContractViolationError, UpstreamTransientError, _sanitize_value, compute_decision_cache_key, wrap_untrusted_state
+from .shortlist import shortlist_wide_question, split_identifier_tokens
+from .types import DEFAULT_HESITATION_THRESHOLD, MAX_EXTENDED_OPTIONS_PER_SLOT, MAX_OPTIONS_PER_SLOT, UNIVERSAL_256_DECISION_CODES, DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory, SlotReadout
 
 OPENAI_MAX_TOP_LOGPROBS = 20
 _THINKING_TAG_TOKENS = frozenset({"<think>", "</think>", "<|thought|>", "<thought>", "thought"})
@@ -471,7 +442,10 @@ def _post_json_with_retry(
             with opener.open(request, timeout=eff_timeout) as response:
                 raw_response_text = _read_bounded_utf8_response(response)
             try:
-                parsed = json.loads(raw_response_text)
+                parsed = json.loads(
+                    raw_response_text,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
             except json.JSONDecodeError as exc:
                 raise SchemaContractViolationError(f"upstream returned invalid JSON: {exc}") from exc
             if not isinstance(parsed, dict):
@@ -491,7 +465,13 @@ def _post_json_with_retry(
                 ) from exc
         except SchemaContractViolationError:
             raise
-        except (TimeoutError, socket.timeout, urllib.error.URLError, http.client.HTTPException) as exc:
+        except (
+            TimeoutError,
+            socket.timeout,
+            urllib.error.URLError,
+            http.client.HTTPException,
+            OSError,
+        ) as exc:
             last_err = UpstreamTransientError(f"upstream timeout or transport error: {exc}")
 
         if attempt + 1 < attempts:
@@ -806,9 +786,9 @@ class DgemSystemOneBackend:
 class GevStudioSystemOneBackend:
     """Adapter for Gev Studio (/api/gev/systemone) multi-target System 1 decision endpoints.
 
-    Supports all Gev Studio backend targets via `?target=...` (e.g., `gemini-v4xs-decisions`,
-    `beyond-decision:/models/gemini-v4xs-decisions?hc=true`, `gemini-3.5-flash-lite`,
-    `gemini-3.1-flash-lite`, `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`),
+    Supports Gev Studio backend targets via `?target=...` (for example, `gemini-decision-1`,
+    `gemini-decision-1?hc=true`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`,
+    `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`),
     multimodal `media` payloads (`image/png`, `image/jpeg`, `audio/wav`, `video/mp4`),
     and all 3 question types (`choice`, `noul`, `score`).
     """
@@ -1840,6 +1820,918 @@ class VertexGeminiBackend:
         dists, evidence_read = self.parse_generate_content_response(data, questions)
         self.last_evidence = {qid: evidence_read for qid in questions if evidence_read}
         return dists
+
+    @classmethod
+    def from_ga_preset(
+        cls,
+        preset_model: str,
+        project: str,
+        *,
+        location: str = "global",
+        access_token_fn: Callable[[], str] | None = None,
+        timeout_sec: float | None = None,
+        max_retries: int = 2,
+        base_backoff_sec: float = 0.05,
+        endpoint_override: str | None = None,
+    ) -> VertexGeminiBackend:
+        """Construct a ``VertexGeminiBackend`` from an approved GA Gemini model preset.
+
+        Args:
+            preset_model: Model identifier in ``GA_VERTEX_GEMINI_MODELS``.
+            project: Google Cloud project identifier.
+            location: Vertex AI region or ``global``.
+            access_token_fn: Optional zero-arg OAuth bearer token provider.
+            timeout_sec: Optional socket timeout override in seconds.
+            max_retries: Bounded retry count on transient HTTP errors.
+            base_backoff_sec: Base jittered retry backoff in seconds.
+            endpoint_override: Optional validated endpoint URL override.
+
+        Returns:
+            Configured ``VertexGeminiBackend`` instance.
+
+        Raises:
+            SchemaContractViolationError: If ``preset_model`` is not in ``GA_VERTEX_GEMINI_MODELS``.
+        """
+        if not isinstance(preset_model, str) or preset_model not in GA_VERTEX_GEMINI_MODEL_PRESETS:
+            raise SchemaContractViolationError(
+                f"preset_model must be one of {GA_VERTEX_GEMINI_MODELS}, got {preset_model!r}"
+            )
+        preset_cfg = GA_VERTEX_GEMINI_MODEL_PRESETS[preset_model]
+        resolved_timeout = (
+            float(preset_cfg["timeout_sec"]) if timeout_sec is None else timeout_sec
+        )
+        return cls(
+            project=project,
+            model=str(preset_cfg["model"]),
+            location=location,
+            access_token_fn=access_token_fn,
+            timeout_sec=resolved_timeout,
+            max_retries=max_retries,
+            base_backoff_sec=base_backoff_sec,
+            endpoint_override=endpoint_override,
+        )
+
+
+GA_VERTEX_GEMINI_MODELS: tuple[str, ...] = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",
+    "gemini-3.5-pro",
+)
+
+GA_VERTEX_GEMINI_MODEL_PRESETS: Mapping[str, Mapping[str, str | float]] = {
+    "gemini-3.5-flash-lite": {
+        "model": "gemini-3.5-flash-lite",
+        "timeout_sec": 30.0,
+        "tier": "fast_readout",
+    },
+    "gemini-3.5-flash": {
+        "model": "gemini-3.5-flash",
+        "timeout_sec": 45.0,
+        "tier": "balanced",
+    },
+    "gemini-3.8-flash": {
+        "model": "gemini-3.8-flash",
+        "timeout_sec": 60.0,
+        "tier": "stage2_flash",
+    },
+    "gemini-3.5-pro": {
+        "model": "gemini-3.5-pro",
+        "timeout_sec": 90.0,
+        "tier": "stage2_pro",
+    },
+}
+
+_SENSITIVE_QUERY_PARAM_NAMES: frozenset[str] = frozenset(
+    {"key", "api_key", "apikey", "access_token", "token", "secret"}
+)
+_SAFE_MODEL_RESOURCE_RE = re.compile(r"^(?:models/)?[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+class GeminiDecisionsBackend:
+    """Adapter for the Google AI Studio ``/v1beta/decisions`` CreateDecision REST API."""
+
+    DEFAULT_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/decisions"
+    DEFAULT_MODEL: str = "models/gemini-decision-1"
+    MAX_DECISION_OPTIONS: int = 255
+    MAX_QUESTIONS_PER_REQUEST: int = 1000
+    ALLOWED_EXECUTION_MODES: frozenset[str] = frozenset(
+        {
+            "SCORING_EXECUTION_MODE_UNSPECIFIED",
+            "SCORING_EXECUTION_MODE_TREE_PREFILL",
+            "SCORING_EXECUTION_MODE_FORCED_DECODING",
+        }
+    )
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str = "models/gemini-decision-1",
+        base_url: str = "https://generativelanguage.googleapis.com/v1beta/decisions",
+        execution_mode: str = "SCORING_EXECUTION_MODE_TREE_PREFILL",
+        temperature: float = 1.0,
+        include_none_of_above: bool = False,
+        score_mode: bool = False,
+        shortlist_top_k: int = 200,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        base_backoff_sec: float = 0.05,
+        name: str | None = None,
+    ) -> None:
+        """Initialize the GeminiDecisionsBackend client.
+
+        Args:
+            api_key: Google AI Studio API key (falls back to GEMINI_API_KEY env var).
+            model: Target decision model resource name.
+            base_url: HTTPS endpoint URL for CreateDecision (loopback HTTP allowed in tests).
+            execution_mode: Scoring execution mode enum string.
+            temperature: Positive softmax temperature applied by the server.
+            include_none_of_above: Whether choice questions request abstention mass.
+            score_mode: Whether questions default to ordered numeric rubric scoring.
+            shortlist_top_k: Candidate cap applied when bridging wide catalogs (K > 255).
+            timeout_seconds: Per-request socket timeout in seconds.
+            max_retries: Bounded retry count on transient HTTP or transport errors.
+            base_backoff_sec: Base exponential backoff duration in seconds.
+            name: Optional backend identifier override.
+
+        Raises:
+            SchemaContractViolationError: If base_url is not HTTPS (except localhost), leaks
+                credentials in query parameters, or temperature/timeout/execution_mode are invalid.
+        """
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise SchemaContractViolationError(f"base_url must be a non-empty string, got {base_url!r}")
+        clean_base_url = base_url.strip().rstrip("/")
+        parse_url_origin(clean_base_url, allow_insecure_http=False)
+        parsed_url = urllib.parse.urlparse(clean_base_url)
+        for query_key, _ in urllib.parse.parse_qsl(parsed_url.query, keep_blank_values=True):
+            if query_key.strip().lower() in _SENSITIVE_QUERY_PARAM_NAMES:
+                raise SchemaContractViolationError(
+                    f"API credentials must be passed via x-goog-api-key header, never in base_url query parameter {query_key!r}"
+                )
+
+        if not isinstance(model, str) or not _SAFE_MODEL_RESOURCE_RE.match(model.strip()):
+            raise SchemaContractViolationError(f"invalid decision model resource name: {model!r}")
+        clean_model = model.strip()
+        if not clean_model.startswith("models/"):
+            clean_model = f"models/{clean_model}"
+
+        if not isinstance(execution_mode, str) or execution_mode not in self.ALLOWED_EXECUTION_MODES:
+            raise SchemaContractViolationError(
+                f"execution_mode must be one of {sorted(self.ALLOWED_EXECUTION_MODES)}, got {execution_mode!r}"
+            )
+        if not isinstance(include_none_of_above, bool):
+            raise SchemaContractViolationError("include_none_of_above must be a boolean")
+        if not isinstance(score_mode, bool):
+            raise SchemaContractViolationError("score_mode must be a boolean")
+        if api_key is not None:
+            if not isinstance(api_key, str):
+                raise SchemaContractViolationError("api_key must be a string or None")
+            if "\r" in api_key or "\n" in api_key or "\x00" in api_key:
+                raise SchemaContractViolationError("api_key must not contain control characters")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise SchemaContractViolationError("name must be a non-empty string when provided")
+
+        self._api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
+        self.model = clean_model
+        self.base_url = clean_base_url
+        self.execution_mode = execution_mode
+        self.temperature = _require_positive_finite_number(temperature, "temperature")
+        self.include_none_of_above = include_none_of_above
+        self.score_mode = score_mode
+        self.shortlist_top_k = _require_positive_int(shortlist_top_k, "shortlist_top_k")
+        self.timeout_seconds = _require_positive_finite_number(timeout_seconds, "timeout_seconds")
+        self.max_retries = _require_nonneg_int(max_retries, "max_retries")
+        self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
+        self.max_native_options = (
+            self.MAX_DECISION_OPTIONS - 1 if self.include_none_of_above else self.MAX_DECISION_OPTIONS
+        )
+        self.name = name.strip() if isinstance(name, str) and name.strip() else f"gemini_decisions:{self.model}"
+        self.last_evidence: dict[str, str] = {}
+        self.last_raw_metadata: dict[str, Any] = {}
+
+    def _resolve_api_key(self) -> str:
+        """Resolve the Google AI Studio API key without embedding secrets in URLs."""
+        if self._api_key:
+            return self._api_key
+        env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if env_key:
+            if "\r" in env_key or "\n" in env_key or "\x00" in env_key:
+                raise SchemaContractViolationError("GEMINI_API_KEY contains invalid control characters")
+            return env_key
+        raise SchemaContractViolationError(
+            "GeminiDecisionsBackend requires api_key or GEMINI_API_KEY environment variable"
+        )
+
+    @staticmethod
+    def _parse_ordered_numeric_keys(option_keys: Sequence[str]) -> list[float] | None:
+        """Return strictly ascending numeric values if all option keys represent ordered scores."""
+        if len(option_keys) < 2:
+            return None
+        parsed_values: list[float] = []
+        for raw_key in option_keys:
+            stripped = str(raw_key).strip()
+            if not stripped:
+                return None
+            try:
+                numeric_val = float(stripped)
+            except ValueError:
+                return None
+            if not math.isfinite(numeric_val):
+                return None
+            parsed_values.append(numeric_val)
+        for idx in range(1, len(parsed_values)):
+            if parsed_values[idx] <= parsed_values[idx - 1]:
+                return None
+        return parsed_values
+
+    @staticmethod
+    def _is_binary_yes_no_or_true_false(option_keys: Sequence[str]) -> bool:
+        """Return True when a 2-option slot represents yes/no or true/false."""
+        if len(option_keys) != 2:
+            return False
+        lowered = {str(key).strip().lower() for key in option_keys}
+        return lowered in ({"yes", "no"}, {"true", "false"})
+
+    @staticmethod
+    def _resolve_binary_keys(option_keys: Sequence[str]) -> tuple[str, str]:
+        """Return ``(negative_key, positive_key)`` preserving caller capitalization."""
+        first_key, second_key = str(option_keys[0]), str(option_keys[1])
+        positive_tokens = {"yes", "true", "1", "positive", "pass", "valid"}
+        negative_tokens = {"no", "false", "0", "negative", "fail", "invalid"}
+        if first_key.strip().lower() in positive_tokens and second_key.strip().lower() in negative_tokens:
+            return second_key, first_key
+        return first_key, second_key
+
+    def _classify_question_kind(self, question: DecisionQuestion) -> str:
+        """Classify a ``DecisionQuestion`` into ``noul``, ``choice``, or ``score``."""
+        option_keys = question.option_keys()
+        explicit_kind = str(question.evidence_criteria.get("question_type", "")).strip().lower()
+        explicit_score_flag = str(question.evidence_criteria.get("score_mode", "")).strip().lower() == "true"
+        if explicit_kind == "choice":
+            return "choice"
+        if (
+            question.type == "score"
+            or self.score_mode
+            or bool(question.levels)
+            or explicit_kind == "score"
+            or explicit_score_flag
+            or question.evidence_prompt.strip().lower() in ("score", "numeric_score", "ordered_numeric")
+        ):
+            return "score"
+        if question.type != "noul" and self._parse_ordered_numeric_keys(option_keys) is not None:
+            return "score"
+        if question.type == "noul" or self._is_binary_yes_no_or_true_false(option_keys):
+            return "noul"
+        return "choice"
+
+    @staticmethod
+    def _compute_fallback_shortlist_scores(
+        state: Any,
+        question: DecisionQuestion,
+    ) -> dict[str, float]:
+        """Compute deterministic prior or lexical overlap scores for wide-catalog bridging."""
+        keys = question.option_keys()
+        if question.prior_logits:
+            return {key: float(question.prior_logits.get(key, float("-inf"))) for key in keys}
+        state_tokens = set(split_identifier_tokens(str(state)))
+        scores: dict[str, float] = {}
+        for idx, key in enumerate(keys):
+            option_tokens = split_identifier_tokens(f"{key} {question.criteria.get(key, '')}")
+            overlap_count = sum(1 for tok in option_tokens if tok in state_tokens)
+            scores[key] = float(overlap_count) - (idx * 1e-6)
+        return scores
+
+    @staticmethod
+    def _encode_inline_image(raw_image: str) -> dict[str, Any]:
+        """Convert a data URI or base64 image string into an ``inline_data`` part."""
+        stripped = raw_image.strip()
+        if stripped.startswith("data:") and ";base64," in stripped:
+            header, b64_payload = stripped.split(";base64,", 1)
+            mime_type = header[len("data:") :].strip() or "image/png"
+            return {"inline_data": {"mime_type": mime_type, "data": b64_payload.strip()}}
+        inferred = GevStudioSystemOneBackend._infer_mime_and_b64(stripped)
+        return {"inline_data": {"mime_type": inferred["mime_type"], "data": inferred["data"]}}
+
+    def build_decisions_payload(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: Sequence[str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        """Build a ``/v1beta/decisions`` JSON request payload and per-slot decoding plan.
+
+        Args:
+            state: Arbitrary structured or text state fenced inside ``<untrusted_data>``.
+            questions: Mapping from ``slot_id`` to ``DecisionQuestion``.
+            images: Optional sequence of base64 or data-URI image payloads.
+
+        Returns:
+            Tuple ``(request_payload, slot_plans)`` describing wire questions and option keys.
+
+        Raises:
+            SchemaContractViolationError: If question counts or cardinalities violate API bounds.
+        """
+        if not isinstance(questions, Mapping) or not questions:
+            raise SchemaContractViolationError("questions must be a non-empty mapping")
+        if len(questions) > self.MAX_QUESTIONS_PER_REQUEST:
+            raise SchemaContractViolationError(
+                f"CreateDecision supports at most {self.MAX_QUESTIONS_PER_REQUEST} questions, got {len(questions)}"
+            )
+
+        parts: list[dict[str, Any]] = []
+        if images is not None:
+            if isinstance(images, (str, bytes, bytearray)) or not isinstance(images, Sequence):
+                raise SchemaContractViolationError("images must be a sequence of string payloads")
+            for image_item in images:
+                if not isinstance(image_item, str):
+                    raise SchemaContractViolationError("each image entry must be a string")
+                if image_item.strip():
+                    parts.append(self._encode_inline_image(image_item))
+
+        prompt_text = f"{UNTRUSTED_BOUNDARY_NOTICE}\nState:\n{wrap_untrusted_state(state)}"
+        parts.append({"text": prompt_text})
+
+        wire_questions: list[dict[str, Any]] = []
+        slot_plans: dict[str, dict[str, Any]] = {}
+
+        for slot_id, question in questions.items():
+            if not isinstance(slot_id, str) or not slot_id.strip():
+                raise SchemaContractViolationError(f"slot_id must be a non-empty string, got {slot_id!r}")
+            if not isinstance(question, DecisionQuestion):
+                raise SchemaContractViolationError(
+                    f"question {slot_id!r} must be a DecisionQuestion, got {type(question).__qualname__}"
+                )
+
+            kind = self._classify_question_kind(question)
+            if kind == "noul":
+                raw_keys = question.option_keys()
+                if len(raw_keys) != 2:
+                    raise SchemaContractViolationError(
+                        f"noul slot {slot_id!r} requires exactly 2 binary options, got {len(raw_keys)}"
+                    )
+                neg_key, pos_key = self._resolve_binary_keys(raw_keys)
+                wire_questions.append(
+                    {
+                        "id": slot_id,
+                        "noul": {
+                            "question": question.instructions,
+                        },
+                    }
+                )
+                slot_plans[slot_id] = {
+                    "kind": "noul",
+                    "negative_key": neg_key,
+                    "positive_key": pos_key,
+                    "explicit_keys": [neg_key, pos_key],
+                    "shortlist_bridged": False,
+                    "original_option_count": 2,
+                }
+            elif kind == "score":
+                bucket_keys = list(question.levels) if question.levels else question.option_keys()
+                if len(bucket_keys) < 2 or len(bucket_keys) > self.MAX_DECISION_OPTIONS:
+                    raise SchemaContractViolationError(
+                        f"score slot {slot_id!r} requires 2..{self.MAX_DECISION_OPTIONS} buckets, got {len(bucket_keys)}"
+                    )
+                parsed_numeric = self._parse_ordered_numeric_keys(bucket_keys)
+                bucket_scores = (
+                    parsed_numeric
+                    if parsed_numeric is not None
+                    else [float(idx) for idx in range(len(bucket_keys))]
+                )
+                wire_questions.append(
+                    {
+                        "id": slot_id,
+                        "score": {
+                            "question": question.instructions,
+                            "buckets": [
+                                {
+                                    "score": score_val,
+                                    "label": bucket_key,
+                                    "description": question.criteria.get(bucket_key, bucket_key),
+                                }
+                                for bucket_key, score_val in zip(bucket_keys, bucket_scores)
+                            ],
+                        },
+                    }
+                )
+                slot_plans[slot_id] = {
+                    "kind": "score",
+                    "explicit_keys": bucket_keys,
+                    "bucket_scores": bucket_scores,
+                    "shortlist_bridged": False,
+                    "original_option_count": len(bucket_keys),
+                }
+            else:
+                raw_keys = question.option_keys()
+                if len(raw_keys) < 2:
+                    raise SchemaContractViolationError(
+                        f"choice slot {slot_id!r} requires >= 2 options, got {len(raw_keys)}"
+                    )
+                abstention_key = "none_of_the_above"
+                if self.include_none_of_above:
+                    candidate_question = (
+                        DecisionQuestion(
+                            type="choice",
+                            instructions=question.instructions,
+                            criteria={k: v for k, v in question.criteria.items() if k != abstention_key},
+                            order=[k for k in raw_keys if k != abstention_key],
+                            prior_logits={
+                                k: v for k, v in question.prior_logits.items() if k != abstention_key
+                            },
+                            evidence_prompt=question.evidence_prompt,
+                            evidence_criteria=dict(question.evidence_criteria),
+                        )
+                        if abstention_key in raw_keys and len(raw_keys) > 2
+                        else question
+                    )
+                    max_explicit = self.MAX_DECISION_OPTIONS - 1
+                    was_bridged = len(candidate_question.option_keys()) > max_explicit
+                    if was_bridged:
+                        bridge_scores = self._compute_fallback_shortlist_scores(state, candidate_question)
+                        bridged_q = shortlist_wide_question(
+                            candidate_question,
+                            scores=bridge_scores,
+                            top_k=min(self.shortlist_top_k, max_explicit),
+                            catch_all_key="",
+                            max_options_ceiling=max_explicit,
+                        )
+                    else:
+                        bridged_q = candidate_question
+                    explicit_keys = bridged_q.option_keys()
+                else:
+                    max_explicit = self.MAX_DECISION_OPTIONS
+                    was_bridged = len(raw_keys) > max_explicit
+                    if was_bridged:
+                        bridge_scores = self._compute_fallback_shortlist_scores(state, question)
+                        bridged_q = shortlist_wide_question(
+                            question,
+                            scores=bridge_scores,
+                            top_k=min(self.shortlist_top_k, max_explicit - 1),
+                            catch_all_key=abstention_key,
+                            max_options_ceiling=max_explicit,
+                        )
+                    else:
+                        bridged_q = question
+                    explicit_keys = bridged_q.option_keys()
+
+                choice_block: dict[str, Any] = {
+                    "question": bridged_q.instructions,
+                    "options": [
+                        {
+                            "key": option_key,
+                            "description": bridged_q.criteria.get(option_key, option_key),
+                        }
+                        for option_key in explicit_keys
+                    ],
+                    "include_none_of_above": self.include_none_of_above,
+                }
+                wire_questions.append({"id": slot_id, "choice": choice_block})
+                slot_plans[slot_id] = {
+                    "kind": "choice",
+                    "explicit_keys": explicit_keys,
+                    "include_none_of_above": self.include_none_of_above,
+                    "abstention_key": abstention_key,
+                    "shortlist_bridged": was_bridged,
+                    "original_option_count": len(raw_keys),
+                }
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "contents": [{"role": "user", "parts": parts}],
+            "questions": wire_questions,
+            "execution_mode": self.execution_mode,
+            "temperature": self.temperature,
+        }
+        return payload, slot_plans
+
+    @staticmethod
+    def _coerce_log_likelihood(raw_value: Any, label: str) -> float:
+        """Validate a single log-likelihood entry without allowing NaN, +inf, or booleans."""
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise LogprobAlignmentError(f"{label} must be a numeric log-likelihood, got {raw_value!r}")
+        value = float(raw_value)
+        if math.isnan(value) or (math.isinf(value) and value > 0.0):
+            raise LogprobAlignmentError(f"{label} contains invalid non-finite log-likelihood {value!r}")
+        return value
+
+    @classmethod
+    def _normalize_log_likelihood_map(
+        cls,
+        raw_log_map: Mapping[str, Any],
+        label: str,
+    ) -> dict[str, float]:
+        """Normalize option log-likelihoods stably in log-space via ``_logaddexp``."""
+        if not raw_log_map:
+            raise LogprobAlignmentError(f"{label} returned empty log_likelihoods")
+        clean_logs: dict[str, float] = {}
+        log_partition = float("-inf")
+        for key, raw_ll in raw_log_map.items():
+            ll_val = cls._coerce_log_likelihood(raw_ll, f"{label}[{key!r}]")
+            clean_logs[key] = ll_val
+            log_partition = _logaddexp(log_partition, ll_val)
+        if not math.isfinite(log_partition):
+            raise LogprobAlignmentError(
+                f"{label} has zero finite probability mass across options (log_z={log_partition!r})"
+            )
+        unnormalized = {key: math.exp(ll_val - log_partition) for key, ll_val in clean_logs.items()}
+        mass_sum = sum(unnormalized.values())
+        if mass_sum <= 0.0 or not math.isfinite(mass_sum):
+            raise LogprobAlignmentError(f"{label} normalized probability sum is invalid: {mass_sum!r}")
+        return {key: val / mass_sum for key, val in unnormalized.items()}
+
+    @classmethod
+    def _extract_aligned_log_map(
+        cls,
+        raw_lls: Any,
+        expected_keys: Sequence[str],
+        label: str,
+    ) -> dict[str, float]:
+        """Align list- or dict-formatted ``log_likelihoods`` onto ``expected_keys``."""
+        if isinstance(raw_lls, Mapping):
+            missing = [key for key in expected_keys if key not in raw_lls]
+            if missing or len(raw_lls) != len(expected_keys):
+                raise LogprobAlignmentError(
+                    f"{label} log_likelihoods keys {list(raw_lls.keys())} do not match expected {list(expected_keys)}"
+                )
+            return {key: cls._coerce_log_likelihood(raw_lls[key], f"{label}[{key!r}]") for key in expected_keys}
+        if isinstance(raw_lls, Sequence) and not isinstance(raw_lls, (str, bytes, bytearray)):
+            if len(raw_lls) != len(expected_keys):
+                raise LogprobAlignmentError(
+                    f"{label} log_likelihoods length {len(raw_lls)} does not match expected {len(expected_keys)}"
+                )
+            return {
+                key: cls._coerce_log_likelihood(raw_val, f"{label}[{idx}]")
+                for idx, (key, raw_val) in enumerate(zip(expected_keys, raw_lls))
+            }
+        raise LogprobAlignmentError(f"{label} missing or malformed log_likelihoods: {raw_lls!r}")
+
+    def parse_decisions_response(
+        self,
+        response_data: Mapping[str, Any],
+        slot_plans: Mapping[str, Mapping[str, Any]],
+    ) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
+        """Parse and validate a ``/v1beta/decisions`` JSON response without uniform fallbacks.
+
+        Args:
+            response_data: Parsed JSON object returned by ``/v1beta/decisions``.
+            slot_plans: Per-slot decoding plan produced by ``build_decisions_payload``.
+
+        Returns:
+            Tuple ``(slot_distributions, raw_metadata)``.
+
+        Raises:
+            LogprobAlignmentError: If log-likelihoods are missing, misaligned, NaN, or +inf.
+            SchemaContractViolationError: If structural envelope or usage metadata is malformed.
+        """
+        if not isinstance(response_data, Mapping):
+            raise SchemaContractViolationError("CreateDecision response root must be a JSON object")
+
+        raw_decisions = response_data.get("decisions")
+        if raw_decisions is None:
+            raw_decisions = response_data.get("answers")
+        decision_by_slot: dict[str, Mapping[str, Any]] = {}
+        ordered_slot_ids = list(slot_plans.keys())
+
+        if isinstance(raw_decisions, Mapping):
+            for slot_id in ordered_slot_ids:
+                item = raw_decisions.get(slot_id)
+                if not isinstance(item, Mapping):
+                    raise SchemaContractViolationError(f"missing decision object for slot {slot_id!r}")
+                decision_by_slot[slot_id] = item
+        elif isinstance(raw_decisions, list):
+            if len(raw_decisions) != len(ordered_slot_ids):
+                raise SchemaContractViolationError(
+                    f"decisions array length {len(raw_decisions)} does not match requested {len(ordered_slot_ids)} slots"
+                )
+            for idx, entry in enumerate(raw_decisions):
+                if not isinstance(entry, Mapping):
+                    raise SchemaContractViolationError(f"decisions[{idx}] must be a JSON object")
+                entry_id = entry.get("id")
+                if isinstance(entry_id, str) and entry_id in slot_plans:
+                    if entry_id in decision_by_slot:
+                        raise SchemaContractViolationError(f"duplicate decision id {entry_id!r} in response")
+                    decision_by_slot[entry_id] = entry
+                else:
+                    fallback_slot = ordered_slot_ids[idx]
+                    if fallback_slot in decision_by_slot:
+                        raise SchemaContractViolationError(
+                            f"unaligned decision id {entry_id!r} at index {idx}"
+                        )
+                    decision_by_slot[fallback_slot] = entry
+        else:
+            raise SchemaContractViolationError("CreateDecision response missing 'decisions' collection")
+
+        distributions: dict[str, dict[str, float]] = {}
+        slots_meta: dict[str, dict[str, Any]] = {}
+        abstention_lls: dict[str, float] = {}
+
+        for slot_id in ordered_slot_ids:
+            plan = slot_plans[slot_id]
+            entry = decision_by_slot[slot_id]
+            kind = str(plan["kind"])
+
+            if kind == "noul":
+                sub_obj = entry.get("noul") if isinstance(entry.get("noul"), Mapping) else entry
+                assert isinstance(sub_obj, Mapping)
+                neg_key = str(plan["negative_key"])
+                pos_key = str(plan["positive_key"])
+                raw_lls = (
+                    sub_obj.get("log_likelihoods")
+                    if "log_likelihoods" in sub_obj
+                    else sub_obj.get("logLikelihoods")
+                )
+                if raw_lls is not None:
+                    if isinstance(raw_lls, Mapping):
+                        lowered_map = {str(k).strip().lower(): v for k, v in raw_lls.items()}
+                        neg_aliases = (neg_key.strip().lower(), "no", "false", "0")
+                        pos_aliases = (pos_key.strip().lower(), "yes", "true", "1")
+                        neg_raw = next((lowered_map[a] for a in neg_aliases if a in lowered_map), None)
+                        pos_raw = next((lowered_map[a] for a in pos_aliases if a in lowered_map), None)
+                        if neg_raw is None or pos_raw is None:
+                            raise LogprobAlignmentError(
+                                f"noul slot {slot_id!r} log_likelihoods missing negative/positive keys: {raw_lls!r}"
+                            )
+                        aligned_logs = {
+                            neg_key: self._coerce_log_likelihood(neg_raw, f"noul[{slot_id!r}].neg"),
+                            pos_key: self._coerce_log_likelihood(pos_raw, f"noul[{slot_id!r}].pos"),
+                        }
+                    else:
+                        aligned_logs = self._extract_aligned_log_map(
+                            raw_lls, [neg_key, pos_key], f"noul[{slot_id!r}]"
+                        )
+                elif (
+                    "no_log_likelihood" in sub_obj or "noLogLikelihood" in sub_obj
+                ) and (
+                    "yes_log_likelihood" in sub_obj or "yesLogLikelihood" in sub_obj
+                ):
+                    raw_neg = sub_obj.get("no_log_likelihood", sub_obj.get("noLogLikelihood"))
+                    raw_pos = sub_obj.get("yes_log_likelihood", sub_obj.get("yesLogLikelihood"))
+                    aligned_logs = {
+                        neg_key: self._coerce_log_likelihood(raw_neg, f"noul[{slot_id!r}].no"),
+                        pos_key: self._coerce_log_likelihood(raw_pos, f"noul[{slot_id!r}].yes"),
+                    }
+                else:
+                    raise LogprobAlignmentError(f"noul slot {slot_id!r} omitted log_likelihoods")
+
+                distributions[slot_id] = self._normalize_log_likelihood_map(
+                    aligned_logs, f"noul[{slot_id!r}]"
+                )
+                slots_meta[slot_id] = {
+                    "question_kind": "noul",
+                    "log_likelihoods": dict(aligned_logs),
+                    "shortlist_bridged": False,
+                }
+
+            elif kind == "score":
+                sub_obj = entry.get("score") if isinstance(entry.get("score"), Mapping) else entry
+                assert isinstance(sub_obj, Mapping)
+                bucket_keys = list(plan["explicit_keys"])
+                bucket_scores = [float(val) for val in plan["bucket_scores"]]
+                raw_lls = (
+                    sub_obj.get("log_likelihoods")
+                    if "log_likelihoods" in sub_obj
+                    else sub_obj.get("logLikelihoods")
+                )
+                aligned_logs = self._extract_aligned_log_map(
+                    raw_lls, bucket_keys, f"score[{slot_id!r}]"
+                )
+                norm_probs = self._normalize_log_likelihood_map(aligned_logs, f"score[{slot_id!r}]")
+                distributions[slot_id] = norm_probs
+
+                raw_expected = sub_obj.get("expected_score", sub_obj.get("expectedScore"))
+                if raw_expected is not None:
+                    expected_score = self._coerce_log_likelihood(
+                        raw_expected, f"score[{slot_id!r}].expected_score"
+                    )
+                else:
+                    expected_score = sum(
+                        norm_probs[b_key] * b_val for b_key, b_val in zip(bucket_keys, bucket_scores)
+                    )
+
+                raw_variance = sub_obj.get("variance")
+                if raw_variance is not None:
+                    variance_val = self._coerce_log_likelihood(
+                        raw_variance, f"score[{slot_id!r}].variance"
+                    )
+                    if variance_val < 0.0:
+                        raise LogprobAlignmentError(
+                            f"score[{slot_id!r}].variance must be >= 0, got {variance_val!r}"
+                        )
+                else:
+                    variance_val = sum(
+                        norm_probs[b_key] * ((b_val - expected_score) ** 2)
+                        for b_key, b_val in zip(bucket_keys, bucket_scores)
+                    )
+
+                slots_meta[slot_id] = {
+                    "question_kind": "score",
+                    "expected_score": expected_score,
+                    "variance": variance_val,
+                    "log_likelihoods": dict(aligned_logs),
+                    "shortlist_bridged": False,
+                }
+
+            else:
+                sub_obj = entry.get("choice") if isinstance(entry.get("choice"), Mapping) else entry
+                assert isinstance(sub_obj, Mapping)
+                explicit_keys = list(plan["explicit_keys"])
+                raw_lls = (
+                    sub_obj.get("log_likelihoods")
+                    if "log_likelihoods" in sub_obj
+                    else sub_obj.get("logLikelihoods")
+                )
+                aligned_logs = self._extract_aligned_log_map(
+                    raw_lls, explicit_keys, f"choice[{slot_id!r}]"
+                )
+                slot_meta_entry: dict[str, Any] = {
+                    "question_kind": "choice",
+                    "log_likelihoods": dict(aligned_logs),
+                    "shortlist_bridged": bool(plan["shortlist_bridged"]),
+                    "original_option_count": int(plan["original_option_count"]),
+                    "bridged_option_count": len(explicit_keys),
+                }
+                if bool(plan["include_none_of_above"]):
+                    raw_abstain_ll = sub_obj.get(
+                        "abstention_log_likelihood",
+                        sub_obj.get(
+                            "abstentionLogLikelihood",
+                            sub_obj.get("none_of_above_log_likelihood", sub_obj.get("noneOfAboveLogLikelihood")),
+                        ),
+                    )
+                    if raw_abstain_ll is None:
+                        raise LogprobAlignmentError(
+                            f"choice[{slot_id!r}] requested include_none_of_above=True but response omitted abstention_log_likelihood"
+                        )
+                    abstain_ll = self._coerce_log_likelihood(
+                        raw_abstain_ll, f"choice[{slot_id!r}].abstention_log_likelihood"
+                    )
+                    abstention_key = str(plan["abstention_key"])
+                    combined_logs = dict(aligned_logs)
+                    combined_logs[abstention_key] = abstain_ll
+                    norm_probs = self._normalize_log_likelihood_map(
+                        combined_logs, f"choice[{slot_id!r}]"
+                    )
+                    abstention_lls[slot_id] = abstain_ll
+                    slot_meta_entry["abstention_log_likelihood"] = abstain_ll
+                    slot_meta_entry["abstention_probability"] = norm_probs[abstention_key]
+                else:
+                    norm_probs = self._normalize_log_likelihood_map(
+                        aligned_logs, f"choice[{slot_id!r}]"
+                    )
+                distributions[slot_id] = norm_probs
+                slots_meta[slot_id] = slot_meta_entry
+
+        raw_usage = response_data.get("usage_metadata", response_data.get("usageMetadata"))
+        total_input_tokens = 0
+        if raw_usage is not None:
+            if not isinstance(raw_usage, Mapping):
+                raise SchemaContractViolationError("usage_metadata must be a JSON object when present")
+            raw_tokens = raw_usage.get(
+                "total_input_tokens",
+                raw_usage.get(
+                    "totalInputTokens",
+                    raw_usage.get("prompt_token_count", raw_usage.get("promptTokenCount", 0)),
+                ),
+            )
+            total_input_tokens = _require_nonneg_int(
+                raw_tokens, "usage_metadata.total_input_tokens"
+            )
+
+        raw_model_version = response_data.get("model_version", response_data.get("modelVersion"))
+        if raw_model_version is not None and (
+            not isinstance(raw_model_version, str) or not raw_model_version.strip()
+        ):
+            raise SchemaContractViolationError("model_version must be a non-empty string when present")
+        resolved_model_version = (
+            raw_model_version.strip() if isinstance(raw_model_version, str) else self.model
+        )
+
+        raw_metadata: dict[str, Any] = {
+            "model_version": resolved_model_version,
+            "execution_mode": self.execution_mode,
+            "usage_metadata": {
+                "total_input_tokens": total_input_tokens,
+            },
+            "slots": slots_meta,
+        }
+        if abstention_lls:
+            raw_metadata["abstention_log_likelihoods"] = abstention_lls
+        return distributions, raw_metadata
+
+    def score_questions(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None = None,
+    ) -> dict[str, dict[str, float]]:
+        """Score one or more decision slots via ``POST /v1beta/decisions``.
+
+        Args:
+            state: Structured or text context isolated inside ``<untrusted_data>``.
+            questions: Mapping of slot identifiers to ``DecisionQuestion`` schemas.
+            images: Optional list of base64 or data-URI images.
+
+        Returns:
+            Mapping ``{slot_id: {option_key: normalized_probability}}``.
+
+        Raises:
+            UpstreamTransientError: On HTTP 429/502/503/504 or socket/transport timeout.
+            LogprobAlignmentError: On missing, NaN, +inf, or length-mismatched log-likelihoods.
+            SchemaContractViolationError: On invalid inputs, missing API key, or HTTP 4xx errors.
+        """
+        if not questions:
+            self.last_evidence = {}
+            self.last_raw_metadata = {
+                "model_version": self.model,
+                "execution_mode": self.execution_mode,
+                "usage_metadata": {"total_input_tokens": 0},
+                "slots": {},
+            }
+            return {}
+
+        parse_url_origin(self.base_url, allow_insecure_http=False)
+        api_key = self._resolve_api_key()
+        payload, slot_plans = self.build_decisions_payload(state, questions, images)
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        }
+        response_data = _post_json_with_retry(
+            self.base_url,
+            payload,
+            headers,
+            timeout_sec=self.timeout_seconds,
+            max_retries=self.max_retries,
+            base_backoff_sec=self.base_backoff_sec,
+            allow_insecure_http=False,
+        )
+        distributions, raw_metadata = self.parse_decisions_response(response_data, slot_plans)
+        self.last_evidence = {}
+        self.last_raw_metadata = raw_metadata
+        return distributions
+
+    def decide(
+        self,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None = None,
+    ) -> DecisionResult:
+        """Execute ``score_questions`` and wrap readouts + usage telemetry into ``DecisionResult``.
+
+        Args:
+            state: Structured or text context isolated inside ``<untrusted_data>``.
+            questions: Mapping of slot identifiers to ``DecisionQuestion`` schemas.
+            images: Optional list of base64 or data-URI images.
+
+        Returns:
+            ``DecisionResult`` with ``usage_metadata.total_input_tokens`` and ``model_version``
+            recorded inside ``raw_metadata``.
+        """
+        started = time.perf_counter()
+        distributions = self.score_questions(state, questions, images)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        slots_out: dict[str, SlotReadout] = {}
+        any_abstain = False
+        for slot_id, dist in distributions.items():
+            h_val = normalized_entropy(dist)
+            winner = sorted(dist.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            is_abstain = winner in _DEFAULT_OOS_KEYS
+            if is_abstain:
+                any_abstain = True
+            slots_out[slot_id] = SlotReadout(
+                slot_id=slot_id,
+                predicted=winner,
+                probabilities=dict(dist),
+                raw_probabilities=dict(dist),
+                h_raw=h_val,
+                confidence=1.0 - h_val,
+                escalated=False,
+                guard_applied="none",
+                backend_name=self.name,
+                terminal_state=(
+                    DecisionTerminalState.ABSTAIN_OOS
+                    if is_abstain
+                    else DecisionTerminalState.STAGE1_RESOLVED
+                ),
+                failure_category=(
+                    FailureCategory.ABSTAINED_OOS if is_abstain else FailureCategory.NONE
+                ),
+            )
+        overall_state = (
+            DecisionTerminalState.ABSTAIN_OOS if any_abstain else DecisionTerminalState.STAGE1_RESOLVED
+        )
+        return DecisionResult(
+            slots=slots_out,
+            escalated=False,
+            latency_ms=elapsed_ms,
+            backend_name=self.name,
+            raw_metadata=copy.deepcopy(self.last_raw_metadata),
+            terminal_state=overall_state,
+            failure_category=(
+                FailureCategory.ABSTAINED_OOS if any_abstain else FailureCategory.NONE
+            ),
+        )
 
 
 SamplerFn = Callable[..., Mapping[str, Any] | str]
@@ -3207,10 +4099,11 @@ class CascadeDecisionOrchestrator:
                         self.response_cache.put(cache_key, res)
                     return res
 
-        # 2. Optional Wide-Option Shortlist for questions with K > 26
+        # 2. Optional Wide-Option Shortlist for questions exceeding Stage-1 native ceiling
+        stage1_ceiling = int(getattr(self.stage1_backend, "max_native_options", MAX_OPTIONS_PER_SLOT))
         active_questions: dict[str, DecisionQuestion] = {}
         for qid, q in questions.items():
-            if self.shortlist_top_k > 0 and len(q.option_keys()) > MAX_OPTIONS_PER_SLOT:
+            if self.shortlist_top_k > 0 and len(q.option_keys()) > stage1_ceiling:
                 s_map = (
                     (shortlist_scores or {}).get(qid)
                     or (prior_logits or {}).get(qid)
@@ -3224,6 +4117,7 @@ class CascadeDecisionOrchestrator:
                             s_map,
                             top_k=self.shortlist_top_k,
                             pairwise_diff=self.shortlist_pairwise_diff,
+                            max_options_ceiling=stage1_ceiling,
                         )
                     except DecisionContractError:
                         raise
@@ -3487,6 +4381,41 @@ class CascadeDecisionOrchestrator:
         else:
             overall_state = DecisionTerminalState.STAGE1_RESOLVED
 
+        merged_raw_metadata: dict[str, Any] = {}
+        stage1_meta_raw = getattr(self.stage1_backend, "last_raw_metadata", None)
+        stage2_meta_raw = (
+            getattr(self.stage2_backend, "last_raw_metadata", None)
+            if did_escalate and self.stage2_backend is not None
+            else None
+        )
+        if isinstance(stage1_meta_raw, Mapping) and stage1_meta_raw:
+            merged_raw_metadata = copy.deepcopy(dict(stage1_meta_raw))
+        if isinstance(stage2_meta_raw, Mapping) and stage2_meta_raw:
+            s1_usage = merged_raw_metadata.get("usage_metadata")
+            s2_usage = stage2_meta_raw.get("usage_metadata")
+            s1_tokens = (
+                int(s1_usage.get("total_input_tokens", 0))
+                if isinstance(s1_usage, Mapping)
+                else 0
+            )
+            s2_tokens = (
+                int(s2_usage.get("total_input_tokens", 0))
+                if isinstance(s2_usage, Mapping)
+                else 0
+            )
+            merged_raw_metadata["stage1_model_version"] = merged_raw_metadata.get("model_version")
+            if "model_version" in stage2_meta_raw:
+                merged_raw_metadata["model_version"] = stage2_meta_raw["model_version"]
+            merged_raw_metadata["usage_metadata"] = {
+                "total_input_tokens": s1_tokens + s2_tokens,
+                "stage1_input_tokens": s1_tokens,
+                "stage2_input_tokens": s2_tokens,
+            }
+            if isinstance(stage2_meta_raw.get("slots"), Mapping):
+                existing_slots = dict(merged_raw_metadata.get("slots") or {})
+                existing_slots.update(copy.deepcopy(dict(stage2_meta_raw["slots"])))
+                merged_raw_metadata["slots"] = existing_slots
+
         result = DecisionResult(
             slots=slots_out,
             evidence_slot_id=evidence_slot_id,
@@ -3496,6 +4425,7 @@ class CascadeDecisionOrchestrator:
             backend_name=(
                 self.stage2_backend.name if did_escalate and self.stage2_backend else self.stage1_backend.name
             ),
+            raw_metadata=merged_raw_metadata,
             terminal_state=overall_state,
             failure_category=(
                 FailureCategory.ABSTAINED_OOS

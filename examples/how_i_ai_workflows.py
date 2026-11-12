@@ -22,7 +22,7 @@ receipts, and real decoded PNG images (`benchmarks/data/fixtures/`):
   2. Multi-Hop RAG Reranking & Indirect Prompt Injection (IPI) Firewall (Sanitizer + Pre-Gated PoE)
   3. GUI Set-of-Marks (SoM) 4x4 Grid & Visual Grounding (Real PNG + Bimodal Safe Expected Mark Center)
   4. 10,000-SKU Shelf Audit & Sister Pack-Size Guard (Real PNG Dual-Buffer Contact Sheet + Layer-5 Guards)
-  5. 8-Slot Coding Agent Trajectory Context Compaction (Real EXP-49 Trajectory + Submodular MCKP)
+  5. 8-Slot Coding Agent Trajectory Context Compaction (Real Coding Trajectory + Submodular MCKP)
   6. Entity Deduplication & Multi-Agent File-Lock Arbitration (Real Binary Receipts + Polytope Projection)
   7. Position-Debiased LLM-as-a-Judge Rubric Evaluation (Real 4-Shift Receipts + PriDe Debiasing)
   8. Lexical-Overtrigger Safety & Policy Guardrail (Real XSTest & TypedDecisions + LTT + Joint Conformal)
@@ -166,7 +166,7 @@ def recipe2_rag_rerank_and_ipi_firewall() -> dict[str, Any]:
     mdm_rows = _load_jsonl(DATA_DIR / "mdm_bench_8track_receipts.jsonl")
     rag_row = [r for r in mdm_rows if r["track"] == "rag_rerank_and_ipi_firewall"][0]
 
-    # Find a real block from EXP-49 and append an untrusted directive to verify deterministic sanitization
+    # Find a real trajectory block and append an untrusted directive to verify deterministic sanitization
     real_chunk_text = str(exp49_rows[0]["blocks"][3]["full_text"])
     poisoned_chunk = (
         f"{real_chunk_text}\n"
@@ -277,7 +277,7 @@ def recipe4_visual_catalog_sku_audit() -> dict[str, Any]:
 
 
 def recipe5_coding_context_compaction() -> dict[str, Any]:
-    """Recipe 5: Compact a real EXP-49 coding agent trajectory (`exp49_step_01`) using submodular redundancy-penalized MCKP."""
+    """Recipe 5: Compact a real coding agent trajectory (`exp49_step_01`) using submodular redundancy-penalized MCKP."""
     exp49_rows = _load_jsonl(DATA_DIR / "real_exp49_pruning_trajectories.jsonl")
     r0 = exp49_rows[0]
     by_kind = {str(b["kind"]): b for b in r0["blocks"]}

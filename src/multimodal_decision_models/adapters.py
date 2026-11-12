@@ -18,14 +18,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
-import json
 import math
 import re
 from typing import Callable, Mapping
 import unicodedata
 
 from .backends import CascadeDecisionOrchestrator, DecisionBackend
-from .calibration import normalized_entropy
 from .conformal import DEFAULT_CONFORMAL_SEED_KEY, conformal_prediction_set
 from .contracts import DecisionContractError, SchemaContractViolationError, sanitize_untrusted_text, wrap_untrusted_state
 from .trajectory_control import NetExpectedValueController, PolynomialAlphaSpendingTracker
