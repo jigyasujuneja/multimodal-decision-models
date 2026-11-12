@@ -264,7 +264,7 @@ class TestV060RealPublicBenchmarksAndArxiv2610(unittest.TestCase):
         self.assertTrue(rej_flags[0])
         self.assertFalse(rej_flags[1])
 
-        # 5. EXP-48 K-Guarded Saerens EM Prior Re-Estimation (K=2 active vs K>2 guarded)
+        # 5. K-Guarded Saerens EM Prior Re-Estimation (K=2 active vs K>2 guarded)
         skewed_bin = [{"no": 0.12, "yes": 0.88} for _ in range(45)] + [{"no": 0.85, "yes": 0.15} for _ in range(5)]
         em_bin = estimate_saerens_em_prior_logits(skewed_bin)
         self.assertFalse(em_bin.multiclass_damped_guard_active)

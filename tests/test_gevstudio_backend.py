@@ -26,8 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks import run_formal_propositions_v090_bench as prop_bench
-import multimodal_decision_models as mdm
+from benchmarks import run_formal_propositions_v090_bench as prop_bench  # noqa: E402
+import multimodal_decision_models as mdm  # noqa: E402
 
 
 class GevStudioBackendAndPropositionsTest(unittest.TestCase):
@@ -36,19 +36,19 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
     def test_gevstudio_build_url_encodes_target_query_param(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
             endpoint_url="https://gevstudio.example.com",
-            target="beyond-decision:/models/gemini-v4xs-decisions?hc=true;temp=1.0",
+            target="beyond-decision:/models/gemini-decision-1?hc=true;temp=1.0",
         )
         url = backend.build_url()
         self.assertEqual(
             url,
             "https://gevstudio.example.com/api/gev/systemone"
-            "?target=beyond-decision%3A%2Fmodels%2Fgemini-v4xs-decisions%3Fhc%3Dtrue%3Btemp%3D1.0",
+            "?target=beyond-decision%3A%2Fmodels%2Fgemini-decision-1%3Fhc%3Dtrue%3Btemp%3D1.0",
         )
 
     def test_gevstudio_build_payload_formats_multimodal_media_and_question_types(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
-            target="gemini-v4xs-decisions",
-            model="gemini-v4xs-decisions",
+            target="gemini-decision-1",
+            model="gemini-decision-1",
             temperature=0.0,
         )
         questions = {
@@ -78,7 +78,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
             images=["data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==", "/9j/4AAQSkZJRg=="],
         )
         self.assertEqual(payload["state"], {"zone": "aisle_4"})
-        self.assertEqual(payload["model"], "gemini-v4xs-decisions")
+        self.assertEqual(payload["model"], "gemini-decision-1")
         self.assertEqual(payload["temperature"], 0.0)
         self.assertEqual(len(payload["media"]), 3)
         self.assertEqual(payload["media"][0], {"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"})
@@ -102,7 +102,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         )
 
     def test_gevstudio_parse_response_choice_noul_and_score_probabilities(self) -> None:
-        backend = mdm.GevStudioSystemOneBackend(target="gemini-v4xs-decisions")
+        backend = mdm.GevStudioSystemOneBackend(target="gemini-decision-1")
         questions = {
             "action": mdm.DecisionQuestion(
                 type="choice",
@@ -175,7 +175,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
     def test_gevstudio_cascade_orchestrator_end_to_end(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
             endpoint_url="https://gevstudio.example.com/api/gev/systemone",
-            target="gemini-v4xs-decisions",
+            target="gemini-decision-1",
         )
         questions = {
             "sku": mdm.DecisionQuestion(

@@ -224,18 +224,39 @@ def shortlist_wide_question(
     catch_all_key: str = "none_of_the_above",
     pairwise_diff: bool = False,
     contrastive_mode: str = "sibling_unique",
+    *,
+    max_options_ceiling: int = MAX_OPTIONS_PER_SLOT,
 ) -> DecisionQuestion:
-    """Reduce a wide-option question (K > 26) to a single-pass top-M shortlist with catch-all.
+    """Reduce a wide-option question above ``max_options_ceiling`` to a single-pass shortlist.
 
-    Leaves questions with K <= MAX_OPTIONS_PER_SLOT (26) unchanged.
+    Args:
+        question: Candidate categorical or binary decision question.
+        scores: Prior or retrieval score mapping keyed by option identifier.
+        top_k: Target candidate budget before appending ``catch_all_key``.
+        catch_all_key: Out-of-distribution fallback key (empty string disables catch-all).
+        pairwise_diff: Whether to append contrastive distinguishing cues.
+        contrastive_mode: Contrastive phrasing strategy (``sibling_unique`` or ``rival_pair``).
+        max_options_ceiling: Maximum native option cardinality before shortlisting (default 26).
+
+    Returns:
+        Unchanged ``DecisionQuestion`` when within ceiling, otherwise shortlisted ``DecisionQuestion``.
+
+    Raises:
+        SchemaContractViolationError: If ``max_options_ceiling`` is smaller than 2.
     """
+    if isinstance(max_options_ceiling, bool) or not isinstance(max_options_ceiling, int) or max_options_ceiling < 2:
+        raise SchemaContractViolationError(
+            f"max_options_ceiling must be an integer >= 2, got {max_options_ceiling!r}"
+        )
     if question.type not in ("choice", "noul"):
         return question
     keys = question.option_keys()
-    if len(keys) <= MAX_OPTIONS_PER_SLOT:
+    if len(keys) <= max_options_ceiling:
         return question
-    if top_k <= 0 or top_k >= MAX_OPTIONS_PER_SLOT:
-        top_k = 20
+    reserve_catch = bool(catch_all_key)
+    max_non_catch = max(1, max_options_ceiling - (1 if reserve_catch else 0))
+    if top_k <= 0 or top_k > max_non_catch:
+        top_k = min(20, max_non_catch) if max_options_ceiling <= MAX_OPTIONS_PER_SLOT else max_non_catch
 
     non_catch = [k for k in keys if k != catch_all_key]
     pos_map = {k: i for i, k in enumerate(non_catch)}
@@ -245,10 +266,9 @@ def shortlist_wide_question(
         reverse=True,
     )
 
-    reserve_catch = bool(catch_all_key)
-    budget = min(len(ranked), max(1, min(top_k, MAX_OPTIONS_PER_SLOT - (1 if reserve_catch else 0))))
+    budget = min(len(ranked), max(1, min(top_k, max_non_catch)))
     selected = list(ranked[:budget])
-    if reserve_catch and catch_all_key not in selected and len(selected) < MAX_OPTIONS_PER_SLOT:
+    if reserve_catch and catch_all_key not in selected and len(selected) < max_options_ceiling:
         selected.append(catch_all_key)
 
     base_criteria: dict[str, str] = {}

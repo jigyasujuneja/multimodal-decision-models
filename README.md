@@ -219,7 +219,7 @@ See [`benchmarks/results/mdm_bench_report.md`](benchmarks/results/mdm_bench_repo
 | **Multi-Slot Joint Conformal (`conformal.py`)** | `68.00%` 4-slot coverage (independent RAPS) | **`90.25%`** (Max-Score) / **`90.50%`** (Bonferroni) | Simultaneous family-wise coverage across $S=4$ slots |
 | **`PriDe` Cyclic Permutation Debiasing (`calibration.py`)** | `10.25%` flip rate / `0.4286` Brier (`74.25%` acc) | **`6.50%` flip rate** / **`0.4136` Brier** (**`75.25%` acc**) | Removes `[A-Z]` slot-position prior bias across real 4-permutation shifts |
 | **Learn-then-Test (`LTT`) Funnel Gates (`calibration.py`)** | Heuristic threshold ($\tau_H = 0.36$) | **$\text{UCB} = 0.0922 \le 0.14$** (`0.0100` emp risk) | Finite-sample Hoeffding-Bentkus risk control at $47.5\%$ fast-exit |
-| **Submodular Context Pruning (`context_pruner.py`)** | `66.67%` root-cause facet recall (additive MCKP) | **`78.67%` root-cause facet recall** (`61.17%` token reduction) | Token-shingle Jaccard discount suppresses duplicate stack traces on 50 real `EXP-49` trajectories |
+| **Submodular Context Pruning (`context_pruner.py`)** | `66.67%` root-cause facet recall (additive MCKP) | **`78.67%` root-cause facet recall** (`61.17%` token reduction) | Token-shingle Jaccard discount suppresses duplicate stack traces on 50 real coding trajectories |
 | **Transitive Polytope Projection (`consistency.py`)** | `50` violated 3-cycles (`71.43%` edge acc) | **`0` violated 3-cycles** (**`91.43%` edge acc**) | Exact log-odds correlation clustering on 50 real binary receipt entity graphs |
 
 ## Frontier GenAI Suite (`v0.7.0`, $N = 400$ Deterministic Instances)
@@ -257,7 +257,7 @@ See [`benchmarks/results/audio_video_v080_report.md`](benchmarks/results/audio_v
 | **`XSTest` Safety Boundary** | $N = 360$, $12$ safety prompt clusters ($K = 2$) | `Classier v0.2.0`: `78.89%` acc (`0.2986` Brier) | **`DecisionGemma`: `96.94%` acc (`0.0465` Brier); Cascade: `89.17%`** | [`multimodel_benchmark_report.md`](benchmarks/results/multimodel_benchmark_report.md) |
 | **`MDM-Bench` (8 Multimodal Tracks)** | $N = 400$ real items ($50 \times 8$ tracks, 6 arms) | `DecisionGemma-2B`: `82.50%` (`0.2463` Brier) | **`LTT + RAPS Cascade`: `88.75%` acc (`0.1598` Brier, `128.4 ms`)** | [`mdm_bench_report.md`](benchmarks/results/mdm_bench_report.md) |
 | **Streaming Audio & Video (`v0.8.0`)** | $N = 400$ real WAV + RGB frame trajectories | Raw `VAP`: `63.0%`; Naive Video Exit: `63.0%`; Naive PoE: `75.0%` | **Conformal `VAP` (`88.0%`), Martingale (`96.0%`), `AVEL` (`95.0%`), `ST-SoM` (`97.5%`)** | [`audio_video_v080_report.md`](benchmarks/results/audio_video_v080_report.md) |
-| **Live Gev Studio (`mdm:cascade`)** | $120$ rows / $203$ slots (RefCOCO JPG + 16kHz WAV + JEVBench + Ecotone + Arenas) | `gemini-v4xs-decisions`: `18/22 ERROR` on multimodal suite (`0/4` WAV) | **`mdm:cascade`: `120 / 120 DONE` (`88.6%` multimodal, `96.0%` JEVBench/Ecotone, `96.8%` Triage)** | [`research_paper.md`](docs/research_paper.md) Sec 5.6 |
+| **Live Gev Studio (`mdm:cascade`)** | $120$ rows / $203$ slots (RefCOCO JPG + 16kHz WAV + JEVBench + Ecotone + Arenas) | `gemini-decision-1`: `18/22 ERROR` on multimodal suite (`0/4` WAV) | **`mdm:cascade`: `120 / 120 DONE` (`88.6%` multimodal, `96.0%` JEVBench/Ecotone, `96.8%` Triage)** | [`research_paper.md`](docs/research_paper.md) Sec 5.6 |
 
 ## Citation
 

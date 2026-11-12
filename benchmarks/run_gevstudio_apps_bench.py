@@ -16,7 +16,7 @@
 """Live End-to-End Benchmark of `multimodal-decision-models` on Gev Studio (`/apps`).
 
 Executes stateless live evaluations against `GEV_STUDIO_ENDPOINT_URL` (`/api/gev/systemone`)
-across Gev Studio's online targets (`gemini-v4xs-decisions`, `gemini-v4xs-decisions?hc=true`,
+across Gev Studio's online targets (`gemini-decision-1`, `gemini-decision-1?hc=true`,
 `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`)
 on:
   1. Gev Studio `/apps/vision`: 3-Scene Gauntlet (48 questions, 150 branches).
@@ -46,36 +46,7 @@ import time
 import urllib.parse
 from typing import Any, Callable, Mapping
 
-from multimodal_decision_models import (
-    CandidateMark,
-    DecisionQuestion,
-    GevStudioSystemOneBackend,
-    ImageBuffer,
-    SpatioTemporalFrameCandidate,
-    VoiceActivityProjectionConfig,
-    apply_layer5_deterministic_guards,
-    brier_score_multiclass,
-    build_set_of_marks_questions,
-    compile_dual_buffer_contact_sheet,
-    compile_spatiotemporal_contact_sheet,
-    compute_vap_prosodic_prior_logits,
-    encode_png,
-    evaluate_audiovisual_event_agreement,
-    evaluate_duplex_turn_taking_decision,
-    evaluate_streaming_early_exit,
-    expected_calibration_error,
-    extract_wav_acoustic_features,
-    fence_untrusted_audio_transcript,
-    inner_crop_cie_lab_similarity,
-    negative_log_likelihood,
-    normalized_entropy,
-    paired_mcnemar_test,
-    pre_gated_bayesian_poe_fusion,
-    safe_expected_mark_center,
-    shades_of_gray_white_balance,
-    wrap_untrusted_state,
-    write_pcm16_wav_bytes,
-)
+from multimodal_decision_models import CandidateMark, ImageBuffer, VoiceActivityProjectionConfig, apply_layer5_deterministic_guards, brier_score_multiclass, build_set_of_marks_questions, compile_dual_buffer_contact_sheet, evaluate_audiovisual_event_agreement, evaluate_duplex_turn_taking_decision, expected_calibration_error, extract_wav_acoustic_features, fence_untrusted_audio_transcript, inner_crop_cie_lab_similarity, negative_log_likelihood, normalized_entropy, paired_mcnemar_test, pre_gated_bayesian_poe_fusion, safe_expected_mark_center, shades_of_gray_white_balance, write_pcm16_wav_bytes
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE_PATH = REPO_ROOT / "benchmarks" / "fixtures" / "gevstudio_apps_golden.json"
@@ -291,8 +262,8 @@ def run_vision_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
     scenes = golden["vision_scenes"]
     scene_media = golden["scene_media"]
     targets = [
-        ("gemini-v4xs-decisions (raw)", "gemini-v4xs-decisions"),
-        ("gemini-v4xs-decisions?hc=true (raw)", "beyond-decision:/models/gemini-v4xs-decisions?hc=true"),
+        ("gemini-decision-1 (raw)", "gemini-decision-1"),
+        ("gemini-decision-1?hc=true (raw)", "beyond-decision:/models/gemini-decision-1?hc=true"),
         ("gemini-3.5-flash-lite (raw)", "gemini-3.5-flash-lite"),
         ("gemini-3.1-flash-lite (raw)", "gemini-3.1-flash-lite"),
         ("saturn-moe-3p8b-fst (raw)", "saturn-moe-3p8b-qat-v0-fst-genmedia"),
@@ -387,7 +358,7 @@ def run_vision_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
             "media": [scene_media[sid]],
             "questions": q_map,
         }
-        resp_s1, dt_s1 = _call_gevstudio_raw(payload_s1, target="gemini-v4xs-decisions", timeout_sec=30)
+        resp_s1, dt_s1 = _call_gevstudio_raw(payload_s1, target="gemini-decision-1", timeout_sec=30)
         priors = _build_vision_priors(sid, scene["questionList"])
         fused_answers: dict[str, Any] = {}
         hesitant_qkeys: list[str] = []
@@ -486,8 +457,8 @@ def run_vision_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
     tot_mdm_matched = sum(s["matched"] for s in mdm_scene_evals)
     tot_mdm_qs = sum(s["total"] for s in mdm_scene_evals)
     tot_mdm_pts = sum(s["scene_points"] for s in mdm_scene_evals)
-    results_by_model["MDM Calibrated Stack (v4xs + Visual Compiler + PoE + Cascade)"] = {
-        "target": "gemini-v4xs-decisions + mdm_stack",
+    results_by_model["MDM Calibrated Stack (decision1 + Visual Compiler + PoE + Cascade)"] = {
+        "target": "gemini-decision-1 + mdm_stack",
         "matched": tot_mdm_matched,
         "total": tot_mdm_qs,
         "accuracy": tot_mdm_matched / max(1, tot_mdm_qs),
@@ -512,8 +483,8 @@ def run_vision_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
     }
 
     # Remove raw correct_flags arrays after computing McNemar
-    raw_v4xs_flags = results_by_model["gemini-v4xs-decisions (raw)"]["correct_flags"]
-    mcnemar_vs_v4xs = paired_mcnemar_test(mdm_correct_flags, raw_v4xs_flags)
+    raw_decision1_flags = results_by_model["gemini-decision-1 (raw)"]["correct_flags"]
+    mcnemar_vs_decision1 = paired_mcnemar_test(mdm_correct_flags, raw_decision1_flags)
     for m_entry in results_by_model.values():
         m_entry.pop("correct_flags", None)
 
@@ -523,10 +494,10 @@ def run_vision_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
         "total_branches": 150,
         "leaderboard_reference_top_score": {"points": 2875, "matched": 46, "total": 48},
         "models": results_by_model,
-        "mcnemar_mdm_vs_raw_v4xs": {
-            "b_mdm_only": mcnemar_vs_v4xs.n01_arm_wins,
-            "c_raw_only": mcnemar_vs_v4xs.n10_baseline_wins,
-            "p_value": round(mcnemar_vs_v4xs.p_two_sided, 4),
+        "mcnemar_mdm_vs_raw_decision1": {
+            "b_mdm_only": mcnemar_vs_decision1.n01_arm_wins,
+            "c_raw_only": mcnemar_vs_decision1.n10_baseline_wins,
+            "p_value": round(mcnemar_vs_decision1.p_two_sided, 4),
         },
     }
 
@@ -570,7 +541,7 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
     """Run all 70 golden Triage cases (95 slots) across raw targets + MDM Calibrated Cascade."""
     cases = golden["triage_cases"]
     targets = [
-        ("gemini-v4xs-decisions (raw)", "gemini-v4xs-decisions"),
+        ("gemini-decision-1 (raw)", "gemini-decision-1"),
         ("dgem:vertex (DGemma 26B-A4B NVFP4 raw)", "dgem:vertex"),
         ("gemini-3.5-flash-lite (raw)", "gemini-3.5-flash-lite"),
     ]
@@ -683,14 +654,14 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
         models_summary[label] = _summarize_triage_run(lambda c, tid=target_id: raw_case_outputs[tid][c["id"]])
 
     # Now evaluate MDM Calibrated Cascade:
-    # Stage-1: Fast System 1 (gemini-v4xs-decisions + dgem:vertex covariance-discounted log-linear pool)
+    # Stage-1: Fast System 1 (gemini-decision-1 + dgem:vertex covariance-discounted log-linear pool)
     # + Pre-Gated Bayesian PoE + Hesitation Cascade (H_norm >= 0.14 -> Stage-2 gemini-3.5-flash-lite)
     escalated_slots_count = 0
 
     def _mdm_triage_lookup(c: Mapping[str, Any]) -> tuple[Mapping[str, Any], float]:
         nonlocal escalated_slots_count
         cid = c["id"]
-        resp_v4xs, dt_v4xs = raw_case_outputs["gemini-v4xs-decisions"][cid]
+        resp_decision1, dt_decision1 = raw_case_outputs["gemini-decision-1"][cid]
         resp_dgem, dt_dgem = raw_case_outputs["dgem:vertex"][cid]
         resp_fl, dt_fl = raw_case_outputs["gemini-3.5-flash-lite"][cid]
         priors = _compute_triage_lexical_priors(c)
@@ -701,7 +672,7 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
         for q in c["questions"]:
             qkey = q["key"]
             qtype = q["spec"]["type"]
-            a_v4 = (resp_v4xs.get("answers") or {}).get(qkey) or {}
+            a_v4 = (resp_decision1.get("answers") or {}).get(qkey) or {}
             a_dg = (resp_dgem.get("answers") or {}).get(qkey) or {}
             a_fl = (resp_fl.get("answers") or {}).get(qkey) or {}
 
@@ -764,17 +735,17 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
                 best_k = max(final_dist.items(), key=lambda kv: kv[1])[0]
                 out_answers[qkey] = {"choice": best_k, "probabilities": final_dist}
 
-        eff_dt = dt_v4xs + (max(dt_fl, dt_dgem) * 0.25 if did_escalate_case else 0.0)
+        eff_dt = dt_decision1 + (max(dt_fl, dt_dgem) * 0.25 if did_escalate_case else 0.0)
         return {"answers": out_answers}, eff_dt
 
     mdm_summary = _summarize_triage_run(_mdm_triage_lookup)
     mdm_summary["escalated_slots"] = escalated_slots_count
     mdm_summary["stage1_fast_exit_rate"] = round(1.0 - (escalated_slots_count / 95.0), 4)
-    models_summary["MDM Calibrated Cascade (Stage-1 v4xs+dgem -> Stage-2 3.5-flash-lite)"] = mdm_summary
+    models_summary["MDM Calibrated Cascade (Stage-1 decision1+dgem -> Stage-2 3.5-flash-lite)"] = mdm_summary
 
-    mcnemar_vs_v4xs = paired_mcnemar_test(
+    mcnemar_vs_decision1 = paired_mcnemar_test(
         mdm_summary["slot_flags"],
-        models_summary["gemini-v4xs-decisions (raw)"]["slot_flags"],
+        models_summary["gemini-decision-1 (raw)"]["slot_flags"],
     )
     mcnemar_vs_dgem = paired_mcnemar_test(
         mdm_summary["slot_flags"],
@@ -793,10 +764,10 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
             "polysemy_top": "22/25 (88.0%)",
         },
         "models": models_summary,
-        "mcnemar_mdm_vs_v4xs": {
-            "b_mdm_only": mcnemar_vs_v4xs.n01_arm_wins,
-            "c_v4xs_only": mcnemar_vs_v4xs.n10_baseline_wins,
-            "p_value": round(mcnemar_vs_v4xs.p_two_sided, 4),
+        "mcnemar_mdm_vs_decision1": {
+            "b_mdm_only": mcnemar_vs_decision1.n01_arm_wins,
+            "c_decision1_only": mcnemar_vs_decision1.n10_baseline_wins,
+            "p_value": round(mcnemar_vs_decision1.p_two_sided, 4),
         },
         "mcnemar_mdm_vs_dgem_vertex": {
             "b_mdm_only": mcnemar_vs_dgem.n01_arm_wins,
@@ -918,7 +889,7 @@ def run_mdm_multimodal_suites_on_gevstudio() -> dict[str, Any]:
                 }
             },
         }
-        raw_resp, _ = _call_gevstudio_raw(raw_payload, target="gemini-v4xs-decisions")
+        raw_resp, _ = _call_gevstudio_raw(raw_payload, target="gemini-decision-1")
         raw_ans = (raw_resp.get("answers") or {}).get("sku_match") or {}
         raw_probs = {
             k: float((raw_ans.get("probabilities") or {}).get(k, 1e-6))
@@ -1004,7 +975,7 @@ def run_mdm_multimodal_suites_on_gevstudio() -> dict[str, Any]:
             },
             "questions": som_wire_questions,
         }
-        resp, _ = _call_gevstudio_raw(payload, target="gemini-v4xs-decisions")
+        resp, _ = _call_gevstudio_raw(payload, target="gemini-decision-1")
         ans_mark = ((resp.get("answers") or {}).get("next_target_mark") or {})
         mark_probs = {m.id: float((ans_mark.get("probabilities") or {}).get(m.id, 1e-6)) for m in som_marks}
         tot_m = sum(mark_probs.values())
@@ -1120,7 +1091,7 @@ def run_mdm_multimodal_suites_on_gevstudio() -> dict[str, Any]:
                 }
             },
         }
-        resp_av, dt_av = _call_gevstudio_raw(raw_payload, target="gemini-v4xs-decisions")
+        resp_av, dt_av = _call_gevstudio_raw(raw_payload, target="gemini-decision-1")
         suite3c_latencies.append(dt_av)
         ans_av = (resp_av.get("answers") or {}).get("turn_action") or {}
         raw_probs = {
@@ -1158,22 +1129,22 @@ def run_mdm_multimodal_suites_on_gevstudio() -> dict[str, Any]:
     return {
         "suite_3a_dual_buffer_contact_sheets": {
             "total": len(sku_scenarios),
-            "raw_v4xs_correct": suite3a_raw_correct,
-            "raw_v4xs_accuracy": round(suite3a_raw_correct / len(sku_scenarios), 4),
+            "raw_decision1_correct": suite3a_raw_correct,
+            "raw_decision1_accuracy": round(suite3a_raw_correct / len(sku_scenarios), 4),
             "mdm_calibrated_correct": suite3a_mdm_correct,
             "mdm_calibrated_accuracy": round(suite3a_mdm_correct / len(sku_scenarios), 4),
         },
         "suite_3b_set_of_marks_ui_grounding": {
             "total": len(som_tasks),
-            "raw_v4xs_correct": suite3b_raw_correct,
-            "raw_v4xs_accuracy": round(suite3b_raw_correct / len(som_tasks), 4),
+            "raw_decision1_correct": suite3b_raw_correct,
+            "raw_decision1_accuracy": round(suite3b_raw_correct / len(som_tasks), 4),
             "mdm_calibrated_correct": suite3b_mdm_correct,
             "mdm_calibrated_accuracy": round(suite3b_mdm_correct / len(som_tasks), 4),
         },
         "suite_3c_v080_audio_wav_and_st_som_video": {
             "total": len(av_scenarios),
-            "raw_v4xs_correct": suite3c_raw_correct,
-            "raw_v4xs_accuracy": round(suite3c_raw_correct / len(av_scenarios), 4),
+            "raw_decision1_correct": suite3c_raw_correct,
+            "raw_decision1_accuracy": round(suite3c_raw_correct / len(av_scenarios), 4),
             "mdm_calibrated_correct": suite3c_mdm_correct,
             "mdm_calibrated_accuracy": round(suite3c_mdm_correct / len(av_scenarios), 4),
             "p50_audio_wav_latency_ms": round(statistics.median(suite3c_latencies), 1),
@@ -1241,8 +1212,8 @@ def main() -> None:
     mdm_suites_res = run_mdm_multimodal_suites_on_gevstudio()
     for s_name, s_stat in mdm_suites_res.items():
         print(
-            f"  - {s_name}: Raw={s_stat['raw_v4xs_correct']}/{s_stat['total']} "
-            f"({s_stat['raw_v4xs_accuracy']*100:.1f}%) -> MDM={s_stat['mdm_calibrated_correct']}/{s_stat['total']} "
+            f"  - {s_name}: Raw={s_stat['raw_decision1_correct']}/{s_stat['total']} "
+            f"({s_stat['raw_decision1_accuracy']*100:.1f}%) -> MDM={s_stat['mdm_calibrated_correct']}/{s_stat['total']} "
             f"({s_stat['mdm_calibrated_accuracy']*100:.1f}%)"
         )
 

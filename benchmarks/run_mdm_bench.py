@@ -518,7 +518,7 @@ def run_upgrade4_ltt_funnel_And_cascade(
 
 
 def run_upgrade5_submodular_context_pruning() -> dict[str, Any]:
-    """Compare Additive MCKP vs Submodular Redundancy-Penalized MCKP across 50 real EXP-49 coding trajectories."""
+    """Compare Additive MCKP vs Submodular Redundancy-Penalized MCKP across 50 real coding trajectories."""
     exp49_path = BENCH_DIR / "data" / "real_exp49_pruning_trajectories.jsonl"
     traj_rows = [
         json.loads(line)

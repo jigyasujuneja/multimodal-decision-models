@@ -24,7 +24,7 @@ import re
 from typing import Mapping, Sequence
 
 from .conformal import DEFAULT_CONFORMAL_SEED_KEY, nonconformity_score
-from .contracts import InvisibleSmugglingAudit, SchemaContractViolationError, audit_and_normalize_untrusted_text, normalize_and_strip_invisible_smuggling
+from .contracts import InvisibleSmugglingAudit, SchemaContractViolationError, audit_and_normalize_untrusted_text
 
 _CANARY_TAG_FAMILY_RE = re.compile(
     r"<[ \t\r\n]*(?:/[ \t\r\n]*)?untrusted_[^<>]*>",

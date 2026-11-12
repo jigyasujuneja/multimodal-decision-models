@@ -652,7 +652,6 @@ class MultimodalEmbeddingIndex:
                 sister_pack_collision=sister_collision,
             )
         else:
-            only_id = shortlist_ids[0]
             margin = 1.0
             z_val = 0.0
             fast_ok = False

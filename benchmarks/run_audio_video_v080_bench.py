@@ -39,18 +39,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from multimodal_decision_models.audio_video_decision import (
-    SpatioTemporalFrameCandidate,
-    VoiceActivityProjectionConfig,
-    compile_spatiotemporal_contact_sheet,
-    evaluate_audiovisual_event_agreement,
-    evaluate_duplex_turn_taking_decision,
-    evaluate_streaming_early_exit,
-    extract_wav_acoustic_features,
-    select_submodular_spatiotemporal_frames,
-)
-from multimodal_decision_models.eval_suite import paired_mcnemar_test
-from multimodal_decision_models.visual_compiler import ImageBuffer, decode_png
+from multimodal_decision_models.audio_video_decision import SpatioTemporalFrameCandidate, VoiceActivityProjectionConfig, compile_spatiotemporal_contact_sheet, evaluate_audiovisual_event_agreement, evaluate_duplex_turn_taking_decision, evaluate_streaming_early_exit, extract_wav_acoustic_features, select_submodular_spatiotemporal_frames  # noqa: E402
+from multimodal_decision_models.eval_suite import paired_mcnemar_test  # noqa: E402
+from multimodal_decision_models.visual_compiler import ImageBuffer, decode_png  # noqa: E402
 
 DATA_DIR = REPO_ROOT / "benchmarks" / "data"
 FIXTURES_DIR = DATA_DIR / "fixtures"
