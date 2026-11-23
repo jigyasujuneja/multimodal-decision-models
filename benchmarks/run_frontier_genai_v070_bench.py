@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -336,7 +335,6 @@ def _build_prm_tree_from_record(
         score_rows = list(rec_rows[:2])
 
     r_a = score_rows[0]
-    r_b = score_rows[1 % len(score_rows)]
     gold_a = str(r_a["gold"])
     intern_a = dict(r_a["models"]["intern-decision-4b"]["probabilities"])
     deem_a = dict(r_a["models"]["deem-4b"]["probabilities"])

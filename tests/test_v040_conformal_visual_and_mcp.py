@@ -102,7 +102,7 @@ def _make_solid_buffer(width: int, height: int, rgb_triplet: tuple[int, int, int
 
 class V040ConformalVisualAndMcpTest(unittest.TestCase):
     def test_v040_version_and_public_contract_exports(self) -> None:
-        self.assertEqual(mdm.__version__, "1.1.0")
+        self.assertEqual(mdm.__version__, "1.3.1")
         self.assertEqual(mdm.MCP_SERVER_NAME, "dgem-catalog")
         expected_exports = [
             "BlackBoxSampledBackend",
@@ -1982,8 +1982,13 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             criteria={"sku_a": "A", "sku_b": "B"},
         )
         qs = {"slot": q}
-        s1_fn = lambda _s, _q, _i=None: {"slot": {"sku_a": 0.52, "sku_b": 0.48}}
-        s2_fn = lambda _s, _q, _i=None: {"slot": {"sku_a": 0.05, "sku_b": 0.95}}
+
+        def s1_fn(_s, _q, _i=None):
+            return {"slot": {"sku_a": 0.52, "sku_b": 0.48}}
+
+        def s2_fn(_s, _q, _i=None):
+            return {"slot": {"sku_a": 0.05, "sku_b": 0.95}}
+
         s1 = mdm.MockCallableBackend("s1", s1_fn)
 
         # 1. All 6 prior_gate_mode values across calibration, orchestrator, and MCP

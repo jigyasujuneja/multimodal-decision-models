@@ -21,8 +21,10 @@ import {
   type ConformalConfig,
   type ConformalMethod,
   type ConformalSetResult,
+  type DomainCompetenceProfile,
   MDMValidationError,
   type MultiSlotJointConformalResult,
+  type NegativeTransferOptions,
   type NevControllerPolicy,
   type NevDecisionResult,
   type PolynomialAlphaConfig,
@@ -905,4 +907,152 @@ export function evaluateNevcGate(
     netExpectedValue,
     minFailProbabilityThreshold,
   };
+}
+
+export function isNegativeTransfer(
+  profile: DomainCompetenceProfile,
+  options: NegativeTransferOptions = {},
+): boolean {
+  if (!profile || typeof profile !== "object") {
+    throw new MDMValidationError("profile must be an object");
+  }
+  if (!options || typeof options !== "object") {
+    throw new MDMValidationError("options must be an object");
+  }
+  const { stage1Accuracy, stage2Accuracy } = profile;
+  if (
+    typeof stage1Accuracy !== "number" ||
+    !Number.isFinite(stage1Accuracy) ||
+    stage1Accuracy < 0.0 ||
+    stage1Accuracy > 1.0
+  ) {
+    throw new MDMValidationError("stage1Accuracy must be a finite number in [0, 1]");
+  }
+  if (
+    typeof stage2Accuracy !== "number" ||
+    !Number.isFinite(stage2Accuracy) ||
+    stage2Accuracy < 0.0 ||
+    stage2Accuracy > 1.0
+  ) {
+    throw new MDMValidationError("stage2Accuracy must be a finite number in [0, 1]");
+  }
+  const numOptions = profile.numOptions ?? 2;
+  if (typeof numOptions !== "number" || !Number.isInteger(numOptions) || numOptions < 2) {
+    throw new MDMValidationError("numOptions must be an integer >= 2");
+  }
+  const pairedEscalationDelta = profile.pairedEscalationDelta ?? 0;
+  if (typeof pairedEscalationDelta !== "number" || !Number.isInteger(pairedEscalationDelta)) {
+    throw new MDMValidationError("pairedEscalationDelta must be an integer");
+  }
+  const sampleCount = profile.sampleCount ?? 0;
+  if (typeof sampleCount !== "number" || !Number.isInteger(sampleCount) || sampleCount < 0) {
+    throw new MDMValidationError("sampleCount must be an integer >= 0");
+  }
+  const stage1Brier = profile.stage1Brier ?? null;
+  if (
+    stage1Brier !== null &&
+    (typeof stage1Brier !== "number" ||
+      !Number.isFinite(stage1Brier) ||
+      stage1Brier < 0.0 ||
+      stage1Brier > 2.0)
+  ) {
+    throw new MDMValidationError("stage1Brier must be null/undefined or a finite number in [0, 2]");
+  }
+  const stage2Brier = profile.stage2Brier ?? null;
+  if (
+    stage2Brier !== null &&
+    (typeof stage2Brier !== "number" ||
+      !Number.isFinite(stage2Brier) ||
+      stage2Brier < 0.0 ||
+      stage2Brier > 2.0)
+  ) {
+    throw new MDMValidationError("stage2Brier must be null/undefined or a finite number in [0, 2]");
+  }
+
+  const margin = options.margin ?? 0.05;
+  if (typeof margin !== "number" || !Number.isFinite(margin) || margin < 0.0) {
+    throw new MDMValidationError("margin must be a finite number >= 0");
+  }
+  const minDeltaHurt = options.minDeltaHurt ?? -2;
+  if (typeof minDeltaHurt !== "number" || !Number.isInteger(minDeltaHurt)) {
+    throw new MDMValidationError("minDeltaHurt must be an integer");
+  }
+  const brierDegradationRatio = options.brierDegradationRatio ?? 2.5;
+  if (
+    typeof brierDegradationRatio !== "number" ||
+    !Number.isFinite(brierDegradationRatio) ||
+    brierDegradationRatio <= 1.0
+  ) {
+    throw new MDMValidationError("brierDegradationRatio must be a finite number > 1.0");
+  }
+
+  if (pairedEscalationDelta <= minDeltaHurt) {
+    return true;
+  }
+  if (
+    stage1Brier !== null &&
+    stage2Brier !== null &&
+    stage2Accuracy < stage1Accuracy &&
+    stage2Brier > brierDegradationRatio * Math.max(0.02, stage1Brier)
+  ) {
+    return true;
+  }
+  if (pairedEscalationDelta > 0) {
+    return false;
+  }
+  return stage2Accuracy < stage1Accuracy - margin;
+}
+
+export function computeDawidSkenePoeWeights(
+  stage1Accuracy: number,
+  stage2Accuracy: number,
+  numOptions = 2,
+  floorAccuracy = 1e-4,
+): [number, number] {
+  if (
+    typeof stage1Accuracy !== "number" ||
+    !Number.isFinite(stage1Accuracy) ||
+    stage1Accuracy < 0.0 ||
+    stage1Accuracy > 1.0
+  ) {
+    throw new MDMValidationError("stage1Accuracy must be a finite number in [0, 1]");
+  }
+  if (
+    typeof stage2Accuracy !== "number" ||
+    !Number.isFinite(stage2Accuracy) ||
+    stage2Accuracy < 0.0 ||
+    stage2Accuracy > 1.0
+  ) {
+    throw new MDMValidationError("stage2Accuracy must be a finite number in [0, 1]");
+  }
+  if (typeof numOptions !== "number" || !Number.isInteger(numOptions) || numOptions < 2) {
+    throw new MDMValidationError("numOptions must be an integer >= 2");
+  }
+  if (
+    typeof floorAccuracy !== "number" ||
+    !Number.isFinite(floorAccuracy) ||
+    floorAccuracy <= 0.0 ||
+    floorAccuracy >= 0.25
+  ) {
+    throw new MDMValidationError("floorAccuracy must be a finite number strictly in (0, 0.25)");
+  }
+  const effectiveFloor = Math.min(floorAccuracy, 0.5 / numOptions);
+  const chanceLogOdds = -Math.log(numOptions - 1);
+  const clampedStage1 = Math.min(
+    1.0 - effectiveFloor,
+    Math.max(effectiveFloor, stage1Accuracy),
+  );
+  const clampedStage2 = Math.min(
+    1.0 - effectiveFloor,
+    Math.max(effectiveFloor, stage2Accuracy),
+  );
+  const stage1Weight = Math.max(
+    0.01,
+    Math.log(clampedStage1 / (1.0 - clampedStage1)) - chanceLogOdds,
+  );
+  const stage2Weight = Math.max(
+    0.0,
+    Math.log(clampedStage2 / (1.0 - clampedStage2)) - chanceLogOdds,
+  );
+  return [stage1Weight, stage2Weight];
 }

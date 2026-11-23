@@ -443,7 +443,6 @@ def project_triangles_to_transitive_consistency(
                     visited.add(nb)
                     queue.append(nb)
         comp.sort()
-        node_idx = {name: i for i, name in enumerate(comp)}
         pair_weights: dict[tuple[int, int], float] = {}
         for i in range(len(comp)):
             for j in range(i + 1, len(comp)):

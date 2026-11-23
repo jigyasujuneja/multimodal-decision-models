@@ -55,7 +55,7 @@ PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 * **Solution**:
   1. Score up to 8 context blocks per pass over `{"full", "stub", "drop"}` via `build_context_pruning_questions`.
   2. Solve the submodular facility-location Multiple-Choice Knapsack Problem via `prune_agent_context_blocks(..., redundancy_penalty_weight=0.70)`, discounting blocks whose token-shingle Jaccard similarity overlaps already-retained full/stub blocks while respecting `pinned=True` system blocks.
-* **MDM-Bench Verification**: Submodular MCKP raises multi-facet root-cause recall (`{stack_trace, config_schema, interface_sig}`) across 50 real `EXP-49` trajectories from `66.67%` (additive MCKP) to `78.67%` at `61.17%` token reduction.
+* **MDM-Bench Verification**: Submodular MCKP raises multi-facet root-cause recall (`{stack_trace, config_schema, interface_sig}`) across 50 real coding trajectories from `66.67%` (additive MCKP) to `78.67%` at `61.17%` token reduction.
 
 ## 6. Transitive Entity Resolution & Multi-Agent File-Lock Arbitration (`relational_entity_and_swarm_locks`)
 

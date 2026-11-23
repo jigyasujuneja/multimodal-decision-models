@@ -683,12 +683,12 @@ def run_experiment_c_jev_agent_harness_and_agentdecisionbench(
     ]
     raw_ps = []
     tango_summary = {}
-    for name, w, l, n_tot, marg in stage2_claims:
-        ni = tango_paired_non_inferiority_test(w, l, n_tot, margin=marg, alpha=0.05, gamma=1e-4)
+    for name, wins_cnt, losses_cnt, n_tot, marg in stage2_claims:
+        ni = tango_paired_non_inferiority_test(wins_cnt, losses_cnt, n_tot, margin=marg, alpha=0.05, gamma=1e-4)
         raw_ps.append(ni.p_berger_boos)
         tango_summary[name] = {
-            "wins": w,
-            "losses": l,
+            "wins": wins_cnt,
+            "losses": losses_cnt,
             "n_total": n_tot,
             "delta_hat": round(ni.delta_hat, 4),
             "p_berger_boos": round(ni.p_berger_boos, 6),

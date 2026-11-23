@@ -9,7 +9,7 @@ Engineering teams frequently combine three complementary layers:
 | Layer | Responsibility | When to use |
 | :--- | :--- | :--- |
 | **System-1 Serving Engine (`dgem` / `/v1/systemone`)** | Co-denoises up to 8 decision slots in one parallel forward pass (`15 ms` to `180 ms`) and returns calibrated per-option probabilities. | Ultra-low-latency Stage-1 scoring on dedicated GPUs or Vertex AI endpoints. |
-| **Managed Single-Pass Decision APIs (`CreateDecision`)** | Hosted single-call System-1 scoring over text and multimodal payloads. | Turnkey single-pass classification where a managed API owns model hosting. |
+| **Managed Single-Pass Decision APIs (`CreateDecision`)** | Hosted single-call System-1 scoring over text and multimodal payloads (`GeminiDecisionsBackend` on `POST /v1beta/decisions` with `models/gemini-decision-1`). | Turnkey single-pass classification (`K <= 255` with automatic `shortlist_wide_question` bridging above `255`) where a managed API owns model hosting. |
 | **Calibration & Cascade Layer (`multimodal-decision-models`)** | Model-agnostic backend adapters, pre-gated Bayesian `PoE` prior fusion, split/joint/Mondrian conformal sets, visual and audio/video contact-sheet compilers, Action-Stakes agent guards, and Stage-1 to Stage-2 cascade orchestration. | Whenever you require finite-sample coverage guarantees, wide-catalog routing ($K > 26$), multi-model cascades, or strict parity across `/v1/systemone`, `vLLM`, Vertex Gemini, and black-box APIs. |
 
 ## Install the SDKs
@@ -43,8 +43,9 @@ Every Python backend implements `score_questions(state, questions, images=None)`
 | :--- | :--- | :--- | :--- |
 | **1. Parallel Masked Diffusion** | `DgemSystemOneBackend` | `POST /v1/systemone` or Vertex `:rawPredict` | Single forward pass co-denoising up to 8 `[A-Z]` slots simultaneously. Auto-dispatches `POST {"health": true}` on single-route `:rawPredict` URLs. |
 | **2. Autoregressive Token Logprobs** | `OpenAILogprobBackend` | `POST /v1/chat/completions` (`vLLM`, `SGLang`, OpenAI, `Gemma 4`) | Restricted single-token `[A-Z]` (or `UNIVERSAL_256_DECISION_CODES`) `top_logprobs` extraction with `<think>` token leakage guards and zero uniform fallback. |
-| **3. Frontier Multimodal Verifier** | `VertexGeminiBackend` | Vertex AI `generateContent` | Structured `responseLogprobs` enum binding with causal Evidence-First `propertyOrdering` (`evidence_read` decoded ahead of choice slots). |
+| **3. Frontier Multimodal Verifier** | `VertexGeminiBackend` (`from_ga_preset`) | Vertex AI `generateContent` (`gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-3.8-flash`, `gemini-3.5-pro`) | Structured `responseLogprobs` enum binding with causal Evidence-First `propertyOrdering` (`evidence_read` decoded ahead of choice slots). |
 | **4. Logprob-Free Sampled Consensus** | `BlackBoxSampledBackend` | Any JSON/text completion endpoint | Aggregates $M$ discrete draws or verbalized vote maps under a symmetric Dirichlet prior ($\alpha_0 = 0.5$) with exact analytic epistemic variance. |
+| **5. Managed `CreateDecision` Endpoint** | `GeminiDecisionsBackend` | `POST /v1beta/decisions` (`models/gemini-decision-1`) | Log-space normalization over `noul`, `choice` (`K <= 255` plus `include_none_of_above`), and `score` (`L <= 255`) with header-only `x-goog-api-key` auth. |
 
 ## Run a two-stage calibrated cascade in Python
 

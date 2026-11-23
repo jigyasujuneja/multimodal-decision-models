@@ -15,18 +15,14 @@
 
 """Scalable 7-Pillar, 14-Gate Binary (1/0) Evaluator & 3-Persona LLM Judge for TDDs and arXiv Papers.
 
-Synthesizes Google Agent Marketplace and Google3 skills into a single domain-agnostic,
+Synthesizes open engineering and academic style checklists into a single domain-agnostic,
 scalable evaluation harness supporting Markdown (`.md`), Typst (`.typ`), and LaTeX (`.tex`):
-  1. `paper-writing-style` & `claudeisms` (`//learning/gemini/agents/clis/claudeisms/detector.go`
-     + `references/scientific_paper_workflow.md` + `references/venue_checklists.md`)
-  2. `design-doc-readability` (`//learning/gemini/agents/skills/software_design/design_doc_readability`
-     + `references/taste_auditor.md` 14-Point Checklist + `references/clean_prose.md`)
-  3. `writing-guidelines` (StellarDocs `//prototypes/projects/stellardocs/skills/writing_guidelines`
-     Heading/Table Budgets & Plan-to-Doc Abstraction Firewall)
-  4. `judgement-doc` (`go/judgment-is-the-job`: Feynman Whiteboard Defense, First-Principles
+  1. `paper-writing-style` & `claudeisms` (LLM stylistic tic detector, scientific paper workflow, and venue checklists)
+  2. `design-doc-readability` (14-Point Design Doc Readability & Clean Prose Checklist)
+  3. `writing-guidelines` (Heading/Table Budgets & Plan-to-Doc Abstraction Firewall)
+  4. `judgement-doc` (Feynman Whiteboard Defense, First-Principles
      Trade-Offs, 4 Marks of AI Slop, Contradiction Scan, Retrieve-or-Refuse Metric Provenance)
-  5. `speak-like-tl` & `technical-writing` (`//learning/gemini/agents/skills/speak_like_tl`,
-     `//learning/gemini/agents/skills/technical_writing`, `//learning/gemini/agents/skills/communication/doc_checklist`)
+  5. `speak-like-tl` & `technical-writing` (Executive clarity, technical writing, and document hygiene checklists)
   6. `academic-paper-reviewer` & `document_review` (Math dimensional consistency, BibTeX
      citation resolution, anonymity/confidentiality, and 3-persona adversarial review)
   7. `golden-eval-judge-audit` (Calibrated LLM-as-a-Judge rubric where LLM leniency cannot
@@ -48,7 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 # ==============================================================================
-# 1. PORT OF GOOGLE3 `claudeisms` DETECTOR (detector.go) + ZOMBIE NOUNS
+# 1. DETERMINISTIC LLM PROSE TIC DETECTOR + ZOMBIE NOUNS
 # ==============================================================================
 
 # Severity 3 (High-confidence LLM giveaway tics - strictly 0 allowed in narrative prose)
@@ -111,7 +107,7 @@ CLAUDEISMS_SEV2_PATTERNS: List[Tuple[str, str]] = [
     ),
     (
         r"\b(?:conduct\s+an\s+evaluation\s+of|make\s+a\s+determination|perform\s+the\s+ingestion\s+of|provide\s+an\s+explanation\s+for|facilitate\s+the\s+reduction\s+of|for\s+the\s+purpose\s+of|due\s+to\s+the\s+fact\s+that|at\s+this\s+point\s+in\s+time)\b",
-        "clean-prose-zombie-noun: nominalized deadweight phrase (Steven Pinker / go/tw1)",
+        "clean-prose-zombie-noun: nominalized deadweight phrase (Steven Pinker nominalization check)",
     ),
 ]
 
@@ -365,7 +361,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
         },
     }
 
-    # G2: Decisive Stance (go/tott/773) & Honest Negative Space / Limitations / Boundaries
+    # G2: Decisive Stance & Honest Negative Space / Limitations / Boundaries
     has_negative_space = bool(
         re.search(
             r"(?i)\b(?:non-goals?|limitations?|when\s+not\s+to\s+use|failure\s+modes?|scope\s+boundaries|rejected\s+alternatives|trade-?offs?|null\s+results?|falsif(?:ied|ies)|abstain|quarantine|under-?coverage|bottleneck)\b",
@@ -381,7 +377,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     g2_pass = 1 if (has_negative_space and has_decisive_rationale) else 0
     gates["G2_taste_decisive_stance_and_negative_space"] = {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": g2_pass,
         "details": {
             "has_negative_space_or_limitations": has_negative_space,
@@ -392,7 +388,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     # --------------------------------------------------------------------------
     # PILLAR 2: WRITING & ANTI-SLOP (G3, G4)
     # --------------------------------------------------------------------------
-    # G3: Zero LLM Stylistic Tells & Zombie Nouns (Google3 `claudeisms` detector.go port)
+    # G3: Zero LLM Stylistic Tells & Zombie Nouns (deterministic prose tic detector)
     sev3_hits: List[Tuple[int, str, str]] = []
     for pat, label in CLAUDEISMS_SEV3_PATTERNS:
         for ln, snippet in find_line_matches(raw_text, pat, suffix=suffix):
@@ -406,7 +402,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     g3_pass = 1 if (len(sev3_hits) == 0 and len(sev2_hits) == 0) else 0
     gates["G3_writing_zero_claudeisms_and_ai_slop"] = {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": g3_pass,
         "details": {
             "sev3_count": len(sev3_hits),

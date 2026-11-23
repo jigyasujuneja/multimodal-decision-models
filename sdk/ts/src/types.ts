@@ -181,3 +181,19 @@ export interface NevDecisionResult {
   readonly netExpectedValue: number;
   readonly minFailProbabilityThreshold: number;
 }
+
+export interface DomainCompetenceProfile {
+  readonly stage1Accuracy: number;
+  readonly stage2Accuracy: number;
+  readonly numOptions?: number;
+  readonly pairedEscalationDelta?: number;
+  readonly sampleCount?: number;
+  readonly stage1Brier?: number | null;
+  readonly stage2Brier?: number | null;
+}
+
+export interface NegativeTransferOptions {
+  readonly margin?: number;
+  readonly minDeltaHurt?: number;
+  readonly brierDegradationRatio?: number;
+}

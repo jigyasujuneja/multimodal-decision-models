@@ -36,12 +36,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .contracts import SchemaContractViolationError
-from .types import (
-    DEFAULT_HESITATION_THRESHOLD,
-    MAX_OPTIONS_PER_SLOT,
-    MAX_SLOTS_PER_PASS,
-    DecisionQuestion,
-)
+from .types import DEFAULT_HESITATION_THRESHOLD, MAX_OPTIONS_PER_SLOT, MAX_SLOTS_PER_PASS, DecisionQuestion
 
 VALID_PRIOR_GATE_MODES: tuple[str, ...] = (
     "always",
@@ -1345,9 +1340,9 @@ def estimate_saerens_em_prior_logits(
     damping_lambda: float = 0.70,
     max_effective_classes: int = 2,
 ) -> SaerensEMPriorResult:
-    """Estimate target-domain class priors via damped Saerens et al. (2002) EM with EXP-48 K-guard.
+    """Estimate target-domain class priors via damped Saerens et al. (2002) EM with K-guard.
 
-    Live EXP-48 demonstrated two empirical regimes:
+    Empirical label-shift evaluation demonstrated two regimes:
       1. Binary suites (`K == 2`): 5-step damped EM (`lambda = 0.70`) combined with
          `gate_mode="hesitant"` (`w = 1.00`) cuts Brier score by `-19.5%` to `-41.9%` under `5%`
          and `90%` prevalence shifts with zero adversarial AUROC loss (`+0.0005`).
@@ -1489,6 +1484,435 @@ def selective_teacher_brier_sft_loss(
         teacher_accepted=teacher_ok,
         target_distribution=target,
     )
+
+
+def _validate_probability_mapping(
+    probabilities: Mapping[str, float],
+    mapping_name: str,
+) -> dict[str, float]:
+    """Validate and normalize a finite non-negative probability mapping."""
+    if not isinstance(probabilities, Mapping) or not probabilities:
+        raise ValueError(f"{mapping_name} must be a non-empty mapping")
+    cleaned: dict[str, float] = {}
+    total_mass = 0.0
+    for raw_key, raw_val in probabilities.items():
+        if not isinstance(raw_key, str) or not raw_key:
+            raise ValueError(f"{mapping_name} keys must be non-empty strings, got {raw_key!r}")
+        if isinstance(raw_val, bool) or not isinstance(raw_val, (int, float)):
+            raise ValueError(
+                f"{mapping_name}[{raw_key!r}] must be a finite non-boolean number, got {raw_val!r}"
+            )
+        float_val = float(raw_val)
+        if not math.isfinite(float_val) or float_val < 0.0:
+            raise ValueError(
+                f"{mapping_name}[{raw_key!r}] must be finite and >= 0, got {raw_val!r}"
+            )
+        cleaned[raw_key] = float_val
+        total_mass += float_val
+    if total_mass <= 0.0:
+        raise ValueError(f"{mapping_name} sum must be > 0")
+    return {key: val / total_mass for key, val in cleaned.items()}
+
+
+def adapt_sld_label_shift_posteriors(
+    source_priors: Mapping[str, float],
+    unlabeled_posteriors: Sequence[Mapping[str, float]],
+    max_iters: int = 100,
+    tol: float = 1e-7,
+    min_prior_floor: float = 1e-6,
+    smoothing_alpha: float = 1e-4,
+) -> tuple[dict[str, float], list[dict[str, float]], int]:
+    """Adapt calibrated posteriors to unlabeled target shift via Saerens et al. EM.
+
+    Implements Saerens-Latinne-Decaestecker (SLD, 2002) test-time Expectation-Maximization
+    prior-shift adaptation without target labels. Given source class priors and calibrated
+    source-domain posteriors on an unlabeled deployment batch, iteratively estimates target
+    class priors and Bayes-reweighted item posteriors.
+
+    Args:
+      source_priors: Non-empty mapping of class keys to source training/calibration priors.
+      unlabeled_posteriors: Non-empty sequence of source-calibrated item posteriors over the
+        exact same option key set as `source_priors`.
+      max_iters: Maximum EM iterations (`>= 1`).
+      tol: L1 convergence tolerance (`>= 0.0`) on consecutive target prior estimates.
+      min_prior_floor: Minimum per-class prior floor (`>= 0.0` and `< 1 / K`) preventing
+        degenerate boundary collapse.
+      smoothing_alpha: Symmetric Dirichlet pseudo-count smoothing (`>= 0.0`) in the M-step.
+
+    Returns:
+      A 3-tuple `(estimated_target_priors, adapted_posteriors, iterations_used)`.
+
+    Raises:
+      ValueError: If inputs are empty, contain non-finite/negative/boolean values, have
+        mismatched option keys, or specify invalid hyperparameters.
+    """
+    normalized_source = _validate_probability_mapping(source_priors, "source_priors")
+    option_keys = sorted(normalized_source.keys())
+    num_classes = len(option_keys)
+    expected_key_set = set(option_keys)
+
+    if (
+        isinstance(unlabeled_posteriors, (str, bytes))
+        or not isinstance(unlabeled_posteriors, Sequence)
+        or not unlabeled_posteriors
+    ):
+        raise ValueError("unlabeled_posteriors must be a non-empty sequence of mappings")
+    if isinstance(max_iters, bool) or not isinstance(max_iters, int) or max_iters < 1:
+        raise ValueError(f"max_iters must be an integer >= 1, got {max_iters!r}")
+    if (
+        isinstance(tol, bool)
+        or not isinstance(tol, (int, float))
+        or not math.isfinite(float(tol))
+        or float(tol) < 0.0
+    ):
+        raise ValueError(f"tol must be finite and >= 0, got {tol!r}")
+    if (
+        isinstance(min_prior_floor, bool)
+        or not isinstance(min_prior_floor, (int, float))
+        or not math.isfinite(float(min_prior_floor))
+        or float(min_prior_floor) < 0.0
+    ):
+        raise ValueError(f"min_prior_floor must be finite and >= 0, got {min_prior_floor!r}")
+    floor_float = float(min_prior_floor)
+    if num_classes > 1 and floor_float * float(num_classes) >= 1.0:
+        raise ValueError(
+            f"min_prior_floor * K must be < 1.0 (got floor={floor_float}, K={num_classes})"
+        )
+    if num_classes == 1 and floor_float > 1.0:
+        raise ValueError(f"min_prior_floor must be <= 1.0, got {min_prior_floor!r}")
+    if (
+        isinstance(smoothing_alpha, bool)
+        or not isinstance(smoothing_alpha, (int, float))
+        or not math.isfinite(float(smoothing_alpha))
+        or float(smoothing_alpha) < 0.0
+    ):
+        raise ValueError(f"smoothing_alpha must be finite and >= 0, got {smoothing_alpha!r}")
+
+    normalized_batch: list[dict[str, float]] = []
+    for row_idx, row_mapping in enumerate(unlabeled_posteriors):
+        norm_row = _validate_probability_mapping(
+            row_mapping, f"unlabeled_posteriors[{row_idx}]"
+        )
+        if set(norm_row.keys()) != expected_key_set:
+            raise ValueError(
+                f"unlabeled_posteriors[{row_idx}] keys {sorted(norm_row.keys())} "
+                f"do not match source_priors keys {option_keys}"
+            )
+        normalized_batch.append(norm_row)
+
+    def _apply_floor_and_normalize(raw_priors: Mapping[str, float]) -> dict[str, float]:
+        effective_floor = max(floor_float, 1e-15) if floor_float == 0.0 else floor_float
+        clamped = {key: max(effective_floor, raw_priors[key]) for key in option_keys}
+        clamped_sum = sum(clamped.values())
+        return {key: clamped[key] / clamped_sum for key in option_keys}
+
+    source_floored = _apply_floor_and_normalize(normalized_source)
+    if any(normalized_source[key] <= 0.0 for key in option_keys) and floor_float == 0.0:
+        raise ValueError("source_priors entries must be strictly > 0 when min_prior_floor == 0")
+
+    current_priors = dict(source_floored)
+    batch_size = float(len(normalized_batch))
+    alpha_smooth = float(smoothing_alpha)
+    tol_float = float(tol)
+    denom_m_step = batch_size + float(num_classes) * alpha_smooth
+    iterations_used = 0
+
+    for step_number in range(1, max_iters + 1):
+        iterations_used = step_number
+        likelihood_ratios = {
+            key: current_priors[key] / source_floored[key] for key in option_keys
+        }
+        reweighted_sums = {key: 0.0 for key in option_keys}
+
+        for item_probs in normalized_batch:
+            unnormalized = {
+                key: item_probs[key] * likelihood_ratios[key] for key in option_keys
+            }
+            normalizer = sum(unnormalized.values())
+            if normalizer > 0.0:
+                inv_norm = 1.0 / normalizer
+                for key in option_keys:
+                    reweighted_sums[key] += unnormalized[key] * inv_norm
+            else:
+                for key in option_keys:
+                    reweighted_sums[key] += current_priors[key]
+
+        raw_next_priors = {
+            key: (reweighted_sums[key] + alpha_smooth) / denom_m_step
+            for key in option_keys
+        }
+        if floor_float > 0.0:
+            clamped_next = {
+                key: max(floor_float, raw_next_priors[key]) for key in option_keys
+            }
+            clamped_total = sum(clamped_next.values())
+            next_priors = {key: clamped_next[key] / clamped_total for key in option_keys}
+        else:
+            next_total = sum(raw_next_priors.values())
+            next_priors = {key: raw_next_priors[key] / next_total for key in option_keys}
+
+        l1_delta = sum(abs(next_priors[key] - current_priors[key]) for key in option_keys)
+        current_priors = next_priors
+        if l1_delta <= tol_float:
+            break
+
+    final_ratios = {
+        key: current_priors[key] / source_floored[key] for key in option_keys
+    }
+    adapted_posteriors: list[dict[str, float]] = []
+    for item_probs in normalized_batch:
+        unnormalized_item = {
+            key: item_probs[key] * final_ratios[key] for key in option_keys
+        }
+        item_denom = sum(unnormalized_item.values())
+        if item_denom > 0.0:
+            adapted_posteriors.append(
+                {key: unnormalized_item[key] / item_denom for key in option_keys}
+            )
+        else:
+            adapted_posteriors.append(dict(current_priors))
+
+    return current_priors, adapted_posteriors, iterations_used
+
+
+def debias_null_prior_probabilities(
+    raw_probs: Mapping[str, float],
+    null_prior_probs: Mapping[str, float],
+    alpha: float = 1.0,
+    eps: float = 1e-12,
+) -> dict[str, float]:
+    """Debias option probabilities in log space against a content-free null prior.
+
+    Applies PriDe-style (Zheng et al., ICLR 2024) content-free calibration:
+    `log p_debiased(k) = log p_raw(k) - alpha * log p_null(k)` normalized via log-sum-exp,
+    removing option-order, neutral-pull, and demographic label bias.
+
+    Args:
+      raw_probs: Non-empty mapping of option keys to raw model probabilities.
+      null_prior_probs: Non-empty mapping of option keys to content-free null-input
+        prior probabilities over the exact same key set.
+      alpha: Non-negative debiasing strength (`1.0` performs exact Bayes prior division).
+      eps: Positive probability floor in `(0, 1)` used prior to taking logarithms.
+
+    Returns:
+      Normalized dictionary of debiased option probabilities summing to `1.0`.
+
+    Raises:
+      ValueError: If mappings are empty, option key sets mismatch, or weights/`alpha`/`eps`
+        are negative, boolean, zero-sum, or non-finite.
+    """
+    normalized_raw = _validate_probability_mapping(raw_probs, "raw_probs")
+    normalized_null = _validate_probability_mapping(null_prior_probs, "null_prior_probs")
+    if set(normalized_raw.keys()) != set(normalized_null.keys()):
+        raise ValueError(
+            f"raw_probs keys {sorted(normalized_raw.keys())} do not match "
+            f"null_prior_probs keys {sorted(normalized_null.keys())}"
+        )
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not math.isfinite(float(alpha))
+        or float(alpha) < 0.0
+    ):
+        raise ValueError(f"alpha must be finite and >= 0, got {alpha!r}")
+    if (
+        isinstance(eps, bool)
+        or not isinstance(eps, (int, float))
+        or not math.isfinite(float(eps))
+        or float(eps) <= 0.0
+        or float(eps) >= 1.0
+    ):
+        raise ValueError(f"eps must be finite and strictly in (0, 1), got {eps!r}")
+
+    alpha_float = float(alpha)
+    eps_float = float(eps)
+    log_scores: dict[str, float] = {}
+    for option_key in normalized_raw:
+        clamped_raw = max(eps_float, normalized_raw[option_key])
+        clamped_null = max(eps_float, normalized_null[option_key])
+        log_scores[option_key] = math.log(clamped_raw) - (alpha_float * math.log(clamped_null))
+
+    return _softmax_dict(log_scores)
+
+
+@dataclass(frozen=True)
+class DomainCompetenceProfile:
+    """Held-out Stage-1 and Stage-2 competence profile for a rubric domain.
+
+    Captures out-of-fold accuracy, paired escalation fixes versus regressions, and optional
+    multiclass Brier scores so the cascade circuit breaker can block negative-transfer Stage-2
+    overrides before they degrade accuracy or probability calibration.
+
+    Attributes:
+      stage1_accuracy: Held-out Stage-1 accuracy in ``[0.0, 1.0]``.
+      stage2_accuracy: Held-out Stage-2 accuracy in ``[0.0, 1.0]``.
+      num_options: Candidate option count ``K >= 2``.
+      paired_escalation_delta: Net item count ``(n_fixed - n_broken)`` on escalated items.
+      sample_count: Number of held-out evaluation examples (``>= 0``).
+      stage1_brier: Optional held-out multiclass Brier score for Stage 1 in ``[0.0, 2.0]``, or
+        ``None`` when calibration scores are unavailable (skips the Brier degradation guard).
+      stage2_brier: Optional held-out multiclass Brier score for Stage 2 in ``[0.0, 2.0]``, or
+        ``None`` when calibration scores are unavailable (skips the Brier degradation guard).
+    """
+
+    stage1_accuracy: float
+    stage2_accuracy: float
+    num_options: int = 2
+    paired_escalation_delta: int = 0
+    sample_count: int = 0
+    stage1_brier: float | None = None
+    stage2_brier: float | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.stage1_accuracy, bool)
+            or not isinstance(self.stage1_accuracy, (int, float))
+            or not math.isfinite(float(self.stage1_accuracy))
+            or not 0.0 <= float(self.stage1_accuracy) <= 1.0
+        ):
+            raise ValueError("stage1_accuracy must be a finite non-boolean number in [0, 1]")
+        if (
+            isinstance(self.stage2_accuracy, bool)
+            or not isinstance(self.stage2_accuracy, (int, float))
+            or not math.isfinite(float(self.stage2_accuracy))
+            or not 0.0 <= float(self.stage2_accuracy) <= 1.0
+        ):
+            raise ValueError("stage2_accuracy must be a finite non-boolean number in [0, 1]")
+        if not isinstance(self.num_options, int) or self.num_options < 2:
+            raise ValueError("num_options must be an integer >= 2")
+        if isinstance(self.paired_escalation_delta, bool) or not isinstance(
+            self.paired_escalation_delta, int
+        ):
+            raise ValueError("paired_escalation_delta must be a non-boolean integer")
+        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int) or self.sample_count < 0:
+            raise ValueError("sample_count must be an integer >= 0")
+        if self.stage1_brier is not None:
+            if (
+                isinstance(self.stage1_brier, bool)
+                or not isinstance(self.stage1_brier, (int, float))
+                or not math.isfinite(float(self.stage1_brier))
+                or not 0.0 <= float(self.stage1_brier) <= 2.0
+            ):
+                raise ValueError("stage1_brier must be None or a finite non-boolean float in [0, 2]")
+        if self.stage2_brier is not None:
+            if (
+                isinstance(self.stage2_brier, bool)
+                or not isinstance(self.stage2_brier, (int, float))
+                or not math.isfinite(float(self.stage2_brier))
+                or not 0.0 <= float(self.stage2_brier) <= 2.0
+            ):
+                raise ValueError("stage2_brier must be None or a finite non-boolean float in [0, 2]")
+
+    def is_negative_transfer(
+        self,
+        margin: float = 0.05,
+        min_delta_hurt: int = -2,
+        brier_degradation_ratio: float = 2.5,
+    ) -> bool:
+        """Return True when Stage-2 escalation degrades held-out accuracy or calibration.
+
+        Evaluates negative transfer in priority order: (1) net paired escalation hurt at or
+        below ``min_delta_hurt``, (2) severe Stage-2 Brier score blowup when both ``stage1_brier``
+        and ``stage2_brier`` are non-``None`` and ``stage2_accuracy < stage1_accuracy`` (preserving
+        tied ``1.00 == 1.00`` suites), (3) positive paired escalation gain
+        ``paired_escalation_delta > 0`` (returns ``False``), and (4) overall accuracy trailing
+        ``stage1_accuracy - margin``. When ``stage1_brier`` or ``stage2_brier`` is ``None``, only
+        accuracy and paired escalation checks apply.
+
+        Args:
+          margin: Non-negative finite accuracy tolerance before tripping when ``paired_escalation_delta <= 0``.
+          min_delta_hurt: Paired escalation net-hurt threshold at or below which Stage 2 trips immediately.
+          brier_degradation_ratio: Multiplicative Brier degradation ratio ``> 1.0`` relative to
+            ``max(0.02, stage1_brier)``.
+
+        Returns:
+          ``True`` if Stage-2 overrides should be blocked on this domain; ``False`` otherwise.
+
+        Raises:
+          ValueError: If ``margin``, ``min_delta_hurt``, or ``brier_degradation_ratio`` is boolean,
+            non-finite, or out of valid bounds.
+        """
+        if (
+            isinstance(margin, bool)
+            or not isinstance(margin, (int, float))
+            or not math.isfinite(float(margin))
+            or float(margin) < 0.0
+        ):
+            raise ValueError("margin must be a finite non-boolean float >= 0")
+        if isinstance(min_delta_hurt, bool) or not isinstance(min_delta_hurt, int):
+            raise ValueError("min_delta_hurt must be a non-boolean integer")
+        if (
+            isinstance(brier_degradation_ratio, bool)
+            or not isinstance(brier_degradation_ratio, (int, float))
+            or not math.isfinite(float(brier_degradation_ratio))
+            or float(brier_degradation_ratio) <= 1.0
+        ):
+            raise ValueError("brier_degradation_ratio must be a finite non-boolean float > 1.0")
+        if self.paired_escalation_delta <= min_delta_hurt:
+            return True
+        if (
+            self.stage1_brier is not None
+            and self.stage2_brier is not None
+            and self.stage2_accuracy < self.stage1_accuracy
+            and self.stage2_brier > float(brier_degradation_ratio) * max(0.02, float(self.stage1_brier))
+        ):
+            return True
+        if self.paired_escalation_delta > 0:
+            return False
+        return self.stage2_accuracy < self.stage1_accuracy - float(margin)
+
+
+def compute_dawid_skene_poe_weights(
+    stage1_accuracy: float,
+    stage2_accuracy: float,
+    num_options: int = 2,
+    floor_accuracy: float = 1e-4,
+) -> tuple[float, float]:
+    """Compute multi-class Dawid-Skene log-odds reliability weights ``(w1, w2)``.
+
+    Args:
+      stage1_accuracy: Held-out Stage-1 accuracy in ``[0, 1]``.
+      stage2_accuracy: Held-out Stage-2 accuracy in ``[0, 1]``.
+      num_options: Candidate option count ``K >= 2``.
+      floor_accuracy: Numerical clamp distance from ``0`` and ``1`` in ``(0, 0.25)``.
+
+    Returns:
+      Tuple ``(stage1_weight, stage2_weight)`` relative to ``1/K`` chance log-odds.
+
+    Raises:
+      ValueError: If accuracies, ``num_options``, or ``floor_accuracy`` violate type or range bounds.
+    """
+    if (
+        isinstance(stage1_accuracy, bool)
+        or not isinstance(stage1_accuracy, (int, float))
+        or not math.isfinite(float(stage1_accuracy))
+        or not 0.0 <= float(stage1_accuracy) <= 1.0
+    ):
+        raise ValueError("stage1_accuracy must be a finite non-boolean number in [0, 1]")
+    if (
+        isinstance(stage2_accuracy, bool)
+        or not isinstance(stage2_accuracy, (int, float))
+        or not math.isfinite(float(stage2_accuracy))
+        or not 0.0 <= float(stage2_accuracy) <= 1.0
+    ):
+        raise ValueError("stage2_accuracy must be a finite non-boolean number in [0, 1]")
+    if not isinstance(num_options, int) or num_options < 2:
+        raise ValueError("num_options must be an integer >= 2")
+    if (
+        not isinstance(floor_accuracy, (int, float))
+        or not math.isfinite(float(floor_accuracy))
+        or not 0.0 < float(floor_accuracy) < 0.25
+    ):
+        raise ValueError("floor_accuracy must be a finite non-boolean float in (0, 0.25)")
+    effective_floor = min(float(floor_accuracy), 0.5 / float(num_options))
+    chance_log_odds = -math.log(float(num_options - 1))
+    clamped_stage1 = min(1.0 - effective_floor, max(effective_floor, float(stage1_accuracy)))
+    clamped_stage2 = min(1.0 - effective_floor, max(effective_floor, float(stage2_accuracy)))
+    stage1_weight = max(0.01, math.log(clamped_stage1 / (1.0 - clamped_stage1)) - chance_log_odds)
+    stage2_weight = max(0.0, math.log(clamped_stage2 / (1.0 - clamped_stage2)) - chance_log_odds)
+    return stage1_weight, stage2_weight
+
+
 
 
 

@@ -565,3 +565,303 @@ func TestMondrianWeightedAndMultiSlotJointConformal(t *testing.T) {
 		t.Fatalf("expected simultaneous 4-slot joint coverage >= 0.86 at familyAlpha=0.10, got %.4f", jointCov)
 	}
 }
+
+func TestDomainCompetenceProfileAndDawidSkeneParityVectors(t *testing.T) {
+	const tol = 1e-12
+
+	// Vector 1: CLINC150 (K=31)
+	v1W1, v1W2, err := ComputeDawidSkenePoEWeights(0.98, 0.94, 31, 1e-4)
+	if err != nil {
+		t.Fatalf("Vector 1 ComputeDawidSkenePoEWeights failed: %v", err)
+	}
+	if math.Abs(v1W1-7.2930176797727810) >= tol || math.Abs(v1W2-6.1527326947041034) >= tol {
+		t.Fatalf("Vector 1 mismatch: got (%.16f, %.16f)", v1W1, v1W2)
+	}
+	clincProfile := DomainCompetenceProfile{
+		Stage1Accuracy:        0.98,
+		Stage2Accuracy:        0.94,
+		NumOptions:            31,
+		PairedEscalationDelta: -1,
+		SampleCount:           150,
+		HasBrierScores:        true,
+		Stage1Brier:           0.0637,
+		Stage2Brier:           0.9591,
+	}
+	if err := clincProfile.Validate(); err != nil {
+		t.Fatalf("clincProfile.Validate() failed: %v", err)
+	}
+	if !clincProfile.DefaultNegativeTransferCheck() {
+		t.Fatal("expected Vector 1 CLINC150 profile DefaultNegativeTransferCheck() == true")
+	}
+
+	// Vector 2: TypedDecisions (K=2)
+	v2W1, v2W2, err := ComputeDawidSkenePoEWeights(0.7125, 0.625, 2, 1e-4)
+	if err != nil {
+		t.Fatalf("Vector 2 ComputeDawidSkenePoEWeights failed: %v", err)
+	}
+	if math.Abs(v2W1-0.9075570519054006) >= tol || math.Abs(v2W2-0.5108256237659907) >= tol {
+		t.Fatalf("Vector 2 mismatch: got (%.16f, %.16f)", v2W1, v2W2)
+	}
+	typedProfile := DomainCompetenceProfile{
+		Stage1Accuracy:        0.7125,
+		Stage2Accuracy:        0.625,
+		NumOptions:            2,
+		PairedEscalationDelta: -3,
+		SampleCount:           64,
+	}
+	if !typedProfile.DefaultNegativeTransferCheck() {
+		t.Fatal("expected Vector 2 TypedDecisions DefaultNegativeTransferCheck() == true")
+	}
+
+	// Vector 3: Aegis v2 (K=2)
+	v3W1, v3W2, err := ComputeDawidSkenePoEWeights(0.88, 0.84, 2, 1e-4)
+	if err != nil {
+		t.Fatalf("Vector 3 ComputeDawidSkenePoEWeights failed: %v", err)
+	}
+	if math.Abs(v3W1-1.9924301646902063) >= tol || math.Abs(v3W2-1.6582280766035322) >= tol {
+		t.Fatalf("Vector 3 mismatch: got (%.16f, %.16f)", v3W1, v3W2)
+	}
+	safetyProfile := DomainCompetenceProfile{
+		Stage1Accuracy:        0.88,
+		Stage2Accuracy:        0.84,
+		NumOptions:            2,
+		PairedEscalationDelta: 1,
+		SampleCount:           40,
+	}
+	if safetyProfile.DefaultNegativeTransferCheck() {
+		t.Fatal("expected Vector 3 Aegis v2 DefaultNegativeTransferCheck() == false")
+	}
+
+	// Vector 4: Chance-level Stage 2 (K=4)
+	v4W1, v4W2, err := ComputeDawidSkenePoEWeights(0.85, 0.20, 4, DefaultDawidSkeneFloorAccuracy)
+	if err != nil {
+		t.Fatalf("Vector 4 ComputeDawidSkenePoEWeights failed: %v", err)
+	}
+	if math.Abs(v4W1-2.8332133440562162) >= tol || v4W2 != 0.0 {
+		t.Fatalf("Vector 4 mismatch: got (%.16f, %.16f)", v4W1, v4W2)
+	}
+
+	// Singleton delta = -1 on N=40 (36/40 vs 35/40) must NOT false-trip without Brier blowup
+	singletonNoise := DomainCompetenceProfile{
+		Stage1Accuracy:        0.90,
+		Stage2Accuracy:        0.875,
+		NumOptions:            2,
+		PairedEscalationDelta: -1,
+		SampleCount:           40,
+	}
+	if singletonNoise.DefaultNegativeTransferCheck() {
+		t.Fatal("expected singleton delta=-1 within 0.05 margin (0.875 vs 0.90) to return false")
+	}
+}
+
+func TestDomainCompetenceAndDawidSkeneGuardBranchesAndValidation(t *testing.T) {
+	// Branch 1 boundary: PairedEscalationDelta <= minDeltaHurt even when Stage2Accuracy > Stage1Accuracy
+	hurtBoundary := DomainCompetenceProfile{
+		Stage1Accuracy:        0.80,
+		Stage2Accuracy:        0.82,
+		NumOptions:            2,
+		PairedEscalationDelta: -2,
+	}
+	if !hurtBoundary.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected delta == minDeltaHurt (-2) to return true")
+	}
+	if hurtBoundary.IsNegativeTransfer(0.05, -3, 2.5) {
+		t.Fatal("expected delta (-2) > minDeltaHurt (-3) with higher stage2 accuracy to return false")
+	}
+
+	// Brier degradation branch boundaries: HasBrierScores, strict Stage2Accuracy < Stage1Accuracy (tied 1.00 == 1.00 does NOT trip), > ratio * max(0.02, stage1Brier), and ordering before delta > 0
+	brierPerfectTie := DomainCompetenceProfile{
+		Stage1Accuracy:        1.0,
+		Stage2Accuracy:        1.0,
+		NumOptions:            5,
+		PairedEscalationDelta: 0,
+		HasBrierScores:        true,
+		Stage1Brier:           0.02,
+		Stage2Brier:           0.12,
+	}
+	if brierPerfectTie.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected tied 1.0 == 1.0 accuracy not to trip Brier degradation guard")
+	}
+	brierTieAcc := DomainCompetenceProfile{
+		Stage1Accuracy:        0.95,
+		Stage2Accuracy:        0.95,
+		NumOptions:            5,
+		PairedEscalationDelta: 0,
+		HasBrierScores:        true,
+		Stage1Brier:           0.04,
+		Stage2Brier:           0.11,
+	}
+	if brierTieAcc.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected tied 0.95 == 0.95 accuracy not to trip strict < Brier degradation guard")
+	}
+	brierStrictDrop := DomainCompetenceProfile{
+		Stage1Accuracy:        0.95,
+		Stage2Accuracy:        0.9499,
+		NumOptions:            5,
+		PairedEscalationDelta: 0,
+		HasBrierScores:        true,
+		Stage1Brier:           0.04,
+		Stage2Brier:           0.1001,
+	}
+	if !brierStrictDrop.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected Brier blowup with Stage2Accuracy < Stage1Accuracy to return true")
+	}
+	brierExact := brierStrictDrop
+	brierExact.Stage2Brier = 0.10
+	if brierExact.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected exact Brier threshold tie (0.10 == 2.5 * 0.04) to return false")
+	}
+	brierUnset := brierStrictDrop
+	brierUnset.HasBrierScores = false
+	if brierUnset.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected HasBrierScores=false to skip Brier degradation check")
+	}
+	brierFloor := DomainCompetenceProfile{
+		Stage1Accuracy:        0.99,
+		Stage2Accuracy:        0.98,
+		NumOptions:            4,
+		PairedEscalationDelta: 0,
+		HasBrierScores:        true,
+		Stage1Brier:           0.004,
+		Stage2Brier:           0.05,
+	}
+	if brierFloor.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected max(0.02, stage1Brier) floor to prevent false trip at 0.05")
+	}
+	if (DomainCompetenceProfile{
+		Stage1Accuracy:        0.99,
+		Stage2Accuracy:        0.98,
+		NumOptions:            4,
+		PairedEscalationDelta: 0,
+		HasBrierScores:        true,
+		Stage1Brier:           0.005,
+		Stage2Brier:           0.03,
+	}).DefaultNegativeTransferCheck() {
+		t.Fatal("expected s1_brier=0.005, s2_brier=0.03 to stay below 2.5 * max(0.02, 0.005) = 0.05")
+	}
+	brierFloor.Stage2Brier = 0.0501
+	if !brierFloor.IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected Stage2Brier > 2.5 * 0.02 to trip")
+	}
+	brierBeatsPosDelta := DomainCompetenceProfile{
+		Stage1Accuracy:        0.95,
+		Stage2Accuracy:        0.94,
+		NumOptions:            4,
+		PairedEscalationDelta: 1,
+		HasBrierScores:        true,
+		Stage1Brier:           0.05,
+		Stage2Brier:           0.20,
+	}
+	if !brierBeatsPosDelta.DefaultNegativeTransferCheck() {
+		t.Fatal("expected Brier blowup to take precedence over PairedEscalationDelta > 0")
+	}
+
+	// Positive delta vs zero delta on trailing accuracy and exact margin boundary (0.75 - 0.25 == 0.50)
+	if (DomainCompetenceProfile{Stage1Accuracy: 0.88, Stage2Accuracy: 0.70, NumOptions: 2, PairedEscalationDelta: 1}).IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected positive delta without Brier blowup to return false")
+	}
+	if !(DomainCompetenceProfile{Stage1Accuracy: 0.88, Stage2Accuracy: 0.70, NumOptions: 2, PairedEscalationDelta: 0}).IsNegativeTransfer(0.05, -2, 2.5) {
+		t.Fatal("expected zero delta trailing beyond margin to return true")
+	}
+	marginTie := DomainCompetenceProfile{Stage1Accuracy: 0.75, Stage2Accuracy: 0.50, NumOptions: 2, PairedEscalationDelta: 0}
+	if marginTie.IsNegativeTransfer(0.25, -2, 2.5) {
+		t.Fatal("expected exact margin boundary (0.50 == 0.75 - 0.25) to return false")
+	}
+	if !marginTie.IsNegativeTransfer(0.0, -2, 2.5) {
+		t.Fatal("expected margin=0.0 on 0.50 < 0.75 to return true")
+	}
+
+	// Validate() and fail-closed IsNegativeTransfer() on invalid profiles and thresholds
+	validEdge := DomainCompetenceProfile{
+		Stage1Accuracy: 0.0,
+		Stage2Accuracy: 1.0,
+		NumOptions:     2,
+		SampleCount:    0,
+		HasBrierScores: true,
+		Stage1Brier:    0.0,
+		Stage2Brier:    2.0,
+	}
+	if err := validEdge.Validate(); err != nil {
+		t.Fatalf("expected valid boundary profile, got error: %v", err)
+	}
+	if validEdge.IsNegativeTransfer(0.0, -2, 1.0001) {
+		t.Fatal("expected valid boundary profile with Stage2=1.0 > Stage1=0.0 to return false")
+	}
+
+	invalidProfiles := []DomainCompetenceProfile{
+		{Stage1Accuracy: -0.01, Stage2Accuracy: 0.5, NumOptions: 2},
+		{Stage1Accuracy: 1.01, Stage2Accuracy: 0.5, NumOptions: 2},
+		{Stage1Accuracy: math.NaN(), Stage2Accuracy: 0.5, NumOptions: 2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: -0.01, NumOptions: 2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 1.01, NumOptions: 2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: math.Inf(1), NumOptions: 2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 1},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, SampleCount: -1},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, HasBrierScores: true, Stage1Brier: -0.01, Stage2Brier: 0.2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, HasBrierScores: true, Stage1Brier: 2.01, Stage2Brier: 0.2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, HasBrierScores: true, Stage1Brier: math.NaN(), Stage2Brier: 0.2},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, HasBrierScores: true, Stage1Brier: 0.2, Stage2Brier: -0.01},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, HasBrierScores: true, Stage1Brier: 0.2, Stage2Brier: 2.01},
+		{Stage1Accuracy: 0.5, Stage2Accuracy: 0.5, NumOptions: 2, HasBrierScores: true, Stage1Brier: 0.2, Stage2Brier: math.Inf(-1)},
+	}
+	for idx, badProf := range invalidProfiles {
+		if err := badProf.Validate(); err == nil {
+			t.Fatalf("case %d: expected Validate() error for %+v", idx, badProf)
+		}
+		if !badProf.DefaultNegativeTransferCheck() {
+			t.Fatalf("case %d: expected invalid profile to fail closed (true)", idx)
+		}
+	}
+	for _, badMargin := range []float64{-0.001, math.NaN(), math.Inf(1)} {
+		if !validEdge.IsNegativeTransfer(badMargin, -2, 2.5) {
+			t.Fatalf("expected invalid margin %v to fail closed", badMargin)
+		}
+	}
+	for _, badRatio := range []float64{1.0, 0.95, -1.0, math.NaN(), math.Inf(1)} {
+		if !validEdge.IsNegativeTransfer(0.05, -2, badRatio) {
+			t.Fatalf("expected invalid brierDegradationRatio %v to fail closed", badRatio)
+		}
+	}
+
+	// ComputeDawidSkenePoEWeights clamps and validation errors
+	minW1, chanceW2, err := ComputeDawidSkenePoEWeights(0.0, 0.25, 4, 1e-4)
+	if err != nil || minW1 != 0.01 || math.Abs(chanceW2) > 1e-15 {
+		t.Fatalf("expected (0.01, 0.0), got (%v, %v, err=%v)", minW1, chanceW2, err)
+	}
+	ceilW1, ceilW2, err := ComputeDawidSkenePoEWeights(1.0, 1.0, 3, 1e-3)
+	expCeil := math.Log(0.999/0.001) + math.Log(2.0)
+	if err != nil || math.Abs(ceilW1-expCeil) >= 1e-12 || math.Abs(ceilW2-expCeil) >= 1e-12 {
+		t.Fatalf("unexpected ceiling clamp weights: (%v, %v, err=%v)", ceilW1, ceilW2, err)
+	}
+	wideW1, wideW2, err := ComputeDawidSkenePoEWeights(0.85, 0.0, 20000, 1e-4)
+	if err != nil || wideW1 <= 11.0 || wideW2 != 0.0 {
+		t.Fatalf("expected wide K=20000 a2=0.0 to yield w2=0.0, got (%v, %v, err=%v)", wideW1, wideW2, err)
+	}
+	highFloorW1, highFloorW2, err := ComputeDawidSkenePoEWeights(0.85, 0.0, 5, 0.24)
+	if err != nil || highFloorW1 <= 3.0 || highFloorW2 != 0.0 {
+		t.Fatalf("expected K=5 floor=0.24 a2=0.0 to yield w2=0.0, got (%v, %v, err=%v)", highFloorW1, highFloorW2, err)
+	}
+
+	badWeightCalls := []struct {
+		a1, a2 float64
+		k      int
+		floor  float64
+	}{
+		{-0.01, 0.8, 2, 1e-4},
+		{1.01, 0.8, 2, 1e-4},
+		{math.NaN(), 0.8, 2, 1e-4},
+		{0.8, -0.01, 2, 1e-4},
+		{0.8, 1.01, 2, 1e-4},
+		{0.8, math.Inf(1), 2, 1e-4},
+		{0.8, 0.8, 1, 1e-4},
+		{0.8, 0.8, 2, 0.0},
+		{0.8, 0.8, 2, -1e-4},
+		{0.8, 0.8, 2, 0.25},
+		{0.8, 0.8, 2, math.NaN()},
+	}
+	for idx, tc := range badWeightCalls {
+		if _, _, err := ComputeDawidSkenePoEWeights(tc.a1, tc.a2, tc.k, tc.floor); err == nil {
+			t.Fatalf("case %d: expected error for %+v", idx, tc)
+		}
+	}
+}

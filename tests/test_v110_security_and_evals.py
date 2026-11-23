@@ -34,7 +34,7 @@ from multimodal_decision_models.eval_suite import TrajectoryStageRecord, compare
 from multimodal_decision_models.mcp_server import MAX_JSON_DEPTH, handle_jsonrpc_message, serve_stdio
 from multimodal_decision_models.security import audit_calibration_poisoning_influence, calibrate_trimmed_robust_conformal_quantile, detect_comparative_undermining_attack, wrap_canary_untrusted_envelope
 from multimodal_decision_models.trajectory_control import PolynomialAlphaSpendingTracker
-from multimodal_decision_models.types import DecisionQuestion
+from multimodal_decision_models.types import DecisionQuestion, DecisionTerminalState
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -370,6 +370,139 @@ class TestV110SecurityHardening(unittest.TestCase):
                 compute_decision_cache_key(
                     "mock-s1", {"x": 1}, questions, tenant_id="bad\x00tenant"
                 )
+
+    def test_stage2a_fast_exit_tenant_isolated_cache_and_eviction(self) -> None:
+        """Verify STAGE2A_FAST_EXIT forwards tenant_id to response_cache.put and honors eviction."""
+        questions = {
+            "sku": DecisionQuestion(
+                type="choice",
+                instructions="Identify dominant shelf SKU.",
+                criteria={"sku_a": "Beverage A", "sku_b": "Beverage B"},
+            )
+        }
+        dominant_priors = {"sku": {"sku_a": 6.0, "sku_b": 0.0}}
+        backend_calls = {"count": 0}
+
+        def _unexpected_stage1(
+            _state: object,
+            _questions: Mapping[str, DecisionQuestion],
+            _images: list[str] | None = None,
+        ) -> dict[str, dict[str, float]]:
+            backend_calls["count"] += 1
+            return {"sku": {"sku_a": 0.50, "sku_b": 0.50}}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            persist_file = Path(tmp_dir) / "fast_exit_tenant_cache.jsonl"
+            strict_cache = ContentAddressedDecisionCache(
+                persist_path=persist_file,
+                require_explicit_tenant=True,
+            )
+            orchestrator = CascadeDecisionOrchestrator(
+                stage1_backend=MockCallableBackend("mock-fast-s1", _unexpected_stage1),
+                enable_stage2a_fast_exit=True,
+                response_cache=strict_cache,
+            )
+
+            # Implicit default tenant fails closed before fast-exit or cache lookup.
+            quarantined_default = orchestrator.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+            )
+            self.assertEqual(
+                quarantined_default.terminal_state,
+                DecisionTerminalState.REJECTED_CONTRACT_VIOLATION,
+            )
+            self.assertEqual(backend_calls["count"], 0)
+
+            # (a) First call under tenant-alpha succeeds via STAGE2A_FAST_EXIT without quarantine.
+            first_alpha = orchestrator.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-alpha",
+            )
+            self.assertEqual(first_alpha.terminal_state, DecisionTerminalState.STAGE2A_FAST_EXIT)
+            self.assertEqual(first_alpha.slots["sku"].predicted, "sku_a")
+            self.assertFalse(first_alpha.cache_hit)
+            self.assertEqual(backend_calls["count"], 0)
+            self.assertEqual(strict_cache.hits, 0)
+            self.assertEqual(strict_cache.misses, 1)
+
+            # (b) Second call hits cache for tenant-alpha and misses for tenant-beta.
+            second_alpha = orchestrator.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-alpha",
+            )
+            self.assertTrue(second_alpha.cache_hit)
+            self.assertEqual(second_alpha.terminal_state, DecisionTerminalState.STAGE2A_FAST_EXIT)
+            self.assertEqual(strict_cache.hits, 1)
+
+            first_beta = orchestrator.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-beta",
+            )
+            self.assertFalse(first_beta.cache_hit)
+            self.assertNotEqual(first_alpha.cache_key, first_beta.cache_key)
+            self.assertEqual(strict_cache.misses, 2)
+            self.assertIsNone(strict_cache.get(first_alpha.cache_key, tenant_id="tenant-beta"))
+
+            # (c) evict_tenant evicts the fast-exit entry for tenant-alpha while preserving tenant-beta.
+            evicted_count = strict_cache.evict_tenant("tenant-alpha")
+            self.assertEqual(evicted_count, 1)
+            self.assertIsNone(strict_cache.get(first_alpha.cache_key, tenant_id="tenant-alpha"))
+            self.assertIsNotNone(strict_cache.get(first_beta.cache_key, tenant_id="tenant-beta"))
+
+            reloaded_cache = ContentAddressedDecisionCache(
+                persist_path=persist_file,
+                require_explicit_tenant=True,
+            )
+            self.assertIsNone(reloaded_cache.get(first_alpha.cache_key, tenant_id="tenant-alpha"))
+            self.assertIsNotNone(reloaded_cache.get(first_beta.cache_key, tenant_id="tenant-beta"))
+
+            post_evict_alpha = orchestrator.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-alpha",
+            )
+            self.assertFalse(post_evict_alpha.cache_hit)
+            post_evict_beta = orchestrator.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-beta",
+            )
+            self.assertTrue(post_evict_beta.cache_hit)
+
+            # Also verify non-strict cache stores STAGE2A_FAST_EXIT under tenant_id (never "default").
+            permissive_cache = ContentAddressedDecisionCache(require_explicit_tenant=False)
+            permissive_orch = CascadeDecisionOrchestrator(
+                stage1_backend=MockCallableBackend("mock-fast-s1", _unexpected_stage1),
+                enable_stage2a_fast_exit=True,
+                response_cache=permissive_cache,
+            )
+            perm_first = permissive_orch.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-alpha",
+            )
+            self.assertFalse(perm_first.cache_hit)
+            self.assertIsNone(permissive_cache.get(perm_first.cache_key, tenant_id="default"))
+            perm_second = permissive_orch.evaluate(
+                {"bay": "aisle-7"},
+                questions,
+                prior_logits=dominant_priors,
+                tenant_id="tenant-alpha",
+            )
+            self.assertTrue(perm_second.cache_hit)
+            self.assertEqual(permissive_cache.evict_tenant("tenant-alpha"), 1)
+            self.assertIsNone(permissive_cache.get(perm_first.cache_key, tenant_id="tenant-alpha"))
 
     def test_mcp_security_tools_depth_limits_and_proto_pollution(self) -> None:
         """Verify MCP v1.1.0 security/trajectory tools and JSON-RPC safety limits."""

@@ -26,8 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks import run_formal_propositions_v090_bench as prop_bench
-import multimodal_decision_models as mdm
+from benchmarks import run_formal_propositions_v090_bench as prop_bench  # noqa: E402
+import multimodal_decision_models as mdm  # noqa: E402
 
 
 class GevStudioBackendAndPropositionsTest(unittest.TestCase):
@@ -36,19 +36,19 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
     def test_gevstudio_build_url_encodes_target_query_param(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
             endpoint_url="https://gevstudio.example.com",
-            target="beyond-decision:/models/gemini-v4xs-decisions?hc=true;temp=1.0",
+            target="beyond-decision:/models/gemini-decision-1?hc=true;temp=1.0",
         )
         url = backend.build_url()
         self.assertEqual(
             url,
             "https://gevstudio.example.com/api/gev/systemone"
-            "?target=beyond-decision%3A%2Fmodels%2Fgemini-v4xs-decisions%3Fhc%3Dtrue%3Btemp%3D1.0",
+            "?target=beyond-decision%3A%2Fmodels%2Fgemini-decision-1%3Fhc%3Dtrue%3Btemp%3D1.0",
         )
 
     def test_gevstudio_build_payload_formats_multimodal_media_and_question_types(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
-            target="gemini-v4xs-decisions",
-            model="gemini-v4xs-decisions",
+            target="gemini-decision-1",
+            model="gemini-decision-1",
             temperature=0.0,
         )
         questions = {
@@ -78,7 +78,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
             images=["data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==", "/9j/4AAQSkZJRg=="],
         )
         self.assertEqual(payload["state"], {"zone": "aisle_4"})
-        self.assertEqual(payload["model"], "gemini-v4xs-decisions")
+        self.assertEqual(payload["model"], "gemini-decision-1")
         self.assertEqual(payload["temperature"], 0.0)
         self.assertEqual(len(payload["media"]), 3)
         self.assertEqual(payload["media"][0], {"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"})
@@ -102,7 +102,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         )
 
     def test_gevstudio_parse_response_choice_noul_and_score_probabilities(self) -> None:
-        backend = mdm.GevStudioSystemOneBackend(target="gemini-v4xs-decisions")
+        backend = mdm.GevStudioSystemOneBackend(target="gemini-decision-1")
         questions = {
             "action": mdm.DecisionQuestion(
                 type="choice",
@@ -175,7 +175,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
     def test_gevstudio_cascade_orchestrator_end_to_end(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
             endpoint_url="https://gevstudio.example.com/api/gev/systemone",
-            target="gemini-v4xs-decisions",
+            target="gemini-decision-1",
         )
         questions = {
             "sku": mdm.DecisionQuestion(
@@ -209,6 +209,139 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
             mdm.GevStudioSystemOneBackend(endpoint_url="file:///etc/passwd")
         with self.assertRaises(mdm.SchemaContractViolationError):
             mdm.GevStudioSystemOneBackend(label_smoothing_eps=0.75)
+
+    def test_gevstudio_v1_systemone_populates_images_alongside_media(self) -> None:
+        """Verify /v1/systemone endpoints receive payload['images'] data URIs alongside media."""
+        questions = {
+            "sku": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Identify matching shelf SKU.",
+                criteria={"sku_a": "SKU A", "sku_b": "SKU B"},
+            )
+        }
+        state_with_audio = {
+            "bay": "aisle_2",
+            "__media__": [{"mime_type": "audio/wav", "data": "UklGRiQAAABXQVZF"}],
+        }
+        sample_images = [
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+            "/9j/4AAQSkZJRg==",
+        ]
+
+        dgem_backend = mdm.GevStudioSystemOneBackend(
+            endpoint_url="https://dgem-gateway.example.com/v1/systemone?raw=1",
+            target="gemini-decision-1",
+        )
+        dgem_payload = dgem_backend.build_payload(
+            state=state_with_audio,
+            questions=questions,
+            images=sample_images,
+        )
+        self.assertEqual(len(dgem_payload["media"]), 3)
+        self.assertEqual(
+            dgem_payload["images"],
+            [
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+                "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+            ],
+        )
+
+        studio_backend = mdm.GevStudioSystemOneBackend(
+            endpoint_url="https://gevstudio.example.com/api/gev/systemone",
+            target="gemini-decision-1",
+        )
+        studio_payload = studio_backend.build_payload(
+            state=state_with_audio,
+            questions=questions,
+            images=sample_images,
+        )
+        self.assertEqual(len(studio_payload["media"]), 3)
+        self.assertNotIn("images", studio_payload)
+
+    def test_vertex_gemini_raw_base64_and_invalid_image_rejection(self) -> None:
+        """Verify VertexGeminiBackend encodes raw base64 images and fails closed on URLs/malformed inputs."""
+        vertex_backend = mdm.VertexGeminiBackend(
+            project="demo-project-01",
+            model="gemini-2.5-flash",
+            location="us-central1",
+        )
+        questions = {
+            "sku": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Identify matching shelf SKU.",
+                criteria={"sku_a": "SKU A", "sku_b": "SKU B"},
+            )
+        }
+        payload = vertex_backend.build_generate_content_payload(
+            state={"bay": "aisle_1"},
+            questions=questions,
+            images=[
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+                "/9j/4AAQSkZJRg==",
+                "R0lGRg==",
+            ],
+        )
+        user_parts = payload["contents"][0]["parts"]
+        self.assertEqual(len(user_parts), 4)
+        self.assertEqual(
+            user_parts[0],
+            {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUg=="}},
+        )
+        self.assertEqual(
+            user_parts[1],
+            {"inlineData": {"mimeType": "image/jpeg", "data": "/9j/4AAQSkZJRg=="}},
+        )
+        self.assertEqual(
+            user_parts[2],
+            {"inlineData": {"mimeType": "image/webp", "data": "R0lGRg=="}},
+        )
+        self.assertIn("text", user_parts[3])
+
+        invalid_image_inputs: tuple[object, ...] = (
+            ["http://example.com/shelf.jpg"],
+            ["https://example.com/shelf.png"],
+            ["gs://bucket-name/shelf.png"],
+            [""],
+            ["   "],
+            ["data:image/png,raw-not-base64"],
+            ["data:image/png;base64,"],
+            ["!!!not_valid_base64!!!"],
+            "iVBORw0KGgoAAAANSUhEUg==",
+        )
+        for bad_images in invalid_image_inputs:
+            with self.assertRaises(mdm.SchemaContractViolationError):
+                vertex_backend.build_generate_content_payload(
+                    state={"bay": "aisle_1"},
+                    questions=questions,
+                    images=bad_images,  # type: ignore[arg-type]
+                )
+
+        token_mints = {"count": 0}
+
+        def _mint_token() -> str:
+            token_mints["count"] += 1
+            return "test-oauth-token"
+
+        guarded_vertex = mdm.VertexGeminiBackend(
+            project="demo-project-01",
+            model="gemini-2.5-flash",
+            location="us-central1",
+            access_token_fn=_mint_token,
+        )
+        orchestrator = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=guarded_vertex,
+            total_contract_mode=True,
+        )
+        quarantined = orchestrator.evaluate(
+            state={"bay": "aisle_1"},
+            questions=questions,
+            images=["http://example.com/shelf.jpg"],
+        )
+        self.assertEqual(
+            quarantined.terminal_state,
+            mdm.DecisionTerminalState.REJECTED_CONTRACT_VIOLATION,
+        )
+        self.assertEqual(token_mints["count"], 0)
 
     def test_lemma1_top_m_entropy_invariance_and_small_shortlist_fast_exit(self) -> None:
         # 50/50 sibling confusion over K=100 classes dilutes global entropy to ln(2)/ln(100) ~ 0.1505

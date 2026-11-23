@@ -26,6 +26,7 @@ import {
   auditAndNormalizeUntrustedText,
   calibrateConformalQuantile,
   calibrateMultiSlotJointConformal,
+  computeDawidSkenePoeWeights,
   conformalPredictionSet,
   createGenkitDecisionStep,
   createGenkitToolGuard,
@@ -34,6 +35,7 @@ import {
   fusePriorProbabilities,
   hmacUint64,
   hmacUniformFloat64,
+  isNegativeTransfer,
   multiSlotJointConformalSets,
   neutralizeUntrustedDelimiters,
   normalizeAndStripInvisibleSmuggling,
@@ -718,6 +720,218 @@ async function runTests() {
   });
   assert.equal(secCua.anyAttackDetected, false);
   assert.ok(performance.now() - secRedosStart < 250);
+
+  // 13. v1.3.1 DomainCompetenceProfile & Dawid-Skene PoE cross-language parity and guard branches.
+  const parityTol = 1e-12;
+  const [v1W1, v1W2] = computeDawidSkenePoeWeights(0.98, 0.94, 31, 1e-4);
+  assert.ok(Math.abs(v1W1 - 7.293017679772781) < parityTol);
+  assert.ok(Math.abs(v1W2 - 6.1527326947041034) < parityTol);
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.98,
+      stage2Accuracy: 0.94,
+      numOptions: 31,
+      pairedEscalationDelta: -1,
+      sampleCount: 150,
+      stage1Brier: 0.0637,
+      stage2Brier: 0.9591,
+    }),
+    true,
+  );
+
+  const [v2W1, v2W2] = computeDawidSkenePoeWeights(0.7125, 0.625, 2, 1e-4);
+  assert.ok(Math.abs(v2W1 - 0.9075570519054006) < parityTol);
+  assert.ok(Math.abs(v2W2 - 0.5108256237659907) < parityTol);
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.7125,
+      stage2Accuracy: 0.625,
+      numOptions: 2,
+      pairedEscalationDelta: -3,
+    }),
+    true,
+  );
+
+  const [v3W1, v3W2] = computeDawidSkenePoeWeights(0.88, 0.84, 2, 1e-4);
+  assert.ok(Math.abs(v3W1 - 1.9924301646902063) < parityTol);
+  assert.ok(Math.abs(v3W2 - 1.6582280766035322) < parityTol);
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.88,
+      stage2Accuracy: 0.84,
+      numOptions: 2,
+      pairedEscalationDelta: 1,
+    }),
+    false,
+  );
+
+  const [v4W1, v4W2] = computeDawidSkenePoeWeights(0.85, 0.2, 4);
+  assert.ok(Math.abs(v4W1 - 2.8332133440562162) < parityTol);
+  assert.equal(v4W2, 0.0);
+
+  // Singleton delta = -1 on N=40 (36/40 = 0.90 vs 35/40 = 0.875) must NOT false-trip without Brier blowup.
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.9,
+      stage2Accuracy: 0.875,
+      numOptions: 2,
+      pairedEscalationDelta: -1,
+      sampleCount: 40,
+    }),
+    false,
+  );
+
+  // Guard-branch boundaries: minDeltaHurt, strict stage2Accuracy < stage1Accuracy on Brier (tied 1.0 == 1.0 safe), 0.02 floor, positive delta precedence, margin tie.
+  assert.equal(
+    isNegativeTransfer(
+      { stage1Accuracy: 0.8, stage2Accuracy: 0.82, pairedEscalationDelta: -2 },
+      { minDeltaHurt: -2 },
+    ),
+    true,
+  );
+  assert.equal(
+    isNegativeTransfer(
+      { stage1Accuracy: 0.8, stage2Accuracy: 0.82, pairedEscalationDelta: -2 },
+      { minDeltaHurt: -3 },
+    ),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 1.0,
+      stage2Accuracy: 1.0,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.02,
+      stage2Brier: 0.12,
+    }),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.95,
+      stage2Accuracy: 0.95,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.04,
+      stage2Brier: 0.11,
+    }),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.95,
+      stage2Accuracy: 0.9499,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.04,
+      stage2Brier: 0.1001,
+    }),
+    true,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.95,
+      stage2Accuracy: 0.9499,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.04,
+      stage2Brier: 0.1,
+    }),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.99,
+      stage2Accuracy: 0.98,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.005,
+      stage2Brier: 0.03,
+    }),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.99,
+      stage2Accuracy: 0.98,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.004,
+      stage2Brier: 0.05,
+    }),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.99,
+      stage2Accuracy: 0.98,
+      pairedEscalationDelta: 0,
+      stage1Brier: 0.004,
+      stage2Brier: 0.0501,
+    }),
+    true,
+  );
+  assert.equal(
+    isNegativeTransfer({
+      stage1Accuracy: 0.95,
+      stage2Accuracy: 0.94,
+      pairedEscalationDelta: 1,
+      stage1Brier: 0.05,
+      stage2Brier: 0.2,
+    }),
+    true,
+  );
+  assert.equal(
+    isNegativeTransfer(
+      { stage1Accuracy: 0.75, stage2Accuracy: 0.5, pairedEscalationDelta: 0 },
+      { margin: 0.25 },
+    ),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer(
+      { stage1Accuracy: 0.75, stage2Accuracy: 0.4999, pairedEscalationDelta: 0 },
+      { margin: 0.25 },
+    ),
+    true,
+  );
+
+  const [minW1, chanceW2] = computeDawidSkenePoeWeights(0.0, 0.25, 4, 1e-4);
+  assert.equal(minW1, 0.01);
+  assert.ok(Math.abs(chanceW2) < 1e-15);
+
+  const [wideW1, wideW2] = computeDawidSkenePoeWeights(0.85, 0.0, 20_000, 1e-4);
+  assert.ok(wideW1 > 11.0);
+  assert.equal(wideW2, 0.0);
+
+  const [highFloorW1, highFloorW2] = computeDawidSkenePoeWeights(0.85, 0.0, 5, 0.24);
+  assert.ok(highFloorW1 > 3.0);
+  assert.equal(highFloorW2, 0.0);
+
+  // Validation error checks.
+  for (const badFn of [
+    () => isNegativeTransfer(null),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, null),
+    () => isNegativeTransfer({ stage1Accuracy: -0.01, stage2Accuracy: 0.8 }),
+    () => isNegativeTransfer({ stage1Accuracy: 1.01, stage2Accuracy: 0.8 }),
+    () => isNegativeTransfer({ stage1Accuracy: Number.NaN, stage2Accuracy: 0.8 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: Number.POSITIVE_INFINITY }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, numOptions: 1 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, numOptions: 2.5 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, pairedEscalationDelta: 1.5 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, sampleCount: -1 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, stage1Brier: -0.01 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, stage1Brier: 2.01 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, stage2Brier: Number.NaN }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, { margin: -0.01 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, { minDeltaHurt: -1.5 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, { brierDegradationRatio: 1.0 }),
+    () => computeDawidSkenePoeWeights(-0.01, 0.8),
+    () => computeDawidSkenePoeWeights(0.8, 1.01),
+    () => computeDawidSkenePoeWeights(Number.NaN, 0.8),
+    () => computeDawidSkenePoeWeights(0.8, 0.8, 1),
+    () => computeDawidSkenePoeWeights(0.8, 0.8, 2.5),
+    () => computeDawidSkenePoeWeights(0.8, 0.8, 2, 0.0),
+    () => computeDawidSkenePoeWeights(0.8, 0.8, 2, 0.25),
+    () => computeDawidSkenePoeWeights(true, 0.8),
+  ]) {
+    assert.throws(badFn, MDMValidationError);
+  }
 
   console.log("PASSED: @mdm/client TypeScript SDK tests (all assertions green).");
 }

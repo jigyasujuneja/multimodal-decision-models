@@ -33,7 +33,6 @@ Zero network calls and zero synthetic RNG imports occur in this runner.
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
@@ -44,7 +43,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from multimodal_decision_models import TaxonomyLeaf, TaxonomyTrie, calibrate_conformal_quantile, conformal_prediction_set, cut_polytope_triangle_consistency_score, effective_top_m_entropy, evaluate_two_stage_cascade_risk_bound, label_shift_weighted_conformal_prediction_set, normalized_entropy, paired_mcnemar_test, sinkhorn_dealiased_trie_decode, weighted_conformal_prediction_set  # noqa: E402
+from multimodal_decision_models import TaxonomyLeaf, TaxonomyTrie, calibrate_conformal_quantile, conformal_prediction_set, cut_polytope_triangle_consistency_score, effective_top_m_entropy, evaluate_two_stage_cascade_risk_bound, label_shift_weighted_conformal_prediction_set, normalized_entropy, paired_mcnemar_test, sinkhorn_dealiased_trie_decode  # noqa: E402
 
 DATA_DIR = BENCH_DIR / "data"
 RESULTS_DIR = BENCH_DIR / "results"

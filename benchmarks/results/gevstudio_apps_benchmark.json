@@ -11,8 +11,8 @@
       "total": 48
     },
     "models": {
-      "gemini-v4xs-decisions (raw)": {
-        "target": "gemini-v4xs-decisions",
+      "gemini-decision-1 (raw)": {
+        "target": "gemini-decision-1",
         "matched": 46,
         "total": 48,
         "accuracy": 0.9583333333333334,
@@ -99,8 +99,8 @@
           }
         ]
       },
-      "gemini-v4xs-decisions?hc=true (raw)": {
-        "target": "beyond-decision:/models/gemini-v4xs-decisions?hc=true",
+      "gemini-decision-1?hc=true (raw)": {
+        "target": "beyond-decision:/models/gemini-decision-1?hc=true",
         "matched": 46,
         "total": 48,
         "accuracy": 0.9583333333333334,
@@ -451,8 +451,8 @@
           }
         ]
       },
-      "MDM Calibrated Stack (v4xs + Visual Compiler + PoE + Cascade)": {
-        "target": "gemini-v4xs-decisions + mdm_stack",
+      "MDM Calibrated Stack (decision1 + Visual Compiler + PoE + Cascade)": {
+        "target": "gemini-decision-1 + mdm_stack",
         "matched": 48,
         "total": 48,
         "accuracy": 1.0,
@@ -541,7 +541,7 @@
         ]
       }
     },
-    "mcnemar_mdm_vs_raw_v4xs": {
+    "mcnemar_mdm_vs_raw_decision1": {
       "b_mdm_only": 2,
       "c_raw_only": 0,
       "p_value": 0.5
@@ -557,7 +557,7 @@
       "polysemy_top": "22/25 (88.0%)"
     },
     "models": {
-      "gemini-v4xs-decisions (raw)": {
+      "gemini-decision-1 (raw)": {
         "matched_slots": 89,
         "total_slots": 95,
         "slot_accuracy": 0.9368,
@@ -665,7 +665,7 @@
           }
         }
       },
-      "MDM Calibrated Cascade (Stage-1 v4xs+dgem -> Stage-2 3.5-flash-lite)": {
+      "MDM Calibrated Cascade (Stage-1 decision1+dgem -> Stage-2 3.5-flash-lite)": {
         "matched_slots": 92,
         "total_slots": 95,
         "slot_accuracy": 0.9684,
@@ -704,9 +704,9 @@
         "stage1_fast_exit_rate": 0.9579
       }
     },
-    "mcnemar_mdm_vs_v4xs": {
+    "mcnemar_mdm_vs_decision1": {
       "b_mdm_only": 3,
-      "c_v4xs_only": 0,
+      "c_decision1_only": 0,
       "p_value": 0.25
     },
     "mcnemar_mdm_vs_dgem_vertex": {
@@ -718,22 +718,22 @@
   "mdm_multimodal_suites": {
     "suite_3a_dual_buffer_contact_sheets": {
       "total": 4,
-      "raw_v4xs_correct": 3,
-      "raw_v4xs_accuracy": 0.75,
+      "raw_decision1_correct": 3,
+      "raw_decision1_accuracy": 0.75,
       "mdm_calibrated_correct": 4,
       "mdm_calibrated_accuracy": 1.0
     },
     "suite_3b_set_of_marks_ui_grounding": {
       "total": 4,
-      "raw_v4xs_correct": 4,
-      "raw_v4xs_accuracy": 1.0,
+      "raw_decision1_correct": 4,
+      "raw_decision1_accuracy": 1.0,
       "mdm_calibrated_correct": 4,
       "mdm_calibrated_accuracy": 1.0
     },
     "suite_3c_v080_audio_wav_and_st_som_video": {
       "total": 4,
-      "raw_v4xs_correct": 2,
-      "raw_v4xs_accuracy": 0.5,
+      "raw_decision1_correct": 2,
+      "raw_decision1_accuracy": 0.5,
       "mdm_calibrated_correct": 4,
       "mdm_calibrated_accuracy": 1.0,
       "p50_audio_wav_latency_ms": 2645.0

@@ -190,6 +190,54 @@ audit = compute_visual_evidence_gain(
 assert audit.veto_fast_exit is True
 ```
 
+## Pair stateless decision endpoints with stateful MDM orchestration
+
+Managed single-call decision endpoints such as `GeminiDecisionsBackend` (`POST /v1beta/decisions` on `models/gemini-decision-1` for `noul`, `choice` with `K <= 255`, `include_none_of_above`, and `score` with `L <= 255`) score structured slots in a single stateless HTTP round-trip, yet leave multi-turn risk budgeting, wide-catalog reduction, token compaction, and multi-model cost pacing to the caller. `multimodal-decision-models` wraps stateless endpoints and GA Vertex verifiers (`VertexGeminiBackend.from_ga_preset` across `gemini-3.5-flash-lite`, `gemini-3.5-flash`, `gemini-3.8-flash`, and `gemini-3.5-pro`) with four stateful or pre-call layers verified in the `1,200`-episode `MDM-EpisodeBench` `Tier-2` Receipt-Grounded Replay suite ([`docs/security-and-eval-science.md`](security-and-eval-science.md)):
+
+1. **Pre-call context `MCKP` and visual token compression (`context_pruner.py`, `visual_compiler.py`, `audio_video_decision.py`)**: Stateless APIs bill and attend across all submitted prompt tokens. Pruning trajectory blocks with `prune_agent_context_blocks` (`{full, stub, drop}`) while compiling `2x` saliency and pack-weight contact sheets plus submodular video keyframes cuts mean episode tokens from `22,687` to `11,225` (`-50.5%`) and produces a `+0.1681` super-additive net-utility synergy ($\hat{\tau}_{MK}$, Holm `p = 1.67e-22`).
+2. **Wide-catalog shortlisting beyond `K = 255` (`shortlist_wide_question`)**: When a SKU catalog or tool registry exceeds `255` options (or `254` explicit options when `include_none_of_above=True`), `GeminiDecisionsBackend` bridges the slot through `shortlist_wide_question` before serialization and normalizes returned log-likelihoods in log-space alongside `abstention_log_likelihood`.
+3. **Out-of-fold Mondrian calibration and sequential trajectory $\alpha$-spending (`experiment_protocol.py`, `trajectory_control.py`)**: Raw single-call log-likelihoods neither adjust for class-stratum sharpness nor track cumulative error across 6-turn rollouts. Pairing `fit_oof_calibrated_conformal_bundle` (`C`) with `PolynomialAlphaSpendingTracker` and `NetExpectedValueController` (`K`) yields `89.72%` Mondrian coverage (`1.05%` maximum stratum gap) and a `+0.1521` interaction synergy ($\hat{\tau}_{CK}$, Holm `p = 4.44e-15`).
+4. **Online budget-paced model routing (`PrimalDualParetoBanditRouter`)**: Feeding calibrated uncertainty features into `PrimalDualParetoBanditRouter` routes routine turns to `models/gemini-decision-1` or `gemini-3.5-flash-lite` and escalates `30.9%` of ambiguous turns to `gemini-3.8-flash` or `gemini-3.5-pro`, yielding a `+0.1104` calibration-by-router synergy ($\hat{\tau}_{CP}$) and reducing episode cost by `84.3%` relative to the `R0` generative ceiling (`$0.0482` to `$0.0076`).
+
+```python
+from multimodal_decision_models import (
+    GeminiDecisionsBackend,
+    ModelArmSpec,
+    PrimalDualParetoBanditRouter,
+    VertexGeminiBackend,
+)
+
+stage1_decisions = GeminiDecisionsBackend(
+    api_key="example-header-only-api-key",
+    model="models/gemini-decision-1",
+    include_none_of_above=True,
+)
+stage2_flash = VertexGeminiBackend.from_ga_preset(
+    "gemini-3.8-flash",
+    project="example-prod-project",
+    location="us-central1",
+    access_token_fn=lambda: "ephemeral-oauth-token",
+)
+
+router = PrimalDualParetoBanditRouter(
+    arms=[
+        ModelArmSpec(arm_id=stage1_decisions.model, cost_usd=0.0004, latency_ms=140.0),
+        ModelArmSpec(arm_id="gemini-3.5-flash-lite", cost_usd=0.0008, latency_ms=260.0),
+        ModelArmSpec(arm_id=stage2_flash.model, cost_usd=0.0045, latency_ms=920.0),
+    ],
+    context_dim=3,
+    budget_per_query_usd=0.0018,
+    latency_sla_ms=1200.0,
+)
+routing_choice = router.select_arm([1.0, 0.28, 0.50])
+router.update(routing_choice.chosen_arm, [1.0, 0.28, 0.50], reward=0.92)
+assert routing_choice.chosen_arm in {
+    "models/gemini-decision-1",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+}
+```
+
 ## Related guides
 
 - Continue to **[Adversarial security hardening and statistical evaluation science](security-and-eval-science.md)** for `HMAC` canary envelopes, conformal poisoning defense, and `PPI++` evaluation estimators.

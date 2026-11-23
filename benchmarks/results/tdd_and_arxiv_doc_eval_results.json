@@ -29,7 +29,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -38,7 +38,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -208,7 +208,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -217,7 +217,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -387,7 +387,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -396,7 +396,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -566,7 +566,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -575,7 +575,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -745,7 +745,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -754,7 +754,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -924,7 +924,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -933,7 +933,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -1101,7 +1101,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -1110,7 +1110,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -1280,7 +1280,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -1289,7 +1289,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -1454,7 +1454,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -1463,7 +1463,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -1627,7 +1627,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -1636,7 +1636,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
@@ -1806,7 +1806,7 @@
       },
       "G2_taste_decisive_stance_and_negative_space": {
         "pillar": "1. Taste",
-        "name": "Decisive Stance (go/tott/773) & Explicit Negative Space / Limitations",
+        "name": "Decisive Stance & Explicit Negative Space / Limitations",
         "score": 1,
         "details": {
           "has_negative_space_or_limitations": true,
@@ -1815,7 +1815,7 @@
       },
       "G3_writing_zero_claudeisms_and_ai_slop": {
         "pillar": "2. Writing",
-        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Google3 `claudeisms` Port)",
+        "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
         "details": {
           "sev3_count": 0,
