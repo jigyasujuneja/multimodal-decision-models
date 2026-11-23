@@ -23,6 +23,9 @@ import {
   type ConformalSetResult,
   MDMValidationError,
   type MultiSlotJointConformalResult,
+  type NevControllerPolicy,
+  type NevDecisionResult,
+  type PolynomialAlphaConfig,
   type PriorGateMode,
 } from "./types.js";
 
@@ -775,4 +778,131 @@ export function multiSlotJointConformalSets(
     });
   }
   return { ...out };
+}
+
+function riemannZetaApprox(exponentP: number): number {
+  const terms = 512;
+  let partial = 0.0;
+  for (let idx = 1; idx <= terms; idx += 1) {
+    partial += idx ** -exponentP;
+  }
+  const nFloat = terms;
+  const tail =
+    nFloat ** (1.0 - exponentP) / (exponentP - 1.0) -
+    0.5 * nFloat ** -exponentP;
+  return partial + tail;
+}
+
+export function polynomialAlphaAtStep(
+  stepIndex: number,
+  config: PolynomialAlphaConfig = {},
+): number {
+  if (!Number.isInteger(stepIndex) || stepIndex < 1) {
+    throw new MDMValidationError("stepIndex must be an integer >= 1");
+  }
+  const alphaTotal = config.alphaTotal ?? 0.1;
+  const exponentP = config.exponentP ?? 1.6;
+  const slack = config.markovSlackFactor ?? 1.0;
+  if (!Number.isFinite(alphaTotal) || alphaTotal <= 0 || alphaTotal >= 1) {
+    throw new MDMValidationError("alphaTotal must lie in (0, 1)");
+  }
+  if (!Number.isFinite(exponentP) || exponentP <= 0) {
+    throw new MDMValidationError("exponentP must be > 0");
+  }
+  if (!Number.isFinite(slack) || slack <= 0 || slack > 1) {
+    throw new MDMValidationError("markovSlackFactor must lie in (0, 1]");
+  }
+  let normConst = 0.0;
+  if (config.horizonMaxSteps !== undefined) {
+    if (!Number.isInteger(config.horizonMaxSteps) || config.horizonMaxSteps < 1) {
+      throw new MDMValidationError("horizonMaxSteps must be an integer >= 1");
+    }
+    if (stepIndex > config.horizonMaxSteps) {
+      throw new MDMValidationError(
+        `stepIndex (${stepIndex}) exceeds horizonMaxSteps (${config.horizonMaxSteps})`,
+      );
+    }
+    for (let j = 1; j <= config.horizonMaxSteps; j += 1) {
+      normConst += j ** -exponentP;
+    }
+  } else {
+    if (exponentP <= 1.0) {
+      throw new MDMValidationError(
+        "unbounded horizon requires exponentP > 1.0 so zeta(p) converges",
+      );
+    }
+    normConst = riemannZetaApprox(exponentP);
+  }
+  const rawAlpha =
+    ((alphaTotal * slack) * stepIndex ** -exponentP) / normConst;
+  return Math.min(0.999999, Math.max(Number.MIN_VALUE, rawAlpha));
+}
+
+export function evaluateNevcGate(
+  rawFailProbability: number,
+  policy: NevControllerPolicy = {},
+): NevDecisionResult {
+  if (
+    typeof rawFailProbability !== "number" ||
+    !Number.isFinite(rawFailProbability) ||
+    rawFailProbability < 0 ||
+    rawFailProbability > 1
+  ) {
+    throw new MDMValidationError("rawFailProbability must lie in [0, 1]");
+  }
+  const taskValue = policy.taskValue ?? 1.0;
+  const interventionCost = policy.interventionCost ?? 0.08;
+  const fixProb = policy.fixProbabilityIfFailing ?? 0.45;
+  const regressProb = policy.regressionProbabilityIfPassing ?? 0.04;
+  const plattSlope = policy.plattSlope ?? 1.0;
+  const plattIntercept = policy.plattIntercept ?? 0.0;
+
+  if (!Number.isFinite(taskValue) || taskValue <= 0) {
+    throw new MDMValidationError("taskValue must be > 0");
+  }
+  if (!Number.isFinite(interventionCost) || interventionCost < 0) {
+    throw new MDMValidationError("interventionCost must be >= 0");
+  }
+  if (!Number.isFinite(fixProb) || fixProb <= 0 || fixProb > 1) {
+    throw new MDMValidationError("fixProbabilityIfFailing must lie in (0, 1]");
+  }
+  if (!Number.isFinite(regressProb) || regressProb < 0 || regressProb >= 1) {
+    throw new MDMValidationError(
+      "regressionProbabilityIfPassing must lie in [0, 1)",
+    );
+  }
+  if (!Number.isFinite(plattSlope) || plattSlope <= 0) {
+    throw new MDMValidationError("plattSlope must be > 0");
+  }
+  if (!Number.isFinite(plattIntercept)) {
+    throw new MDMValidationError("plattIntercept must be finite");
+  }
+
+  const clipped = Math.min(1.0 - 1e-6, Math.max(1e-6, rawFailProbability));
+  const logit = Math.log(clipped / (1.0 - clipped));
+  const scaled = plattSlope * logit + plattIntercept;
+  const calibratedFailProbability =
+    scaled >= 0
+      ? 1.0 / (1.0 + Math.exp(-Math.min(60.0, scaled)))
+      : Math.exp(Math.max(-60.0, scaled)) /
+        (1.0 + Math.exp(Math.max(-60.0, scaled)));
+
+  const expectedGain = calibratedFailProbability * fixProb * taskValue;
+  const expectedRegressionLoss =
+    (1.0 - calibratedFailProbability) * regressProb * taskValue;
+  const netExpectedValue =
+    expectedGain - interventionCost - expectedRegressionLoss;
+  const denom = Math.max(1e-9, taskValue * (fixProb + regressProb));
+  const minFailProbabilityThreshold = Math.min(
+    1.0,
+    Math.max(0.0, (interventionCost + regressProb * taskValue) / denom),
+  );
+
+  return {
+    shouldIntervene: netExpectedValue > 0,
+    rawFailProbability,
+    calibratedFailProbability,
+    netExpectedValue,
+    minFailProbabilityThreshold,
+  };
 }

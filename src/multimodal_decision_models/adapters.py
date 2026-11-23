@@ -28,6 +28,7 @@ from .backends import CascadeDecisionOrchestrator, DecisionBackend
 from .calibration import normalized_entropy
 from .conformal import DEFAULT_CONFORMAL_SEED_KEY, conformal_prediction_set
 from .contracts import DecisionContractError, SchemaContractViolationError, sanitize_untrusted_text, wrap_untrusted_state
+from .trajectory_control import NetExpectedValueController, PolynomialAlphaSpendingTracker
 from .types import DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory
 
 _UNTRUSTED_TAG_VARIANT_RE = re.compile(
@@ -80,6 +81,8 @@ class ActionStakesPolicy:
     conformal_lam_reg: float = 0.01
     conformal_k_reg: int = 1
     hmac_seed_key: str | None = None
+    alpha_spending_tracker: PolynomialAlphaSpendingTracker | None = None
+    nevc_controller: NetExpectedValueController | None = None
 
     def __post_init__(self) -> None:
         for field_name, raw_threshold in (
@@ -236,6 +239,7 @@ def evaluate_adk_tool_guard(
     untrusted_context: str = "",
     request_id: str = "adk-tool-guard",
     policy: ActionStakesPolicy | None = None,
+    step_index: int = 1,
 ) -> ADKToolGuardDecision:
     """Evaluate a proposed tool call under Action-Stakes and Joint Conformal guardrails.
 
@@ -357,12 +361,17 @@ def evaluate_adk_tool_guard(
             raise SchemaContractViolationError("guard joint_confidence must be finite")
 
         conformal_ambiguous = False
-        if active_policy.joint_q_hat is not None:
+        effective_q_hat: float | None = (
+            active_policy.alpha_spending_tracker.q_hat_for_step(step_index)
+            if active_policy.alpha_spending_tracker is not None
+            else active_policy.joint_q_hat
+        )
+        if effective_q_hat is not None:
             seed_key = active_policy.hmac_seed_key
             randomized = seed_key is not None
             disp_set = conformal_prediction_set(
                 raw_disp_probs,
-                float(active_policy.joint_q_hat),
+                float(effective_q_hat),
                 method=active_policy.conformal_method,
                 lam_reg=active_policy.conformal_lam_reg,
                 k_reg=active_policy.conformal_k_reg,
@@ -373,7 +382,7 @@ def evaluate_adk_tool_guard(
             )
             origin_set = conformal_prediction_set(
                 raw_origin_probs,
-                float(active_policy.joint_q_hat),
+                float(effective_q_hat),
                 method=active_policy.conformal_method,
                 lam_reg=active_policy.conformal_lam_reg,
                 k_reg=active_policy.conformal_k_reg,
@@ -384,6 +393,71 @@ def evaluate_adk_tool_guard(
             )
             if disp_set.should_escalate or origin_set.should_escalate:
                 conformal_ambiguous = True
+
+        if origin_pred != "explicit_user_intent":
+            return ADKToolGuardDecision(
+                allowed=False,
+                disposition=disp_pred,
+                intent_origin=origin_pred,
+                confidence=joint_confidence,
+                is_irreversible=is_irreversible,
+                required_confidence=required_confidence,
+                should_escalate=True,
+                reason=f"untrusted_or_ambiguous_intent:{origin_pred}",
+            )
+
+        if disp_pred != "allow":
+            return ADKToolGuardDecision(
+                allowed=False,
+                disposition=disp_pred,
+                intent_origin=origin_pred,
+                confidence=joint_confidence,
+                is_irreversible=is_irreversible,
+                required_confidence=required_confidence,
+                should_escalate=True,
+                reason=f"policy_disposition:{disp_pred}",
+            )
+
+        if conformal_ambiguous:
+            return ADKToolGuardDecision(
+                allowed=False,
+                disposition=disp_pred,
+                intent_origin=origin_pred,
+                confidence=joint_confidence,
+                is_irreversible=is_irreversible,
+                required_confidence=required_confidence,
+                should_escalate=True,
+                reason="joint_conformal_set_ambiguous",
+            )
+
+        if not (math.isfinite(joint_confidence) and joint_confidence >= required_confidence):
+            if math.isfinite(joint_confidence) and not is_irreversible and active_policy.nevc_controller is not None:
+                nevc_verdict = active_policy.nevc_controller.evaluate(1.0 - joint_confidence)
+                if not nevc_verdict.should_intervene:
+                    return ADKToolGuardDecision(
+                        allowed=True,
+                        disposition="allow",
+                        intent_origin="explicit_user_intent",
+                        confidence=joint_confidence,
+                        is_irreversible=False,
+                        required_confidence=required_confidence,
+                        should_escalate=False,
+                        reason=f"authorized_by_nevc_gate:{nevc_verdict.reason}",
+                    )
+            stakes_tier = "irreversible" if is_irreversible else "reversible"
+            return ADKToolGuardDecision(
+                allowed=False,
+                disposition="ask_confirmation",
+                intent_origin=origin_pred,
+                confidence=joint_confidence if math.isfinite(joint_confidence) else 0.0,
+                is_irreversible=is_irreversible,
+                required_confidence=required_confidence,
+                should_escalate=True,
+                reason=(
+                    f"below_{stakes_tier}_confidence_threshold:"
+                    f"{joint_confidence:.4f}<{required_confidence:.4f}"
+                ),
+            )
     except (DecisionContractError, OSError, TimeoutError, ValueError, KeyError, TypeError) as exc:
         return ADKToolGuardDecision(
             allowed=False,
@@ -394,58 +468,6 @@ def evaluate_adk_tool_guard(
             required_confidence=required_confidence,
             should_escalate=True,
             reason=f"fail_closed_error:{type(exc).__qualname__}:{exc}",
-        )
-
-    if origin_pred != "explicit_user_intent":
-        return ADKToolGuardDecision(
-            allowed=False,
-            disposition=disp_pred,
-            intent_origin=origin_pred,
-            confidence=joint_confidence,
-            is_irreversible=is_irreversible,
-            required_confidence=required_confidence,
-            should_escalate=True,
-            reason=f"untrusted_or_ambiguous_intent:{origin_pred}",
-        )
-
-    if disp_pred != "allow":
-        return ADKToolGuardDecision(
-            allowed=False,
-            disposition=disp_pred,
-            intent_origin=origin_pred,
-            confidence=joint_confidence,
-            is_irreversible=is_irreversible,
-            required_confidence=required_confidence,
-            should_escalate=True,
-            reason=f"policy_disposition:{disp_pred}",
-        )
-
-    if conformal_ambiguous:
-        return ADKToolGuardDecision(
-            allowed=False,
-            disposition=disp_pred,
-            intent_origin=origin_pred,
-            confidence=joint_confidence,
-            is_irreversible=is_irreversible,
-            required_confidence=required_confidence,
-            should_escalate=True,
-            reason="joint_conformal_set_ambiguous",
-        )
-
-    if not (math.isfinite(joint_confidence) and joint_confidence >= required_confidence):
-        stakes_tier = "irreversible" if is_irreversible else "reversible"
-        return ADKToolGuardDecision(
-            allowed=False,
-            disposition="ask_confirmation",
-            intent_origin=origin_pred,
-            confidence=joint_confidence if math.isfinite(joint_confidence) else 0.0,
-            is_irreversible=is_irreversible,
-            required_confidence=required_confidence,
-            should_escalate=True,
-            reason=(
-                f"below_{stakes_tier}_confidence_threshold:"
-                f"{joint_confidence:.4f}<{required_confidence:.4f}"
-            ),
         )
 
     if orchestrator_escalated and is_irreversible:
@@ -479,6 +501,7 @@ def create_adk_before_tool_guard(
     user_request_key: str = "last_user_request",
     untrusted_context_key: str = "untrusted_context",
     request_id_key: str = "invocation_id",
+    step_index_key: str = "step_index",
 ) -> Callable[[object, Mapping[str, object], object], dict[str, object] | None]:
     """Build a Google ADK ``before_tool_callback`` enforcing Action-Stakes and ``<untrusted_data>`` isolation.
 
@@ -514,6 +537,8 @@ def create_adk_before_tool_guard(
             or invocation_attr
             or f"adk:{tool_name}"
         )
+        raw_step = context_state.get(step_index_key, 1)
+        resolved_step = raw_step if isinstance(raw_step, int) and not isinstance(raw_step, bool) and raw_step >= 1 else 1
 
         verdict = evaluate_adk_tool_guard(
             runner,
@@ -523,6 +548,7 @@ def create_adk_before_tool_guard(
             untrusted_context=untrusted_context,
             request_id=request_id,
             policy=active_policy,
+            step_index=resolved_step,
         )
         if verdict.allowed is True:
             return None

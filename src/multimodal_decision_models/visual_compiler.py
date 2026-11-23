@@ -969,3 +969,246 @@ def compile_dual_buffer_contact_sheet(
         diff_hints=diff_hints,
         panel_labels=panel_labels,
     )
+
+
+@dataclass(frozen=True)
+class VisualEvidenceAuditResult:
+    """Result of contrastive clean-vs-degraded visual evidence auditing (AVCD)."""
+
+    kl_clean_vs_degraded_nats: float
+    js_divergence_bits: float
+    clean_top_option: str
+    degraded_top_option: str
+    clean_top_probability: float
+    is_visually_grounded: bool
+    veto_fast_exit: bool
+
+
+def compile_degraded_modality_twin(
+    image: ImageBuffer,
+    *,
+    blur_radius: int = 6,
+    chroma_desaturate: float = 0.85,
+) -> ImageBuffer:
+    """Compile a blurred, chroma-neutralized twin image to probe VLM unimodal text-prior reliance.
+
+    Applies a fast O(W * H) separable horizontal-then-vertical sliding-window box blur paired with
+    luminance-preserving chroma desaturation so fine-grained visual details (pack weights, text,
+    variant icons, UI labels) are erased while preserving coarse framing.
+
+    Args:
+        image: Source `ImageBuffer`.
+        blur_radius: Separable box-blur half-window radius in pixels (`>= 1`).
+        chroma_desaturate: Blend weight toward Rec.709 luminance in `[0.0, 1.0]`.
+
+    Returns:
+        Degraded `ImageBuffer` of identical dimensions `(image.width, image.height)`.
+
+    Raises:
+        ValueError: If `blur_radius < 1` or `chroma_desaturate` lies outside `[0, 1]`.
+    """
+    if not isinstance(image, ImageBuffer):
+        raise ValueError(f"image must be an ImageBuffer, got {type(image).__name__}")
+    if isinstance(blur_radius, bool) or not isinstance(blur_radius, int) or blur_radius < 1:
+        raise ValueError(f"blur_radius must be an integer >= 1, got {blur_radius!r}")
+    if (
+        isinstance(chroma_desaturate, bool)
+        or not isinstance(chroma_desaturate, (int, float))
+        or not math.isfinite(float(chroma_desaturate))
+        or float(chroma_desaturate) < 0.0
+        or float(chroma_desaturate) > 1.0
+    ):
+        raise ValueError(f"chroma_desaturate must lie in [0, 1], got {chroma_desaturate!r}")
+
+    width = image.width
+    height = image.height
+    src = image.rgb
+    horiz = bytearray(width * height * 3)
+
+    # Pass 1: O(W * H) horizontal sliding-window box blur per scanline.
+    init_right_x = min(width - 1, blur_radius)
+    for y in range(height):
+        row_off = y * width * 3
+        r_sum = 0
+        g_sum = 0
+        b_sum = 0
+        for xi in range(0, init_right_x + 1):
+            px_off = row_off + xi * 3
+            r_sum += src[px_off]
+            g_sum += src[px_off + 1]
+            b_sum += src[px_off + 2]
+        win_count = init_right_x + 1
+
+        for x in range(width):
+            span = float(win_count)
+            dst_off = row_off + x * 3
+            horiz[dst_off] = int(round(r_sum / span))
+            horiz[dst_off + 1] = int(round(g_sum / span))
+            horiz[dst_off + 2] = int(round(b_sum / span))
+            if x + 1 < width:
+                x_add = x + 1 + blur_radius
+                if x_add < width:
+                    add_off = row_off + x_add * 3
+                    r_sum += src[add_off]
+                    g_sum += src[add_off + 1]
+                    b_sum += src[add_off + 2]
+                    win_count += 1
+                x_rem = x - blur_radius
+                if x_rem >= 0:
+                    rem_off = row_off + x_rem * 3
+                    r_sum -= src[rem_off]
+                    g_sum -= src[rem_off + 1]
+                    b_sum -= src[rem_off + 2]
+                    win_count -= 1
+
+    # Pass 2: O(W * H) vertical sliding-window box blur + Rec.709 chroma desaturation per column.
+    out = bytearray(width * height * 3)
+    desat = float(chroma_desaturate)
+    keep_chroma = 1.0 - desat
+    init_bottom_y = min(height - 1, blur_radius)
+    row_stride = width * 3
+    for x in range(width):
+        col_off = x * 3
+        r_sum = 0
+        g_sum = 0
+        b_sum = 0
+        for yi in range(0, init_bottom_y + 1):
+            px_off = yi * row_stride + col_off
+            r_sum += horiz[px_off]
+            g_sum += horiz[px_off + 1]
+            b_sum += horiz[px_off + 2]
+        win_count = init_bottom_y + 1
+
+        for y in range(height):
+            span = float(win_count)
+            r_avg = r_sum / span
+            g_avg = g_sum / span
+            b_avg = b_sum / span
+            luma = 0.2126 * r_avg + 0.7152 * g_avg + 0.0722 * b_avg
+            dst_off = y * row_stride + col_off
+            out[dst_off] = min(255, max(0, int(round(keep_chroma * r_avg + desat * luma))))
+            out[dst_off + 1] = min(255, max(0, int(round(keep_chroma * g_avg + desat * luma))))
+            out[dst_off + 2] = min(255, max(0, int(round(keep_chroma * b_avg + desat * luma))))
+            if y + 1 < height:
+                y_add = y + 1 + blur_radius
+                if y_add < height:
+                    add_off = y_add * row_stride + col_off
+                    r_sum += horiz[add_off]
+                    g_sum += horiz[add_off + 1]
+                    b_sum += horiz[add_off + 2]
+                    win_count += 1
+                y_rem = y - blur_radius
+                if y_rem >= 0:
+                    rem_off = y_rem * row_stride + col_off
+                    r_sum -= horiz[rem_off]
+                    g_sum -= horiz[rem_off + 1]
+                    b_sum -= horiz[rem_off + 2]
+                    win_count -= 1
+
+    return ImageBuffer(width, height, bytes(out))
+
+
+def compute_visual_evidence_gain(
+    clean_probabilities: Mapping[str, float],
+    degraded_probabilities: Mapping[str, float],
+    *,
+    min_kl_nats: float = 0.12,
+    high_confidence_floor: float = 0.70,
+) -> VisualEvidenceAuditResult:
+    """Measure KL/JS visual evidence gain between clean and degraded-twin decision posteriors.
+
+    When a multimodal decision model predicts a high-confidence option (`p_max >= high_confidence_floor`)
+    on a clean crop yet emits a nearly identical posterior on its blurred degraded twin
+    (`KL(p_clean || p_degraded) < min_kl_nats`), the prediction is driven by text/brand priors
+    rather than visual evidence (`veto_fast_exit=True`).
+
+    Args:
+        clean_probabilities: Decision distribution evaluated on the clean visual crop.
+        degraded_probabilities: Decision distribution evaluated on `compile_degraded_modality_twin`.
+        min_kl_nats: Minimum `KL(p_clean || p_degraded)` (nats) required to certify visual grounding.
+        high_confidence_floor: Top-1 probability floor above which low visual KL triggers a veto.
+
+    Returns:
+        `VisualEvidenceAuditResult` with KL/JS divergences and `veto_fast_exit` decision.
+    """
+    if not isinstance(clean_probabilities, Mapping) or not clean_probabilities:
+        raise SchemaContractViolationError("clean_probabilities must be a non-empty Mapping")
+    if not isinstance(degraded_probabilities, Mapping) or not degraded_probabilities:
+        raise SchemaContractViolationError("degraded_probabilities must be a non-empty Mapping")
+    if (
+        isinstance(min_kl_nats, bool)
+        or not isinstance(min_kl_nats, (int, float))
+        or not math.isfinite(float(min_kl_nats))
+        or float(min_kl_nats) < 0.0
+    ):
+        raise SchemaContractViolationError("min_kl_nats must be finite and >= 0")
+    if (
+        isinstance(high_confidence_floor, bool)
+        or not isinstance(high_confidence_floor, (int, float))
+        or not math.isfinite(float(high_confidence_floor))
+        or float(high_confidence_floor) <= 0.0
+        or float(high_confidence_floor) > 1.0
+    ):
+        raise SchemaContractViolationError("high_confidence_floor must lie in (0, 1]")
+
+    def _validate_visual_dist(raw_dist: Mapping[str, float], label: str) -> dict[str, float]:
+        cleaned: dict[str, float] = {}
+        total = 0.0
+        for raw_k, raw_v in raw_dist.items():
+            if not isinstance(raw_k, str) or not raw_k:
+                raise SchemaContractViolationError(f"{label} keys must be non-empty strings")
+            if (
+                isinstance(raw_v, bool)
+                or not isinstance(raw_v, (int, float))
+                or not math.isfinite(float(raw_v))
+                or float(raw_v) < 0.0
+            ):
+                raise SchemaContractViolationError(
+                    f"{label}[{raw_k!r}] must be a non-negative finite number"
+                )
+            fval = float(raw_v)
+            cleaned[raw_k] = fval
+            total += fval
+        if total <= 0.0 or not math.isfinite(total):
+            raise SchemaContractViolationError(f"{label} must sum to > 0")
+        return {opt_k: val / total for opt_k, val in cleaned.items()}
+
+    p_clean = _validate_visual_dist(clean_probabilities, "clean_probabilities")
+    p_deg = _validate_visual_dist(degraded_probabilities, "degraded_probabilities")
+    if set(p_clean.keys()) != set(p_deg.keys()):
+        raise SchemaContractViolationError(
+            "clean_probabilities and degraded_probabilities must share identical option keys"
+        )
+    all_keys = sorted(p_clean.keys())
+
+    eps = 1e-9
+    kl_nats = 0.0
+    js_bits = 0.0
+    for key in all_keys:
+        pk = p_clean.get(key, 0.0)
+        qk = max(eps, p_deg.get(key, 0.0))
+        mk = 0.5 * (pk + p_deg.get(key, 0.0))
+        if pk > eps:
+            kl_nats += pk * math.log(pk / qk)
+            if mk > eps:
+                js_bits += 0.5 * pk * math.log2(pk / mk)
+        qk_raw = p_deg.get(key, 0.0)
+        if qk_raw > eps and mk > eps:
+            js_bits += 0.5 * qk_raw * math.log2(qk_raw / mk)
+
+    clean_top = sorted(p_clean.keys(), key=lambda opt: (-p_clean[opt], opt))[0]
+    deg_top = sorted(p_deg.keys(), key=lambda opt: (-p_deg[opt], opt))[0]
+    clean_conf = p_clean[clean_top]
+    grounded = kl_nats >= float(min_kl_nats)
+    veto = (not grounded) and (clean_conf >= float(high_confidence_floor))
+
+    return VisualEvidenceAuditResult(
+        kl_clean_vs_degraded_nats=round(max(0.0, kl_nats), 6),
+        js_divergence_bits=round(min(1.0, max(0.0, js_bits)), 6),
+        clean_top_option=clean_top,
+        degraded_top_option=deg_top,
+        clean_top_probability=round(clean_conf, 6),
+        is_visually_grounded=grounded,
+        veto_fast_exit=veto,
+    )
+
