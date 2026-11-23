@@ -1,6 +1,6 @@
 # Multimodal Decision Models (`multimodal-decision-models`)
 
-Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v0.4.0`, zero external runtime dependencies in Python and Go) separates decision geometry and uncertainty quantification from the inference backend.
+Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.0.0`, zero external runtime dependencies across Python, Go, and TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
 
 One declarative policy definition runs across four inference paradigms:
 
@@ -11,9 +11,24 @@ One declarative policy definition runs across four inference paradigms:
 
 ## Documentation and Research Index
 
+Start at the **[Developer Documentation Hub (`docs/index.md`)](docs/index.md)** for role-based learning paths across **Model Developers**, **Application & Agent Builders**, and **Engineering Managers & Architects**:
+
+| Guide | Focus |
+| :--- | :--- |
+| **[Quickstart & Four-Paradigm Backends (`docs/quickstart-and-paradigms.md`)](docs/quickstart-and-paradigms.md)** | Python, Go (`pkg/mdm`), and TypeScript (`@mdm/client`) quickstarts + how `mdm`, `dgem`, and managed Decision APIs fit together. |
+| **[Calibration, Conformal Sets & Risk Control (`docs/calibration-and-conformal.md`)](docs/calibration-and-conformal.md)** | Temperature/vector scaling, pre-gated Bayesian `PoE`, stateless `HMAC-SHA256` RAPS, Multi-Slot Joint Conformal, Mondrian, and `LTT` bounds. |
+| **[Wide-Catalog Routing & Taxonomy Tries (`docs/wide-catalog-routing.md`)](docs/wide-catalog-routing.md)** | `recommend_wide_routing_strategy` across `26` / `52` / `255` bijections, `CSLS` Top-20 shortlists, partitioned 1-pass tries, and `PriDe` debiasing. |
+| **[Multimodal Compilers (`docs/multimodal-compilers.md`)](docs/multimodal-compilers.md)** | Stage-2A Shades-of-Gray + CIE $L^*a^*b^*$, Stage-2B `2x` saliency/weight contact sheets, Set-of-Marks UI grounding, and PCM16 `VAP` / `AVEL` / `ST-SoM`. |
+| **[Agentic Shared Control & Context Pruning (`docs/agentic-shared-control.md`)](docs/agentic-shared-control.md)** | Action-Stakes $V_{\text{irrev}}$ vs. $V_{\text{rev}}$ guards (`Google ADK`, `LangGraph`, `Genkit`), `<untrusted_data>` quarantine, and 8-slot `MCKP` context pruning. |
+| **[Distillation, Tuning & Recalibration (`docs/distillation-and-tuning.md`)](docs/distillation-and-tuning.md)** | `<think>` leakage prevention, Equation 12 reasoning-to-readout posterior distillation, and Selective Teacher Brier SFT on `must_ask` states. |
+| **[Production Deployment, Terraform & MCP (`docs/production-deployment.md`)](docs/production-deployment.md)** | Digest-pinned Cloud Run + Vertex AI Terraform (`deploy/terraform/`), `RETRY_PENDING` SLA quarantine, SHA-256 cache, and dynamic MCP schemas. |
+
+### Research Manuscripts & Benchmark Reports
+
 - **[Research Paper Manuscript (`docs/research_paper.md`)](docs/research_paper.md)**: Full mathematical formulation, propositions, dual-buffer visual photometry derivations, 8-slot MCKP context pruning, `<untrusted_data>` RAG quarantine, and 10-model empirical benchmark analysis.
 - **[Executive Research Summary (`docs/research_summary.md`)](docs/research_summary.md)**: Condensed overview of all workstreams, hypotheses, Pareto-optimal operating regimes, and verified metrics.
-- **[Architecture and Mathematical Design (`docs/architecture.md`)](docs/architecture.md)**: Module-by-module equations and API specifications.
+- **[Architecture and Mathematical Design (`docs/architecture.md`)](docs/architecture.md)** & **[Practical Use-Case Recipes (`docs/practical_use_cases.md`)](docs/practical_use_cases.md)**: Module-by-module equations and runnable multi-domain patterns.
+- **[Canonical Policy Templates (`templates/`)](templates/)** & **[Multi-Language SDK Overview (`sdk/README.md`)](sdk/README.md)**: 8 `.json.tmpl` + `.examples.json` policy fixtures and Python/Go/TypeScript parity vectors.
 - **[10-Model Calibration & Conformal Benchmark Report (`benchmarks/results/multimodel_benchmark_report.md`)](benchmarks/results/multimodel_benchmark_report.md)**: Full 20-arm leaderboard across Multi-Task Calibration ($N = 50$) and XSTest Safety Refusal Boundaries ($N = 360$).
 - **[Changelog (`CHANGELOG.md`)](CHANGELOG.md)**, **[Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)**, **[Citation Metadata (`CITATION.cff`)](CITATION.cff)**, and **[Apache-2.0 License (`LICENSE`)](LICENSE)**.
 
@@ -64,7 +79,10 @@ Full results and 95% cluster bootstrap confidence intervals are available in [`b
 | **[`backends.py`](src/multimodal_decision_models/backends.py)** | **Five-Paradigm Backends & Orchestrator:** `DgemSystemOneBackend`, `GevStudioSystemOneBackend` (`/api/apps/run` `mdm:cascade`), `OpenAILogprobBackend`, `VertexGeminiBackend`, `BlackBoxSampledBackend`, and `CascadeDecisionOrchestrator` with pre-fusion conformal set gating and SLA quarantine. |
 | **[`eval_suite.py`](src/multimodal_decision_models/eval_suite.py)** | **Scoring & Statistical Suite:** Multiclass Brier score, exact four-term Murphy (`REL`, `RES`, `UNC`, `WBV`) decomposition, NLL, `ECE`, quantile-binned `ACE`, Macro-F1, `nDCG@k`, `AUROC`, selective `AURC`, exact paired McNemar test, Rogan-Gladen prevalence, Cohen's $\kappa$, and cluster bootstrap CIs. |
 | **[`audio_video_decision.py`](src/multimodal_decision_models/audio_video_decision.py)** | **Streaming Audio, Video, & Full-Duplex Decisions (`v0.8.0`):** Cost-sensitive Voice Activity Projection (`VAP`) turn-taking (`evaluate_duplex_turn_taking_decision`), anytime-valid Conformal Test Martingale streaming early-exit (`ConformalMartingaleTracker`, `evaluate_streaming_early_exit`), cross-modal `JSD` + 3-slot triangle `AVEL` spoof gating (`evaluate_audiovisual_event_agreement`), and pure-stdlib 16-bit PCM `WAV` Goertzel spectral extraction + Spatio-Temporal Contact Sheets (`extract_wav_acoustic_features`, `compile_spatiotemporal_contact_sheet`). |
-| **[`pkg/mdm/`](pkg/mdm/)** | **Go Reference Package (`package mdm`):** Zero-dependency Go 1.22 implementation covering `CalibrateConformalQuantile`, `ConformalPredictionSet`, `PruneAgentContextBlocks`, pre-gated prior fusion, shortlisting, taxonomy tries, Set-of-Marks geometry, triangle scoring, pack-quantity guards, and `v0.8.0` streaming audio/video primitives (`pkg/mdm/audio_video_v080.go`). |
+| **[`adapters.py`](src/multimodal_decision_models/adapters.py)** | **Agent Framework Guards (`Google ADK` & `LangGraph`):** `ActionStakesPolicy`, `create_adk_before_tool_guard`, `create_langgraph_decision_node`, and `neutralize_untrusted_delimiters` enforcing asymmetric $V_{\text{irrev}}$ vs. $V_{\text{rev}}$ confidence gates, 2-slot joint conformal escalation, and fail-closed `RETRY_PENDING` quarantine. |
+| **[`pkg/mdm/`](pkg/mdm/)** | **Go Reference Package (`package mdm`):** Zero-dependency Go 1.22 implementation covering `HmacUint64`, `CalibrateConformalQuantileWithSeedKey`, `ConformalPredictionSetWithSeedKey`, `PruneAgentContextBlocks`, pre-gated prior fusion, shortlisting, taxonomy tries, Set-of-Marks geometry, triangle scoring, pack-quantity guards, and `v0.8.0` streaming audio/video primitives (`pkg/mdm/audio_video_v080.go`). |
+| **[`sdk/ts/`](sdk/ts/)** | **TypeScript SDK (`@mdm/client`):** Zero-runtime-dependency Node.js 20+ client (`MDMClient` for `/v1/systemone`, `:rawPredict`, and `/v1/chat/completions`), stateless `HMAC-SHA256` conformal/joint-conformal calibration, Bayesian `PoE` fusion, and Genkit JS guards (`createGenkitToolGuard`, `createGenkitDecisionStep`). |
+| **[`deploy/terraform/`](deploy/terraform/)** | **Declarative GCP Terraform Root Module:** Digest-pinned Cloud Run `v2` orchestrator, versioned calibration GCS bucket, Artifact Registry, Secret Manager binding, 6 Cloud Logging funnel metrics + Monitoring dashboard, and optional GPU-backed Vertex AI `/v1/systemone` endpoint. |
 
 ## Installation and Quickstart
 
@@ -136,6 +154,9 @@ Run the Python 6-tier verification suite, Go race-detector tests, 10-model bench
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 go test -race ./pkg/mdm/...
+npm --prefix sdk/ts ci && npm --prefix sdk/ts test
+python3 deploy/terraform/test_terraform_config.py
+python3 scripts/docs_link_check.py
 PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
 PYTHONPATH=src python3 benchmarks/run_mdm_bench.py
 PYTHONPATH=src python3 benchmarks/run_real_public_benchmarks.py
@@ -224,7 +245,7 @@ If you use `multimodal-decision-models` in your research or engineering systems,
   author       = {Juneja, Jigyasu},
   title        = {Calibrated Multimodal Decision Models at Catalog Scale: Model-Agnostic Readouts, Dual-Buffer Visual Contact Sheets, and Split Conformal Cascades},
   year         = {2026},
-  version      = {0.4.0},
+  version      = {1.0.0},
   url          = {https://github.com/jigyasujuneja/multimodal-decision-models},
   license      = {Apache-2.0}
 }

@@ -2,6 +2,16 @@
 
 All notable changes to `multimodal-decision-models` are documented in this file.
 
+## [1.0.0] - 2026-11-10
+
+### Added
+- **Stateless `HMAC-SHA256` Cross-Language Conformal Determinism (`conformal.py`, `pkg/mdm/conformal.go`, `sdk/ts/src/calibration.ts`)**: Order-independent, lock-free `hmac_uint64` / `HmacUint64` / `hmacUint64` and `hmac_uniform_float64` tie-breaking across Python, Go, and TypeScript (`14094744155160802019` canonical parity vector).
+- **Zero-Trust HTTP Transport & Single-Route Vertex `:rawPredict` Auto-Dispatch (`backends.py`, `sdk/ts/src/client.ts`)**: Permanent credential header stripping (`Authorization`, `X-DGEM-Key`, `X-DGEM-API-Key`, `X-Goog-Api-Key`) across cross-origin HTTP redirects (including `307`/`308` bounce-back hops), `20.0 s` TCP+TLS connect timeout cap, CR/LF header injection rejection, coroutine rejection in synchronous factories, and `POST {"health": true}` health probing for `:rawPredict` URLs.
+- **Google ADK & LangGraph Adapters (`adapters.py`)**: `ActionStakesPolicy`, `evaluate_adk_tool_guard`, `create_adk_before_tool_guard`, `create_langgraph_decision_node`, and `neutralize_untrusted_delimiters` enforcing asymmetric $V_{\text{irrev}}$ vs. $V_{\text{rev}}$ confidence gates and 2-slot joint conformal escalation.
+- **Zero-Runtime-Dependency TypeScript SDK (`sdk/ts`, `@mdm/client` `1.0.0`)**: `MDMClient`, split and multi-slot joint conformal calibration, temperature scaling, Bayesian `PoE` fusion, and Genkit JS guards (`createGenkitToolGuard`, `createGenkitDecisionStep`).
+- **Empirical Wide-Option Routing Ladder & 8 Canonical Policy Templates (`hierarchy.py`, `templates/`)**: `recommend_wide_routing_strategy` plus 8 `.json.tmpl` + `.examples.json` policy fixtures.
+- **Capability-Aware MCP Schemas & Declarative GCP Terraform (`mcp_server.py`, `deploy/terraform/`)**: `build_mcp_tool_schemas` with fail-closed `tools/call` capability gating, digest-pinned Cloud Run + optional Vertex AI Terraform root module, 6 Cloud Logging funnel metrics + Monitoring dashboard, 40-char SHA-pinned GitHub Actions + `CodeQL` workflows, and progressive 8-page developer documentation hub (`docs/index.md`).
+
 ## [0.5.0] - 2026-10-25
 
 ### Added
