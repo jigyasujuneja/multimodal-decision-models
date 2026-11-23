@@ -37,7 +37,7 @@ from .trajectory_control import NEVCInterventionDecision, NetExpectedValueContro
 from .types import DEFAULT_HESITATION_THRESHOLD, HARNESS_DECISION_POINTS, INTEGRATION_MODES, MAX_EXTENDED_OPTIONS_PER_SLOT, MAX_OPTIONS_PER_SLOT, MAX_SLOTS_PER_PASS, UNIVERSAL_256_DECISION_CODES, CandidateMark, DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory, PairwiseEdge, ProbabilisticTriangleScore, SlotReadout, SwarmAgentProposal, SwarmLockDecision, TriangleContradiction, UnitMeasure
 from .visual_compiler import CompiledContactSheet, ImageBuffer, VisualEvidenceAuditResult, apply_residual_mlp_adapter, compile_degraded_modality_twin, compile_dual_buffer_contact_sheet, compute_visual_evidence_gain, decode_png, decode_ppm, encode_png, encode_ppm, extract_inter_candidate_saliency_band, inner_crop_cie_lab_similarity, mean_inner_crop_cie_lab, shades_of_gray_white_balance
 
-__version__ = "1.2.0"
+__version__ = "1.3.1"
 
 __all__ = [
     "ADKToolGuardDecision",
@@ -83,6 +83,7 @@ __all__ = [
     "DecisionResult",
     "DecisionTerminalState",
     "DgemSystemOneBackend",
+    "DomainCompetenceProfile",
     "EmbeddingIndexQueryResult",
     "EpisodeSplitRecord",
     "FACTOR_NAMES",
@@ -235,6 +236,7 @@ __all__ = [
     "compile_dual_buffer_contact_sheet",
     "compile_spatiotemporal_contact_sheet",
     "compute_bayes_value_of_information",
+    "compute_dawid_skene_poe_weights",
     "compute_decision_cache_key",
     "compute_episode_content_sha256",
     "compute_exact_shapley_values",

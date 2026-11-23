@@ -36,12 +36,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .contracts import SchemaContractViolationError
-from .types import (
-    DEFAULT_HESITATION_THRESHOLD,
-    MAX_OPTIONS_PER_SLOT,
-    MAX_SLOTS_PER_PASS,
-    DecisionQuestion,
-)
+from .types import DEFAULT_HESITATION_THRESHOLD, MAX_OPTIONS_PER_SLOT, MAX_SLOTS_PER_PASS, DecisionQuestion
 
 VALID_PRIOR_GATE_MODES: tuple[str, ...] = (
     "always",
@@ -1742,43 +1737,129 @@ def debias_null_prior_probabilities(
 
 @dataclass(frozen=True)
 class DomainCompetenceProfile:
-    """Held-out out-of-fold Stage-1 and Stage-2 competence profile for a rubric domain."""
+    """Held-out Stage-1 and Stage-2 competence profile for a rubric domain.
+
+    Captures out-of-fold accuracy, paired escalation fixes versus regressions, and optional
+    multiclass Brier scores so the cascade circuit breaker can block negative-transfer Stage-2
+    overrides before they degrade accuracy or probability calibration.
+
+    Attributes:
+      stage1_accuracy: Held-out Stage-1 accuracy in ``[0.0, 1.0]``.
+      stage2_accuracy: Held-out Stage-2 accuracy in ``[0.0, 1.0]``.
+      num_options: Candidate option count ``K >= 2``.
+      paired_escalation_delta: Net item count ``(n_fixed - n_broken)`` on escalated items.
+      sample_count: Number of held-out evaluation examples (``>= 0``).
+      stage1_brier: Optional held-out multiclass Brier score for Stage 1 in ``[0.0, 2.0]``, or
+        ``None`` when calibration scores are unavailable (skips the Brier degradation guard).
+      stage2_brier: Optional held-out multiclass Brier score for Stage 2 in ``[0.0, 2.0]``, or
+        ``None`` when calibration scores are unavailable (skips the Brier degradation guard).
+    """
 
     stage1_accuracy: float
     stage2_accuracy: float
     num_options: int = 2
     paired_escalation_delta: int = 0
     sample_count: int = 0
+    stage1_brier: float | None = None
+    stage2_brier: float | None = None
 
     def __post_init__(self) -> None:
         if (
             isinstance(self.stage1_accuracy, bool)
-            or not math.isfinite(self.stage1_accuracy)
-            or not 0.0 <= self.stage1_accuracy <= 1.0
+            or not isinstance(self.stage1_accuracy, (int, float))
+            or not math.isfinite(float(self.stage1_accuracy))
+            or not 0.0 <= float(self.stage1_accuracy) <= 1.0
         ):
-            raise ValueError("stage1_accuracy must be finite in [0, 1]")
+            raise ValueError("stage1_accuracy must be a finite non-boolean number in [0, 1]")
         if (
             isinstance(self.stage2_accuracy, bool)
-            or not math.isfinite(self.stage2_accuracy)
-            or not 0.0 <= self.stage2_accuracy <= 1.0
+            or not isinstance(self.stage2_accuracy, (int, float))
+            or not math.isfinite(float(self.stage2_accuracy))
+            or not 0.0 <= float(self.stage2_accuracy) <= 1.0
         ):
-            raise ValueError("stage2_accuracy must be finite in [0, 1]")
-        if isinstance(self.num_options, bool) or self.num_options < 2:
-            raise ValueError("num_options must be >= 2")
-        if isinstance(self.sample_count, bool) or self.sample_count < 0:
-            raise ValueError("sample_count must be >= 0")
+            raise ValueError("stage2_accuracy must be a finite non-boolean number in [0, 1]")
+        if not isinstance(self.num_options, int) or self.num_options < 2:
+            raise ValueError("num_options must be an integer >= 2")
+        if isinstance(self.paired_escalation_delta, bool) or not isinstance(
+            self.paired_escalation_delta, int
+        ):
+            raise ValueError("paired_escalation_delta must be a non-boolean integer")
+        if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int) or self.sample_count < 0:
+            raise ValueError("sample_count must be an integer >= 0")
+        if self.stage1_brier is not None:
+            if (
+                isinstance(self.stage1_brier, bool)
+                or not isinstance(self.stage1_brier, (int, float))
+                or not math.isfinite(float(self.stage1_brier))
+                or not 0.0 <= float(self.stage1_brier) <= 2.0
+            ):
+                raise ValueError("stage1_brier must be None or a finite non-boolean float in [0, 2]")
+        if self.stage2_brier is not None:
+            if (
+                isinstance(self.stage2_brier, bool)
+                or not isinstance(self.stage2_brier, (int, float))
+                or not math.isfinite(float(self.stage2_brier))
+                or not 0.0 <= float(self.stage2_brier) <= 2.0
+            ):
+                raise ValueError("stage2_brier must be None or a finite non-boolean float in [0, 2]")
 
     def is_negative_transfer(
         self,
         margin: float = 0.05,
         min_delta_hurt: int = -2,
+        brier_degradation_ratio: float = 2.5,
     ) -> bool:
-        """Return True when escalating to Stage 2 degrades held-out domain accuracy."""
+        """Return True when Stage-2 escalation degrades held-out accuracy or calibration.
+
+        Evaluates negative transfer in priority order: (1) net paired escalation hurt at or
+        below ``min_delta_hurt``, (2) severe Stage-2 Brier score blowup when both ``stage1_brier``
+        and ``stage2_brier`` are non-``None`` and ``stage2_accuracy < stage1_accuracy`` (preserving
+        tied ``1.00 == 1.00`` suites), (3) positive paired escalation gain
+        ``paired_escalation_delta > 0`` (returns ``False``), and (4) overall accuracy trailing
+        ``stage1_accuracy - margin``. When ``stage1_brier`` or ``stage2_brier`` is ``None``, only
+        accuracy and paired escalation checks apply.
+
+        Args:
+          margin: Non-negative finite accuracy tolerance before tripping when ``paired_escalation_delta <= 0``.
+          min_delta_hurt: Paired escalation net-hurt threshold at or below which Stage 2 trips immediately.
+          brier_degradation_ratio: Multiplicative Brier degradation ratio ``> 1.0`` relative to
+            ``max(0.02, stage1_brier)``.
+
+        Returns:
+          ``True`` if Stage-2 overrides should be blocked on this domain; ``False`` otherwise.
+
+        Raises:
+          ValueError: If ``margin``, ``min_delta_hurt``, or ``brier_degradation_ratio`` is boolean,
+            non-finite, or out of valid bounds.
+        """
+        if (
+            isinstance(margin, bool)
+            or not isinstance(margin, (int, float))
+            or not math.isfinite(float(margin))
+            or float(margin) < 0.0
+        ):
+            raise ValueError("margin must be a finite non-boolean float >= 0")
+        if isinstance(min_delta_hurt, bool) or not isinstance(min_delta_hurt, int):
+            raise ValueError("min_delta_hurt must be a non-boolean integer")
+        if (
+            isinstance(brier_degradation_ratio, bool)
+            or not isinstance(brier_degradation_ratio, (int, float))
+            or not math.isfinite(float(brier_degradation_ratio))
+            or float(brier_degradation_ratio) <= 1.0
+        ):
+            raise ValueError("brier_degradation_ratio must be a finite non-boolean float > 1.0")
         if self.paired_escalation_delta <= min_delta_hurt:
+            return True
+        if (
+            self.stage1_brier is not None
+            and self.stage2_brier is not None
+            and self.stage2_accuracy < self.stage1_accuracy
+            and self.stage2_brier > float(brier_degradation_ratio) * max(0.02, float(self.stage1_brier))
+        ):
             return True
         if self.paired_escalation_delta > 0:
             return False
-        return self.stage2_accuracy < self.stage1_accuracy - margin
+        return self.stage2_accuracy < self.stage1_accuracy - float(margin)
 
 
 def compute_dawid_skene_poe_weights(
@@ -1793,31 +1874,43 @@ def compute_dawid_skene_poe_weights(
       stage1_accuracy: Held-out Stage-1 accuracy in ``[0, 1]``.
       stage2_accuracy: Held-out Stage-2 accuracy in ``[0, 1]``.
       num_options: Candidate option count ``K >= 2``.
-      floor_accuracy: Numerical clamp distance from ``0`` and ``1``.
+      floor_accuracy: Numerical clamp distance from ``0`` and ``1`` in ``(0, 0.25)``.
 
     Returns:
       Tuple ``(stage1_weight, stage2_weight)`` relative to ``1/K`` chance log-odds.
 
     Raises:
-      ValueError: If accuracies, ``num_options``, or ``floor_accuracy`` violate bounds.
+      ValueError: If accuracies, ``num_options``, or ``floor_accuracy`` violate type or range bounds.
     """
     if (
         isinstance(stage1_accuracy, bool)
-        or isinstance(stage2_accuracy, bool)
-        or not 0.0 <= stage1_accuracy <= 1.0
-        or not 0.0 <= stage2_accuracy <= 1.0
+        or not isinstance(stage1_accuracy, (int, float))
+        or not math.isfinite(float(stage1_accuracy))
+        or not 0.0 <= float(stage1_accuracy) <= 1.0
     ):
-        raise ValueError("stage1_accuracy and stage2_accuracy must be in [0, 1]")
-    if isinstance(num_options, bool) or num_options < 2:
-        raise ValueError("num_options must be >= 2")
-    if not 0.0 < floor_accuracy < 0.25:
-        raise ValueError("floor_accuracy must be in (0, 0.25)")
+        raise ValueError("stage1_accuracy must be a finite non-boolean number in [0, 1]")
+    if (
+        isinstance(stage2_accuracy, bool)
+        or not isinstance(stage2_accuracy, (int, float))
+        or not math.isfinite(float(stage2_accuracy))
+        or not 0.0 <= float(stage2_accuracy) <= 1.0
+    ):
+        raise ValueError("stage2_accuracy must be a finite non-boolean number in [0, 1]")
+    if not isinstance(num_options, int) or num_options < 2:
+        raise ValueError("num_options must be an integer >= 2")
+    if (
+        not isinstance(floor_accuracy, (int, float))
+        or not math.isfinite(float(floor_accuracy))
+        or not 0.0 < float(floor_accuracy) < 0.25
+    ):
+        raise ValueError("floor_accuracy must be a finite non-boolean float in (0, 0.25)")
+    effective_floor = min(float(floor_accuracy), 0.5 / float(num_options))
     chance_log_odds = -math.log(float(num_options - 1))
-    clamped_a1 = min(1.0 - floor_accuracy, max(floor_accuracy, stage1_accuracy))
-    clamped_a2 = min(1.0 - floor_accuracy, max(floor_accuracy, stage2_accuracy))
-    weight_1 = max(0.01, math.log(clamped_a1 / (1.0 - clamped_a1)) - chance_log_odds)
-    weight_2 = max(0.0, math.log(clamped_a2 / (1.0 - clamped_a2)) - chance_log_odds)
-    return weight_1, weight_2
+    clamped_stage1 = min(1.0 - effective_floor, max(effective_floor, float(stage1_accuracy)))
+    clamped_stage2 = min(1.0 - effective_floor, max(effective_floor, float(stage2_accuracy)))
+    stage1_weight = max(0.01, math.log(clamped_stage1 / (1.0 - clamped_stage1)) - chance_log_odds)
+    stage2_weight = max(0.0, math.log(clamped_stage2 / (1.0 - clamped_stage2)) - chance_log_odds)
+    return stage1_weight, stage2_weight
 
 
 

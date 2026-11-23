@@ -1193,3 +1193,103 @@ func MultiSlotJointConformalSets(
 	}
 	return out, anyEscalate, nil
 }
+
+// DefaultDawidSkeneFloorAccuracy is the default probability boundary clamp for ComputeDawidSkenePoEWeights.
+const DefaultDawidSkeneFloorAccuracy = 1e-4
+
+// DomainCompetenceProfile stores held-out out-of-fold Stage-1 and Stage-2 competence metrics for a rubric domain.
+type DomainCompetenceProfile struct {
+	Stage1Accuracy        float64 `json:"stage1_accuracy"`
+	Stage2Accuracy        float64 `json:"stage2_accuracy"`
+	NumOptions            int     `json:"num_options,omitempty"`
+	PairedEscalationDelta int     `json:"paired_escalation_delta,omitempty"`
+	SampleCount           int     `json:"sample_count,omitempty"`
+	HasBrierScores        bool    `json:"has_brier_scores,omitempty"`
+	Stage1Brier           float64 `json:"stage1_brier,omitempty"`
+	Stage2Brier           float64 `json:"stage2_brier,omitempty"`
+}
+
+// Validate checks that accuracies lie in [0, 1], NumOptions >= 2, SampleCount >= 0,
+// and Brier scores (when HasBrierScores is true) are finite values in [0, 2].
+func (p DomainCompetenceProfile) Validate() error {
+	if math.IsNaN(p.Stage1Accuracy) || math.IsInf(p.Stage1Accuracy, 0) || p.Stage1Accuracy < 0 || p.Stage1Accuracy > 1 {
+		return fmt.Errorf("mdm: Stage1Accuracy must be finite in [0, 1], got %v", p.Stage1Accuracy)
+	}
+	if math.IsNaN(p.Stage2Accuracy) || math.IsInf(p.Stage2Accuracy, 0) || p.Stage2Accuracy < 0 || p.Stage2Accuracy > 1 {
+		return fmt.Errorf("mdm: Stage2Accuracy must be finite in [0, 1], got %v", p.Stage2Accuracy)
+	}
+	if p.NumOptions < 2 {
+		return fmt.Errorf("mdm: NumOptions must be >= 2, got %d", p.NumOptions)
+	}
+	if p.SampleCount < 0 {
+		return fmt.Errorf("mdm: SampleCount must be >= 0, got %d", p.SampleCount)
+	}
+	if p.HasBrierScores {
+		if math.IsNaN(p.Stage1Brier) || math.IsInf(p.Stage1Brier, 0) || p.Stage1Brier < 0 || p.Stage1Brier > 2 {
+			return fmt.Errorf("mdm: Stage1Brier must be finite in [0, 2], got %v", p.Stage1Brier)
+		}
+		if math.IsNaN(p.Stage2Brier) || math.IsInf(p.Stage2Brier, 0) || p.Stage2Brier < 0 || p.Stage2Brier > 2 {
+			return fmt.Errorf("mdm: Stage2Brier must be finite in [0, 2], got %v", p.Stage2Brier)
+		}
+	}
+	return nil
+}
+
+// DefaultNegativeTransferCheck evaluates IsNegativeTransfer with canonical defaults
+// (margin = 0.05, minDeltaHurt = -2, brierDegradationRatio = 2.5).
+func (p DomainCompetenceProfile) DefaultNegativeTransferCheck() bool {
+	return p.IsNegativeTransfer(0.05, -2, 2.5)
+}
+
+// IsNegativeTransfer returns true when escalating to Stage 2 degrades held-out accuracy or Brier calibration.
+// Invalid thresholds (margin < 0, non-finite values, or brierDegradationRatio <= 1.0) or an invalid profile
+// fail closed by returning true so unsafe Stage-2 overrides are blocked.
+func (p DomainCompetenceProfile) IsNegativeTransfer(margin float64, minDeltaHurt int, brierDegradationRatio float64) bool {
+	if p.Validate() != nil {
+		return true
+	}
+	if math.IsNaN(margin) || math.IsInf(margin, 0) || margin < 0 {
+		return true
+	}
+	if math.IsNaN(brierDegradationRatio) || math.IsInf(brierDegradationRatio, 0) || brierDegradationRatio <= 1.0 {
+		return true
+	}
+	if p.PairedEscalationDelta <= minDeltaHurt {
+		return true
+	}
+	if p.HasBrierScores && p.Stage2Accuracy < p.Stage1Accuracy && p.Stage2Brier > brierDegradationRatio*math.Max(0.02, p.Stage1Brier) {
+		return true
+	}
+	if p.PairedEscalationDelta > 0 {
+		return false
+	}
+	return p.Stage2Accuracy < p.Stage1Accuracy-margin
+}
+
+// ComputeDawidSkenePoEWeights computes multi-class Dawid-Skene log-odds reliability weights (w1, w2)
+// relative to 1/K chance log-odds, matching Python and TypeScript to IEEE-754 float64 precision.
+func ComputeDawidSkenePoEWeights(
+	stage1Accuracy, stage2Accuracy float64,
+	numOptions int,
+	floorAccuracy float64,
+) (float64, float64, error) {
+	if math.IsNaN(stage1Accuracy) || math.IsInf(stage1Accuracy, 0) || stage1Accuracy < 0 || stage1Accuracy > 1 {
+		return 0, 0, fmt.Errorf("mdm: stage1Accuracy must be finite in [0, 1], got %v", stage1Accuracy)
+	}
+	if math.IsNaN(stage2Accuracy) || math.IsInf(stage2Accuracy, 0) || stage2Accuracy < 0 || stage2Accuracy > 1 {
+		return 0, 0, fmt.Errorf("mdm: stage2Accuracy must be finite in [0, 1], got %v", stage2Accuracy)
+	}
+	if numOptions < 2 {
+		return 0, 0, fmt.Errorf("mdm: numOptions must be >= 2, got %d", numOptions)
+	}
+	if math.IsNaN(floorAccuracy) || math.IsInf(floorAccuracy, 0) || floorAccuracy <= 0 || floorAccuracy >= 0.25 {
+		return 0, 0, fmt.Errorf("mdm: floorAccuracy must be finite in (0, 0.25), got %v", floorAccuracy)
+	}
+	effectiveFloor := math.Min(floorAccuracy, 0.5/float64(numOptions))
+	chanceLogOdds := -math.Log(float64(numOptions - 1))
+	clampedStage1 := math.Min(1.0-effectiveFloor, math.Max(effectiveFloor, stage1Accuracy))
+	clampedStage2 := math.Min(1.0-effectiveFloor, math.Max(effectiveFloor, stage2Accuracy))
+	weight1 := math.Max(0.01, math.Log(clampedStage1/(1.0-clampedStage1))-chanceLogOdds)
+	weight2 := math.Max(0.0, math.Log(clampedStage2/(1.0-clampedStage2))-chanceLogOdds)
+	return weight1, weight2, nil
+}

@@ -163,30 +163,44 @@ def paired_mcnemar_test(
     arm_correct: Sequence[bool],
     baseline_correct: Sequence[bool],
 ) -> McNemarResult:
-    """Evaluate paired binary accuracy differences strictly via discordant pairs (n01 vs n10)."""
+    """Evaluate paired binary accuracy differences via exact log-gamma binomial tail."""
     if len(arm_correct) != len(baseline_correct) or not arm_correct:
         raise ValueError("arm_correct and baseline_correct must be non-empty sequences of equal length")
     n01 = 0  # baseline wrong, arm right
     n10 = 0  # baseline right, arm wrong
-    for a_ok, b_ok in zip(arm_correct, baseline_correct):
-        if bool(a_ok) and not bool(b_ok):
+    for arm_ok, base_ok in zip(arm_correct, baseline_correct):
+        if bool(arm_ok) and not bool(base_ok):
             n01 += 1
-        elif bool(b_ok) and not bool(a_ok):
+        elif bool(base_ok) and not bool(arm_ok):
             n10 += 1
 
-    disc = n01 + n10
-    if disc == 0:
+    discordant_total = n01 + n10
+    if discordant_total == 0 or n01 == n10:
         return McNemarResult(
             n_pairs=len(arm_correct),
-            n01_arm_wins=0,
-            n10_baseline_wins=0,
+            n01_arm_wins=n01,
+            n10_baseline_wins=n10,
             chi2_cc=0.0,
             p_two_sided=1.0,
         )
-    chi2_cc = ((abs(n01 - n10) - 1.0) ** 2) / float(disc) if abs(n01 - n10) > 1 else 0.0
+    chi2_cc = (
+        ((abs(n01 - n10) - 1.0) ** 2) / float(discordant_total)
+        if abs(n01 - n10) > 1
+        else 0.0
+    )
     k_min = min(n01, n10)
-    tail = sum(math.comb(disc, i) for i in range(k_min + 1)) * (0.5**disc)
-    p_val = min(1.0, 2.0 * tail)
+    log_denom = float(discordant_total) * math.log(2.0)
+    lgamma_total = math.lgamma(discordant_total + 1)
+    one_tail = sum(
+        math.exp(
+            lgamma_total
+            - math.lgamma(idx + 1)
+            - math.lgamma(discordant_total - idx + 1)
+            - log_denom
+        )
+        for idx in range(k_min + 1)
+    )
+    p_val = min(1.0, 2.0 * one_tail)
     return McNemarResult(
         n_pairs=len(arm_correct),
         n01_arm_wins=n01,
@@ -647,28 +661,43 @@ def holm_bonferroni_adjust(
     *,
     alpha: float = 0.05,
 ) -> tuple[list[float], list[bool]]:
-    """Apply Holm-Bonferroni step-down family-wise error rate adjustment (Holm 1979; arXiv:2610.21412v1 Sec. 6).
+    """Apply Holm-Bonferroni step-down family-wise error rate adjustment (Holm 1979).
 
     Returns `(adjusted_p_values, rejected_flags)` in the original input order.
     """
     m = len(p_values)
     if m == 0:
         raise ValueError("p_values must be non-empty")
-    if not math.isfinite(alpha) or alpha <= 0.0 or alpha >= 1.0:
+    if (
+        not isinstance(alpha, (int, float))
+        or not math.isfinite(float(alpha))
+        or float(alpha) <= 0.0
+        or float(alpha) >= 1.0
+    ):
         raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
 
-    indexed = sorted(enumerate(float(p) for p in p_values), key=lambda kv: kv[1])
+    validated_pairs: list[tuple[int, float]] = []
+    for orig_idx, raw_p in enumerate(p_values):
+        if (
+            isinstance(raw_p, bool)
+            or not isinstance(raw_p, (int, float))
+            or not math.isfinite(float(raw_p))
+            or not 0.0 <= float(raw_p) <= 1.0
+        ):
+            raise ValueError(f"invalid p-value at index {orig_idx}: {raw_p!r}")
+        validated_pairs.append((orig_idx, float(raw_p)))
+
+    indexed = sorted(validated_pairs, key=lambda pair: pair[1])
     adj = [0.0] * m
     rej = [False] * m
     running_max = 0.0
     still_rejecting = True
+    alpha_bound = float(alpha)
     for rank, (orig_idx, p_val) in enumerate(indexed):
-        if not math.isfinite(p_val) or p_val < 0.0 or p_val > 1.0:
-            raise ValueError(f"invalid p-value at index {orig_idx}: {p_val!r}")
         mult = float(m - rank)
         running_max = max(running_max, min(1.0, p_val * mult))
         adj[orig_idx] = running_max
-        if still_rejecting and running_max <= alpha:
+        if still_rejecting and running_max <= alpha_bound:
             rej[orig_idx] = True
         else:
             still_rejecting = False

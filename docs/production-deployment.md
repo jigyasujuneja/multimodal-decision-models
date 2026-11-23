@@ -92,7 +92,7 @@ assert "gemini-3.8-flash:generateContent" in stage2_verifier.endpoint_url()
 
 ## Run the capability-aware MCP `stdio` server (`dgem-catalog`)
 
-`mcp_server.py` (`dgem-catalog`, version `1.2.0`) exposes `mdm` to MCP-compatible IDEs and agent hosts over `stdin`/`stdout` (supporting both newline-delimited JSON-RPC 2.0 and LSP `Content-Length` framing up to `16 MiB`):
+`mcp_server.py` (`dgem-catalog`, version `1.3.1`) exposes `mdm` to MCP-compatible IDEs and agent hosts over `stdin`/`stdout` (supporting both newline-delimited JSON-RPC 2.0 and LSP `Content-Length` framing up to `16 MiB`):
 
 ```bash
 python3 -m multimodal_decision_models.mcp_server

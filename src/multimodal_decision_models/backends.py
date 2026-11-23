@@ -53,7 +53,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .calibration import VALID_PRIOR_GATE_MODES, apply_layer5_deterministic_guards, inject_evidence_slot, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
+from .calibration import VALID_PRIOR_GATE_MODES, DomainCompetenceProfile, apply_layer5_deterministic_guards, compute_dawid_skene_poe_weights, inject_evidence_slot, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
 from .conformal import conformal_prediction_set
 from .contracts import UNTRUSTED_BOUNDARY_NOTICE, ContentAddressedDecisionCache, DecisionContractError, LogprobAlignmentError, SchemaContractViolationError, UpstreamTransientError, _sanitize_value, compute_decision_cache_key, wrap_untrusted_state
 from .shortlist import shortlist_wide_question, split_identifier_tokens
@@ -3537,6 +3537,8 @@ class CascadeDecisionOrchestrator:
         conformal_randomized: bool = False,
         conformal_seed: int | None = None,
         conformal_rng: random.Random | None = None,
+        domain_competence: DomainCompetenceProfile | None = None,
+        use_dawid_skene_poe_weights: bool = False,
     ) -> None:
         if stage1_backend is None or not callable(getattr(stage1_backend, "score_questions", None)):
             raise SchemaContractViolationError(
@@ -3555,11 +3557,20 @@ class CascadeDecisionOrchestrator:
             ("total_contract_mode", total_contract_mode),
             ("escalate_on_conformal_ambiguous", escalate_on_conformal_ambiguous),
             ("conformal_randomized", conformal_randomized),
+            ("use_dawid_skene_poe_weights", use_dawid_skene_poe_weights),
         ):
             if not isinstance(flag_val, bool):
                 raise SchemaContractViolationError(
                     f"{flag_name} must be bool, got {flag_val!r}"
                 )
+        if domain_competence is not None and not isinstance(domain_competence, DomainCompetenceProfile):
+            raise SchemaContractViolationError(
+                f"domain_competence must be a DomainCompetenceProfile or None, got {domain_competence!r}"
+            )
+        if use_dawid_skene_poe_weights and domain_competence is None:
+            raise SchemaContractViolationError(
+                "use_dawid_skene_poe_weights=True requires domain_competence to be set"
+            )
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
         self.hesitation_threshold = _require_nonneg_finite_number(
@@ -3605,6 +3616,8 @@ class CascadeDecisionOrchestrator:
             else None
         )
         self.conformal_rng = conformal_rng
+        self.domain_competence = domain_competence
+        self.use_dawid_skene_poe_weights = use_dawid_skene_poe_weights
         self.layer5_slot_context: dict[str, dict[str, Any]] | Any = (
             {
                 str(qid): (dict(ctx) if isinstance(ctx, Mapping) else ctx)
@@ -3938,6 +3951,20 @@ class CascadeDecisionOrchestrator:
                 )
             if self.conformal_seed is not None:
                 _require_strict_int(self.conformal_seed, "conformal_seed")
+            if not isinstance(self.use_dawid_skene_poe_weights, bool):
+                raise SchemaContractViolationError(
+                    f"use_dawid_skene_poe_weights must be bool, got {self.use_dawid_skene_poe_weights!r}"
+                )
+            if self.domain_competence is not None and not isinstance(
+                self.domain_competence, DomainCompetenceProfile
+            ):
+                raise SchemaContractViolationError(
+                    f"domain_competence must be a DomainCompetenceProfile or None, got {self.domain_competence!r}"
+                )
+            if self.use_dawid_skene_poe_weights and self.domain_competence is None:
+                raise SchemaContractViolationError(
+                    "use_dawid_skene_poe_weights=True requires domain_competence to be set"
+                )
 
             s1_name = getattr(self.stage1_backend, "name", None)
             if not isinstance(s1_name, str) or not s1_name.strip():
@@ -3996,6 +4023,18 @@ class CascadeDecisionOrchestrator:
                 extra_cfg["rank1_id"] = rank1_id
             if clean_r1_sim is not None:
                 extra_cfg["rank1_visual_similarity"] = clean_r1_sim
+            if self.domain_competence is not None:
+                extra_cfg["domain_competence"] = {
+                    "stage1_accuracy": self.domain_competence.stage1_accuracy,
+                    "stage2_accuracy": self.domain_competence.stage2_accuracy,
+                    "num_options": self.domain_competence.num_options,
+                    "paired_escalation_delta": self.domain_competence.paired_escalation_delta,
+                    "sample_count": self.domain_competence.sample_count,
+                    "stage1_brier": self.domain_competence.stage1_brier,
+                    "stage2_brier": self.domain_competence.stage2_brier,
+                }
+            if self.use_dawid_skene_poe_weights:
+                extra_cfg["use_dawid_skene_poe_weights"] = True
 
             if clean_q_hat is not None:
                 if not isinstance(self.conformal_method, str) or self.conformal_method not in (
@@ -4343,7 +4382,12 @@ class CascadeDecisionOrchestrator:
 
         # 5. Optional Stage-2 Frontier Escalation on Hesitant, Conformal-Ambiguous, or Inferred-Evidence Slots
         did_escalate = False
-        if escalated_qids and self.stage2_backend is not None:
+        competence_blocked = (
+            self.domain_competence is not None and self.domain_competence.is_negative_transfer()
+        )
+        if escalated_qids and self.stage2_backend is not None and competence_blocked:
+            escalation_reasons.append("domain_competence:negative_transfer_short_circuit")
+        elif escalated_qids and self.stage2_backend is not None:
             if (time.perf_counter() - t0) >= self.sla_timeout_sec:
                 raise UpstreamTransientError(
                     f"SLA budget ({self.sla_timeout_sec:.1f}s) exhausted prior to Stage-2 escalation"
@@ -4360,7 +4404,38 @@ class CascadeDecisionOrchestrator:
             s2_evidence: Mapping[str, str] = getattr(self.stage2_backend, "last_evidence", {}) or {}
             s2_epistemic: Mapping[str, float] = getattr(self.stage2_backend, "last_epistemic_variance", {}) or {}
             for qid in escalated_qids:
-                s2_dist = _validate_slot_distribution(stage2_dists.get(qid), f"Stage-2 slot {qid!r}")
+                raw_s2_dist = _validate_slot_distribution(stage2_dists.get(qid), f"Stage-2 slot {qid!r}")
+                if self.use_dawid_skene_poe_weights and self.domain_competence is not None:
+                    slot_num_options = max(
+                        self.domain_competence.num_options,
+                        len(questions[qid].option_keys()) if qid in questions else 2,
+                    )
+                    ds_w1, ds_w2 = compute_dawid_skene_poe_weights(
+                        stage1_accuracy=self.domain_competence.stage1_accuracy,
+                        stage2_accuracy=self.domain_competence.stage2_accuracy,
+                        num_options=slot_num_options,
+                    )
+                    ds_total = ds_w1 + ds_w2
+                    convex_w1 = ds_w1 / ds_total
+                    convex_w2 = ds_w2 / ds_total
+                    s1_probs_for_slot = slots_out[qid].probabilities
+                    eps_poe = 1e-12
+                    fused_s2_logits = {
+                        opt_key: (
+                            convex_w1 * math.log(max(eps_poe, float(s1_probs_for_slot.get(opt_key, eps_poe))))
+                            + convex_w2 * math.log(max(eps_poe, float(s2_prob)))
+                        )
+                        for opt_key, s2_prob in raw_s2_dist.items()
+                    }
+                    max_s2_logit = max(fused_s2_logits.values())
+                    s2_exps = {
+                        opt_key: math.exp(val - max_s2_logit)
+                        for opt_key, val in fused_s2_logits.items()
+                    }
+                    s2_denom = sum(s2_exps.values())
+                    s2_dist = {opt_key: val / s2_denom for opt_key, val in s2_exps.items()}
+                else:
+                    s2_dist = raw_s2_dist
                 s2_h = normalized_entropy(s2_dist)
                 s2_pred = max(s2_dist.items(), key=lambda kv: kv[1])[0]
                 s2_guard_name = "none"
@@ -4404,7 +4479,7 @@ class CascadeDecisionOrchestrator:
                     slot_id=qid,
                     predicted=s2_pred,
                     probabilities=s2_dist,
-                    raw_probabilities=s2_dist,
+                    raw_probabilities=raw_s2_dist,
                     h_raw=s2_h,
                     confidence=1.0 - s2_h,
                     escalated=True,
