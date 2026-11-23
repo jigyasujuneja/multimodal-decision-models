@@ -33,7 +33,7 @@ import math
 import random
 import struct
 import threading
-from typing import Collection, Mapping, Sequence
+from typing import Callable, Collection, Mapping, Sequence
 
 DEFAULT_CONFORMAL_SEED_KEY: str = "dgem-conformal-v1"
 
@@ -1302,5 +1302,732 @@ def evaluate_two_stage_cascade_risk_bound(
         strictly_improves_over_stage1=strictly_improves,
         hybrid_conformal_miscoverage_ub=hybrid_ub,
     )
+
+
+_VALID_CRC_LOSS_MODES: frozenset[str] = frozenset(
+    {
+        "omniscience_abstention",
+        "asymmetric_false_allow",
+    }
+)
+
+
+@dataclass(frozen=True)
+class OmniscienceActionDecision:
+    """Exact Bayes-optimal selective abstention decision for Omniscience scoring."""
+
+    selected_option: str | None
+    action: str
+    abstained: bool
+    max_probability: float
+    optimal_threshold: float
+    expected_commit_score: float
+    expected_optimal_score: float
+
+
+@dataclass(frozen=True)
+class ConformalRiskCalibrationResult:
+    """Calibrated Angelopoulos et al. (2024) Conformal Risk Control (CRC) result."""
+
+    lambda_hat: float
+    alpha: float
+    loss_bound_b: float
+    n_calib: int
+    empirical_calib_risk: float
+    crc_upper_bound: float
+    calib_abstention_rate: float
+    satisfied_bound: bool
+    loss_mode: str = "omniscience_abstention"
+    allow_key: str = "safe"
+
+
+@dataclass(frozen=True)
+class ConformalRiskDecisionResult:
+    """Test-time selective or safety gate decision under Conformal Risk Control."""
+
+    selected_option: str | None
+    action: str
+    abstained: bool
+    should_escalate: bool
+    decision_confidence: float
+    lambda_hat: float
+    loss_mode: str
+
+
+@dataclass(frozen=True)
+class BayesValueOfInformationResult:
+    """Closed-form Bayesian Value-of-Information (VoI) cascade stopping result."""
+
+    should_escalate: bool
+    expected_net_voi: float
+    risk_stage1: float
+    risk_stage2: float
+    total_stage2_cost: float
+    stage2_rpc_cost_usd: float
+    latency_cost_usd: float
+    stage1_best_action: str
+    stage1_max_prob: float
+    expected_stage2_accuracy: float
+
+
+def _validate_strict_probs(
+    probs: Mapping[str, float],
+) -> tuple[list[str], dict[str, float]]:
+    """Validate string-keyed non-negative finite probability mapping and rank keys."""
+    if not isinstance(probs, Mapping) or not probs:
+        raise ValueError("probability mapping must be non-empty")
+    for raw_key in probs:
+        if not isinstance(raw_key, str) or not raw_key:
+            raise ValueError(f"option keys must be non-empty strings, got {raw_key!r}")
+    ranked_keys, norm_probs, _ = _normalize_and_rank_probs(probs)
+    return ranked_keys, norm_probs
+
+
+def _validate_unit_threshold(value: float, param_name: str) -> float:
+    """Validate finite scalar threshold in [0, 1]."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise ValueError(f"{param_name} must be a finite non-boolean number, got {value!r}")
+    float_val = float(value)
+    if float_val < 0.0 or float_val > 1.0:
+        raise ValueError(f"{param_name} must lie in [0, 1], got {value!r}")
+    return float_val
+
+
+def _validate_positive_bound(value: float, param_name: str) -> float:
+    """Validate finite strictly positive scalar (> 0)."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise ValueError(f"{param_name} must be finite and > 0, got {value!r}")
+    return float(value)
+
+
+def _validate_non_negative_scalar(value: float, param_name: str) -> float:
+    """Validate finite non-negative scalar (>= 0)."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+    ):
+        raise ValueError(f"{param_name} must be finite and >= 0, got {value!r}")
+    return float(value)
+
+
+def select_omniscience_action(
+    probs: Mapping[str, float],
+    penalty_wrong: float = 1.0,
+    reward_correct: float = 1.0,
+    *,
+    abstain_action: str = "abstain",
+) -> OmniscienceActionDecision:
+    """Select the Bayes-optimal commit-or-abstain action under Omniscience scoring.
+
+    Maximizes expected reward `p_max * reward_correct - (1 - p_max) * penalty_wrong`
+    against `0.0` for abstention, abstaining iff
+    `max_k p(k) < penalty_wrong / (reward_correct + penalty_wrong)` (`0.50` for
+    symmetric `+1 / 0 / -1` AA-Omniscience scoring).
+
+    Args:
+      probs: Non-empty mapping of option keys to calibrated probabilities.
+      penalty_wrong: Non-negative penalty magnitude incurred on an incorrect commit.
+      reward_correct: Positive reward earned on a correct commit.
+      abstain_action: Action token returned when abstaining.
+
+    Returns:
+      OmniscienceActionDecision containing the optimal action and expected score.
+
+    Raises:
+      ValueError: If `probs` is invalid or reward/penalty weights are invalid.
+    """
+    ranked_keys, norm_probs = _validate_strict_probs(probs)
+    penalty_float = _validate_non_negative_scalar(penalty_wrong, "penalty_wrong")
+    reward_float = _validate_positive_bound(reward_correct, "reward_correct")
+    if not isinstance(abstain_action, str) or not abstain_action:
+        raise ValueError("abstain_action must be a non-empty string")
+
+    top_option = ranked_keys[0]
+    max_prob = norm_probs[top_option]
+    optimal_threshold = penalty_float / (reward_float + penalty_float)
+    expected_commit = (max_prob * reward_float) - ((1.0 - max_prob) * penalty_float)
+    abstained = max_prob < optimal_threshold
+    return OmniscienceActionDecision(
+        selected_option=None if abstained else top_option,
+        action=abstain_action if abstained else top_option,
+        abstained=abstained,
+        max_probability=max_prob,
+        optimal_threshold=optimal_threshold,
+        expected_commit_score=expected_commit,
+        expected_optimal_score=0.0 if abstained else expected_commit,
+    )
+
+
+def omniscience_abstention_loss(
+    probs: Mapping[str, float],
+    gold_label: str,
+    threshold_lambda: float,
+    *,
+    hallucination_penalty: float = 1.0,
+) -> float:
+    """Compute monotone non-increasing selective hallucination loss in `[0, B]`.
+
+    Abstains (loss `0.0`) when `max_k p(k) < threshold_lambda` or at full-abstention
+    boundary `threshold_lambda == 1.0`. Commits to `argmax_k p(k)` otherwise, incurring
+    `0.0` when `argmax_k p(k) == gold_label` and `hallucination_penalty` (`B`) when wrong.
+
+    Args:
+      probs: Non-empty mapping of option keys to model probabilities.
+      gold_label: Ground-truth option key present in `probs`.
+      threshold_lambda: Confidence threshold `lambda` in `[0, 1]`.
+      hallucination_penalty: Upper loss bound `B > 0` for an incorrect committed answer.
+
+    Returns:
+      Bounded monotone non-increasing loss value in `[0, hallucination_penalty]`.
+
+    Raises:
+      ValueError: If `probs`, `gold_label`, `threshold_lambda`, or penalty are invalid.
+    """
+    ranked_keys, norm_probs = _validate_strict_probs(probs)
+    if not isinstance(gold_label, str) or gold_label not in norm_probs:
+        raise ValueError(f"gold_label {gold_label!r} not present in option probabilities")
+    lam_float = _validate_unit_threshold(threshold_lambda, "threshold_lambda")
+    penalty_b = _validate_positive_bound(hallucination_penalty, "hallucination_penalty")
+
+    top_option = ranked_keys[0]
+    max_prob = norm_probs[top_option]
+    if lam_float >= 1.0 or max_prob < lam_float:
+        return 0.0
+    return 0.0 if top_option == gold_label else penalty_b
+
+
+def asymmetric_false_allow_loss(
+    probs: Mapping[str, float],
+    gold_label: str,
+    threshold_lambda: float,
+    *,
+    false_allow_cost: float = 1.0,
+    allow_key: str = "safe",
+) -> float:
+    """Compute monotone non-increasing safety false-allow loss in `[0, B]`.
+
+    Abstains/escalates (loss `0.0`) when `p(allow_key) < threshold_lambda` or at
+    `threshold_lambda == 1.0`. Auto-allows otherwise, incurring `0.0` when
+    `gold_label == allow_key` and `false_allow_cost` (`B`) on an unsafe false-allow.
+
+    Args:
+      probs: Non-empty mapping of safety/disposition keys to model probabilities.
+      gold_label: Ground-truth disposition key present in `probs`.
+      threshold_lambda: Minimum `p(allow_key)` threshold `lambda` in `[0, 1]`.
+      false_allow_cost: Loss `B > 0` incurred when allowing an unsafe example.
+      allow_key: Option key corresponding to safe/benign allow disposition.
+
+    Returns:
+      Bounded monotone non-increasing safety loss in `[0, false_allow_cost]`.
+
+    Raises:
+      ValueError: If `probs`, `allow_key`, `gold_label`, `threshold_lambda`, or cost are invalid.
+    """
+    _, norm_probs = _validate_strict_probs(probs)
+    if not isinstance(allow_key, str) or allow_key not in norm_probs:
+        raise ValueError(f"allow_key {allow_key!r} not present in option probabilities")
+    if not isinstance(gold_label, str) or gold_label not in norm_probs:
+        raise ValueError(f"gold_label {gold_label!r} not present in option probabilities")
+    lam_float = _validate_unit_threshold(threshold_lambda, "threshold_lambda")
+    cost_b = _validate_positive_bound(false_allow_cost, "false_allow_cost")
+
+    allow_prob = norm_probs[allow_key]
+    if lam_float >= 1.0 or allow_prob < lam_float:
+        return 0.0
+    return 0.0 if gold_label == allow_key else cost_b
+
+
+def calibrate_conformal_risk_control(
+    calib_probs: Sequence[Mapping[str, float]],
+    calib_labels: Sequence[str],
+    alpha: float = 0.10,
+    *,
+    loss_bound_b: float = 1.0,
+    loss_fn: Callable[[Mapping[str, float], str, float], float] | None = None,
+    loss_mode: str = "omniscience_abstention",
+    allow_key: str = "safe",
+    lambda_grid: Sequence[float] | None = None,
+    num_grid_points: int = 1001,
+) -> ConformalRiskCalibrationResult:
+    """Calibrate Angelopoulos et al. (2024) Conformal Risk Control (CRC).
+
+    Selects the smallest threshold `lambda_hat` in `Lambda subseteq [0, 1]` satisfying:
+        `(n / (n + 1)) * R_hat_n(lambda) + B / (n + 1) <= alpha`
+    for bounded monotone non-increasing losses `L_i(lambda) in [0, B]`, guaranteeing
+    `E[L_{n+1}(lambda_hat)] <= alpha` under exchangeability. Fails closed to full
+    abstention (`lambda_hat = 1.0`, `satisfied_bound = False`) whenever
+    `B / (n + 1) > alpha` or no grid threshold satisfies the risk bound.
+
+    Args:
+      calib_probs: Non-empty sequence of calibration probability mappings.
+      calib_labels: Ground-truth calibration labels matching `calib_probs` length.
+      alpha: Target maximum expected risk `> 0`.
+      loss_bound_b: Upper bound `B > 0` on per-example loss `L_i(lambda)`.
+      loss_fn: Optional custom monotone non-increasing callable `(probs, label, lam) -> loss`.
+      loss_mode: Built-in loss selector (`"omniscience_abstention"` or `"asymmetric_false_allow"`)
+        used when `loss_fn is None`.
+      allow_key: Safe disposition key used when `loss_mode == "asymmetric_false_allow"`.
+      lambda_grid: Optional explicit sequence of candidate thresholds in `[0, 1]`.
+      num_grid_points: Uniform grid resolution (`>= 2`) over `[0, 1]` when `lambda_grid is None`.
+
+    Returns:
+      ConformalRiskCalibrationResult with `lambda_hat` and finite-sample CRC diagnostics.
+
+    Raises:
+      ValueError: If inputs are empty, mismatched, out-of-range, or violate monotonicity.
+    """
+    alpha_float = _validate_positive_bound(alpha, "alpha")
+    b_float = _validate_positive_bound(loss_bound_b, "loss_bound_b")
+    if (
+        isinstance(calib_probs, (str, bytes))
+        or isinstance(calib_labels, (str, bytes))
+        or not calib_probs
+        or len(calib_probs) != len(calib_labels)
+    ):
+        raise ValueError("calib_probs and calib_labels must be non-empty sequences of equal length")
+    if not isinstance(allow_key, str) or not allow_key:
+        raise ValueError("allow_key must be a non-empty string")
+
+    if lambda_grid is not None:
+        if isinstance(lambda_grid, (str, bytes)) or not lambda_grid:
+            raise ValueError("lambda_grid must be non-empty when provided")
+        sorted_grid = sorted(
+            {_validate_unit_threshold(cand_lam, "lambda_grid") for cand_lam in lambda_grid}
+        )
+    else:
+        if isinstance(num_grid_points, bool) or not isinstance(num_grid_points, int) or num_grid_points < 2:
+            raise ValueError(f"num_grid_points must be an integer >= 2, got {num_grid_points!r}")
+        grid_denom = float(num_grid_points - 1)
+        sorted_grid = [float(step_idx) / grid_denom for step_idx in range(num_grid_points)]
+
+    n_calib = len(calib_probs)
+
+    if loss_fn is not None:
+        if not callable(loss_fn):
+            raise ValueError("loss_fn must be callable when provided")
+        effective_mode = "custom"
+        normalized_rows: list[tuple[dict[str, float], str, float]] = []
+        for idx, (dist, raw_gold) in enumerate(zip(calib_probs, calib_labels)):
+            ranked_keys, norm_probs = _validate_strict_probs(dist)
+            if not isinstance(raw_gold, str) or raw_gold not in norm_probs:
+                raise ValueError(
+                    f"calibration label {raw_gold!r} at index {idx} not present in option probabilities"
+                )
+            normalized_rows.append((norm_probs, raw_gold, norm_probs[ranked_keys[0]]))
+
+        grid_losses: list[float] = [0.0] * len(sorted_grid)
+        grid_abstains: list[float] = [0.0] * len(sorted_grid)
+        for item_idx, (norm_probs, gold_str, max_prob) in enumerate(normalized_rows):
+            prev_loss = float("inf")
+            for g_idx, lam_val in enumerate(sorted_grid):
+                raw_loss = loss_fn(norm_probs, gold_str, lam_val)
+                if (
+                    isinstance(raw_loss, bool)
+                    or not isinstance(raw_loss, (int, float))
+                    or not math.isfinite(float(raw_loss))
+                ):
+                    raise ValueError(
+                        f"loss_fn returned non-finite value {raw_loss!r} at item {item_idx}, lambda={lam_val}"
+                    )
+                loss_val = float(raw_loss)
+                if loss_val < -1e-12 or loss_val > b_float + 1e-12:
+                    raise ValueError(
+                        f"loss_fn value {loss_val} outside [0, {b_float}] at item {item_idx}, lambda={lam_val}"
+                    )
+                if loss_val > prev_loss + 1e-12:
+                    raise ValueError(
+                        f"loss_fn is not monotone non-increasing at item {item_idx}: "
+                        f"L({lam_val})={loss_val} > previous {prev_loss}"
+                    )
+                clamped_loss = min(b_float, max(0.0, loss_val))
+                prev_loss = clamped_loss
+                grid_losses[g_idx] += clamped_loss
+                if lam_val >= 1.0 or max_prob < lam_val:
+                    grid_abstains[g_idx] += 1.0
+
+        if b_float / float(n_calib + 1) > alpha_float:
+            fallback_emp_risk = 0.0
+            if sorted_grid[-1] >= 1.0:
+                fallback_emp_risk = grid_losses[-1] / float(n_calib)
+            else:
+                loss_at_one = sum(
+                    min(b_float, max(0.0, float(loss_fn(np_map, g_lbl, 1.0))))
+                    for np_map, g_lbl, _ in normalized_rows
+                )
+                fallback_emp_risk = loss_at_one / float(n_calib)
+            fallback_crc = (float(n_calib) * fallback_emp_risk + b_float) / float(n_calib + 1)
+            return ConformalRiskCalibrationResult(
+                lambda_hat=1.0,
+                alpha=alpha_float,
+                loss_bound_b=b_float,
+                n_calib=n_calib,
+                empirical_calib_risk=fallback_emp_risk,
+                crc_upper_bound=fallback_crc,
+                calib_abstention_rate=1.0,
+                satisfied_bound=False,
+                loss_mode=effective_mode,
+                allow_key=allow_key,
+            )
+
+        for g_idx, lam_val in enumerate(sorted_grid):
+            emp_risk = grid_losses[g_idx] / float(n_calib)
+            crc_bound = (grid_losses[g_idx] + b_float) / float(n_calib + 1)
+            if crc_bound <= alpha_float + 1e-15:
+                return ConformalRiskCalibrationResult(
+                    lambda_hat=lam_val,
+                    alpha=alpha_float,
+                    loss_bound_b=b_float,
+                    n_calib=n_calib,
+                    empirical_calib_risk=emp_risk,
+                    crc_upper_bound=crc_bound,
+                    calib_abstention_rate=grid_abstains[g_idx] / float(n_calib),
+                    satisfied_bound=True,
+                    loss_mode=effective_mode,
+                    allow_key=allow_key,
+                )
+
+        loss_at_one = sum(
+            min(b_float, max(0.0, float(loss_fn(np_map, g_lbl, 1.0))))
+            for np_map, g_lbl, _ in normalized_rows
+        )
+        emp_at_one = loss_at_one / float(n_calib)
+        crc_at_one = (loss_at_one + b_float) / float(n_calib + 1)
+        return ConformalRiskCalibrationResult(
+            lambda_hat=1.0,
+            alpha=alpha_float,
+            loss_bound_b=b_float,
+            n_calib=n_calib,
+            empirical_calib_risk=emp_at_one,
+            crc_upper_bound=crc_at_one,
+            calib_abstention_rate=1.0,
+            satisfied_bound=False,
+            loss_mode=effective_mode,
+            allow_key=allow_key,
+        )
+
+    if not isinstance(loss_mode, str) or loss_mode.strip().lower() not in _VALID_CRC_LOSS_MODES:
+        raise ValueError(
+            f"unsupported loss_mode {loss_mode!r}; expected one of {sorted(_VALID_CRC_LOSS_MODES)}"
+        )
+    effective_mode = loss_mode.strip().lower()
+
+    confidence_loss_pairs: list[tuple[float, float]] = []
+    for idx, (dist, raw_gold) in enumerate(zip(calib_probs, calib_labels)):
+        ranked_keys, norm_probs = _validate_strict_probs(dist)
+        if not isinstance(raw_gold, str) or raw_gold not in norm_probs:
+            raise ValueError(
+                f"calibration label {raw_gold!r} at index {idx} not present in option probabilities"
+            )
+        if effective_mode == "asymmetric_false_allow":
+            if allow_key not in norm_probs:
+                raise ValueError(
+                    f"allow_key {allow_key!r} missing from calibration probabilities at index {idx}"
+                )
+            decision_conf = norm_probs[allow_key]
+            commit_loss = 0.0 if raw_gold == allow_key else b_float
+        else:
+            top_key = ranked_keys[0]
+            decision_conf = norm_probs[top_key]
+            commit_loss = 0.0 if top_key == raw_gold else b_float
+        confidence_loss_pairs.append((decision_conf, commit_loss))
+
+    if b_float / float(n_calib + 1) > alpha_float:
+        return ConformalRiskCalibrationResult(
+            lambda_hat=1.0,
+            alpha=alpha_float,
+            loss_bound_b=b_float,
+            n_calib=n_calib,
+            empirical_calib_risk=0.0,
+            crc_upper_bound=b_float / float(n_calib + 1),
+            calib_abstention_rate=1.0,
+            satisfied_bound=False,
+            loss_mode=effective_mode,
+            allow_key=allow_key,
+        )
+
+    confidence_loss_pairs.sort(key=lambda pair: pair[0])
+    suffix_losses: list[float] = [0.0] * (n_calib + 1)
+    for rev_idx in range(n_calib - 1, -1, -1):
+        suffix_losses[rev_idx] = suffix_losses[rev_idx + 1] + confidence_loss_pairs[rev_idx][1]
+
+    pointer = 0
+    for lam_val in sorted_grid:
+        if lam_val >= 1.0:
+            total_loss = 0.0
+            abstained_count = n_calib
+        else:
+            while pointer < n_calib and confidence_loss_pairs[pointer][0] < lam_val:
+                pointer += 1
+            total_loss = suffix_losses[pointer]
+            abstained_count = pointer
+
+        emp_risk = total_loss / float(n_calib)
+        crc_bound = (total_loss + b_float) / float(n_calib + 1)
+        if crc_bound <= alpha_float + 1e-15:
+            return ConformalRiskCalibrationResult(
+                lambda_hat=lam_val,
+                alpha=alpha_float,
+                loss_bound_b=b_float,
+                n_calib=n_calib,
+                empirical_calib_risk=emp_risk,
+                crc_upper_bound=crc_bound,
+                calib_abstention_rate=float(abstained_count) / float(n_calib),
+                satisfied_bound=True,
+                loss_mode=effective_mode,
+                allow_key=allow_key,
+            )
+
+    return ConformalRiskCalibrationResult(
+        lambda_hat=1.0,
+        alpha=alpha_float,
+        loss_bound_b=b_float,
+        n_calib=n_calib,
+        empirical_calib_risk=0.0,
+        crc_upper_bound=b_float / float(n_calib + 1),
+        calib_abstention_rate=1.0,
+        satisfied_bound=False,
+        loss_mode=effective_mode,
+        allow_key=allow_key,
+    )
+
+
+def evaluate_conformal_risk_decision(
+    probs: Mapping[str, float],
+    calibration: ConformalRiskCalibrationResult | float,
+    *,
+    loss_mode: str | None = None,
+    allow_key: str | None = None,
+    abstain_action: str = "abstain",
+) -> ConformalRiskDecisionResult:
+    """Evaluate a calibrated Conformal Risk Control threshold on test probabilities.
+
+    Args:
+      probs: Non-empty mapping of option keys to test-time probabilities.
+      calibration: Either a `ConformalRiskCalibrationResult` or scalar `lambda_hat` in `[0, 1]`.
+      loss_mode: Optional mode override (`"omniscience_abstention"`, `"asymmetric_false_allow"`,
+        or `"custom"`).
+      allow_key: Optional safe-disposition key override for `"asymmetric_false_allow"`.
+      abstain_action: Action label returned when abstaining/escalating.
+
+    Returns:
+      ConformalRiskDecisionResult indicating commit vs. abstain/escalate.
+
+    Raises:
+      ValueError: If `probs`, `calibration`, `loss_mode`, or `allow_key` are invalid.
+    """
+    ranked_keys, norm_probs = _validate_strict_probs(probs)
+    if not isinstance(abstain_action, str) or not abstain_action:
+        raise ValueError("abstain_action must be a non-empty string")
+
+    if isinstance(calibration, ConformalRiskCalibrationResult):
+        lam_float = _validate_unit_threshold(calibration.lambda_hat, "calibration.lambda_hat")
+        raw_mode = loss_mode if loss_mode is not None else calibration.loss_mode
+        effective_allow_key = allow_key if allow_key is not None else calibration.allow_key
+    else:
+        lam_float = _validate_unit_threshold(calibration, "calibration")
+        raw_mode = loss_mode if loss_mode is not None else "omniscience_abstention"
+        effective_allow_key = allow_key if allow_key is not None else "safe"
+
+    if not isinstance(raw_mode, str):
+        raise ValueError(f"loss_mode must be a string, got {raw_mode!r}")
+    clean_mode = raw_mode.strip().lower()
+    if clean_mode not in (_VALID_CRC_LOSS_MODES | {"custom"}):
+        raise ValueError(f"unsupported loss_mode {raw_mode!r}")
+
+    if clean_mode == "asymmetric_false_allow":
+        if not isinstance(effective_allow_key, str) or effective_allow_key not in norm_probs:
+            raise ValueError(
+                f"allow_key {effective_allow_key!r} not present in option probabilities"
+            )
+        target_option = effective_allow_key
+        decision_conf = norm_probs[effective_allow_key]
+    else:
+        target_option = ranked_keys[0]
+        decision_conf = norm_probs[target_option]
+
+    abstained = lam_float >= 1.0 or decision_conf < lam_float
+    return ConformalRiskDecisionResult(
+        selected_option=None if abstained else target_option,
+        action=abstain_action if abstained else target_option,
+        abstained=abstained,
+        should_escalate=abstained,
+        decision_confidence=decision_conf,
+        lambda_hat=lam_float,
+        loss_mode=clean_mode,
+    )
+
+
+def compute_bayes_value_of_information(
+    stage1_probs: Mapping[str, float],
+    error_cost: float | Mapping[str, float] | Mapping[str, Mapping[str, float]] = 1.0,
+    expected_stage2_accuracy: float = 0.95,
+    stage2_rpc_cost_usd: float = 0.005,
+    latency_cost_usd: float = 0.0,
+    *,
+    class_error_costs: Mapping[str, float] | None = None,
+    loss_matrix: Mapping[str, Mapping[str, float]] | None = None,
+) -> BayesValueOfInformationResult:
+    """Compute the closed-form Bayesian Value-of-Information (VoI) cascade criterion.
+
+    Compares the Bayes expected error risk of immediate Stage-1 fast-exit (`risk_stage1`)
+    against the expected residual error risk plus RPC and latency costs of Stage-2
+    verifier escalation (`risk_stage2 + stage2_rpc_cost_usd + latency_cost_usd`),
+    escalating iff `expected_net_voi > 0.0`.
+
+    Args:
+      stage1_probs: Calibrated Stage-1 posterior mapping over candidate options.
+      error_cost: Symmetric scalar error cost in USD (`>= 0`), per-class asymmetric
+        misclassification cost mapping `{true_class: cost_usd}`, or full pairwise loss
+        matrix `{true_class: {pred_class: cost_usd}}`.
+      expected_stage2_accuracy: Expected Stage-2 verifier accuracy on the shortlist in `[0, 1]`.
+      stage2_rpc_cost_usd: Incremental Stage-2 RPC token cost in USD (`>= 0`).
+      latency_cost_usd: Incremental Stage-2 SLA/latency penalty in USD (`>= 0`).
+      class_error_costs: Optional keyword alias for per-class asymmetric error costs.
+      loss_matrix: Optional keyword alias for a full pairwise loss matrix.
+
+    Returns:
+      BayesValueOfInformationResult with `expected_net_voi` and `should_escalate`.
+
+    Raises:
+      ValueError: If probabilities, costs, accuracy, or option key sets are invalid.
+    """
+    ranked_keys, norm_probs = _validate_strict_probs(stage1_probs)
+    expected_key_set = set(ranked_keys)
+    acc2_float = _validate_unit_threshold(expected_stage2_accuracy, "expected_stage2_accuracy")
+    rpc_float = _validate_non_negative_scalar(stage2_rpc_cost_usd, "stage2_rpc_cost_usd")
+    latency_float = _validate_non_negative_scalar(latency_cost_usd, "latency_cost_usd")
+
+    active_matrix: Mapping[str, Mapping[str, float]] | None = None
+    active_class_costs: Mapping[str, float] | None = None
+    scalar_error_cost: float | None = None
+
+    if isinstance(error_cost, Mapping):
+        if class_error_costs is not None or loss_matrix is not None:
+            raise ValueError(
+                "cannot specify mapping error_cost alongside class_error_costs or loss_matrix"
+            )
+        if not error_cost:
+            raise ValueError("error_cost mapping must be non-empty")
+        first_value = next(iter(error_cost.values()))
+        if isinstance(first_value, Mapping):
+            active_matrix = error_cost  # type: ignore[assignment]
+        else:
+            active_class_costs = error_cost  # type: ignore[assignment]
+    else:
+        scalar_val = _validate_non_negative_scalar(error_cost, "error_cost")
+        if class_error_costs is not None and loss_matrix is not None:
+            raise ValueError("cannot specify both class_error_costs and loss_matrix")
+        if loss_matrix is not None:
+            active_matrix = loss_matrix
+        elif class_error_costs is not None:
+            active_class_costs = class_error_costs
+        else:
+            scalar_error_cost = scalar_val
+
+    stage1_max_prob = norm_probs[ranked_keys[0]]
+
+    if active_matrix is not None:
+        if not isinstance(active_matrix, Mapping) or set(active_matrix.keys()) != expected_key_set:
+            raise ValueError("loss_matrix outer keys must match stage1_probs option keys")
+        clean_matrix: dict[str, dict[str, float]] = {}
+        for true_key in ranked_keys:
+            row_map = active_matrix[true_key]
+            if not isinstance(row_map, Mapping) or set(row_map.keys()) != expected_key_set:
+                raise ValueError(
+                    f"loss_matrix[{true_key!r}] keys must match stage1_probs option keys"
+                )
+            clean_matrix[true_key] = {
+                pred_key: _validate_non_negative_scalar(
+                    row_map[pred_key], f"loss_matrix[{true_key!r}][{pred_key!r}]"
+                )
+                for pred_key in ranked_keys
+            }
+
+        action_risks = {
+            cand_action: sum(
+                norm_probs[true_key] * clean_matrix[true_key][cand_action]
+                for true_key in ranked_keys
+            )
+            for cand_action in ranked_keys
+        }
+        stage1_best_action = min(
+            ranked_keys,
+            key=lambda act_key: (action_risks[act_key], -norm_probs[act_key], act_key),
+        )
+        risk_stage1 = action_risks[stage1_best_action]
+
+        num_classes = len(ranked_keys)
+        risk_stage2 = 0.0
+        for true_key in ranked_keys:
+            diag_cost = clean_matrix[true_key][true_key]
+            if num_classes > 1:
+                off_diag_mean = sum(
+                    clean_matrix[true_key][pred_key]
+                    for pred_key in ranked_keys
+                    if pred_key != true_key
+                ) / float(num_classes - 1)
+            else:
+                off_diag_mean = diag_cost
+            cond_loss = (acc2_float * diag_cost) + ((1.0 - acc2_float) * off_diag_mean)
+            risk_stage2 += norm_probs[true_key] * cond_loss
+
+    elif active_class_costs is not None:
+        if (
+            not isinstance(active_class_costs, Mapping)
+            or set(active_class_costs.keys()) != expected_key_set
+        ):
+            raise ValueError("class_error_costs keys must match stage1_probs option keys")
+        clean_costs = {
+            key: _validate_non_negative_scalar(active_class_costs[key], f"class_error_costs[{key!r}]")
+            for key in ranked_keys
+        }
+        action_risks = {
+            cand_action: sum(
+                norm_probs[true_key] * clean_costs[true_key]
+                for true_key in ranked_keys
+                if true_key != cand_action
+            )
+            for cand_action in ranked_keys
+        }
+        stage1_best_action = min(
+            ranked_keys,
+            key=lambda act_key: (action_risks[act_key], -norm_probs[act_key], act_key),
+        )
+        risk_stage1 = action_risks[stage1_best_action]
+        weighted_cost = sum(norm_probs[key] * clean_costs[key] for key in ranked_keys)
+        risk_stage2 = (1.0 - acc2_float) * weighted_cost
+
+    else:
+        assert scalar_error_cost is not None
+        stage1_best_action = ranked_keys[0]
+        risk_stage1 = (1.0 - stage1_max_prob) * scalar_error_cost
+        risk_stage2 = (1.0 - acc2_float) * scalar_error_cost
+
+    total_stage2_cost = risk_stage2 + rpc_float + latency_float
+    expected_net_voi = risk_stage1 - total_stage2_cost
+    return BayesValueOfInformationResult(
+        should_escalate=expected_net_voi > 0.0,
+        expected_net_voi=expected_net_voi,
+        risk_stage1=risk_stage1,
+        risk_stage2=risk_stage2,
+        total_stage2_cost=total_stage2_cost,
+        stage2_rpc_cost_usd=rpc_float,
+        latency_cost_usd=latency_float,
+        stage1_best_action=stage1_best_action,
+        stage1_max_prob=stage1_max_prob,
+        expected_stage2_accuracy=acc2_float,
+    )
+
 
 

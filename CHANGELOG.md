@@ -2,6 +2,14 @@
 
 All notable changes to `multimodal-decision-models` are documented in this file.
 
+## [1.2.0] - 2026-11-13
+
+### Added
+- **Null-Prior Debiasing (`PriDe`) and Unlabeled `SLD` Label-Shift Adaptation (`calibration.py`)**: `debias_null_prior_probabilities` divides out empty-context label-surface priors $p_k^{\text{debiased}} \propto p_k / (p_k^{\text{null}})^\gamma$ before calibration, and `adapt_sld_label_shift_posteriors` implements Saerens-Latinne-Decaestecker (`SLD`) unlabeled EM test-time prior shift adaptation without target labels.
+- **Finite-Sample Conformal Risk Control (`CRC`), Closed-Form Bayesian Value of Information (`VoI`), and Bayes-Optimal Epistemic Abstention (`conformal.py`)**: `calibrate_conformal_risk_control` and `evaluate_conformal_risk_decision` calibrate monotone bounded risk $\hat{\lambda} = \inf\{\lambda : \frac{n}{n+1}\hat{R}_n(\lambda) + \frac{B}{n+1} \le \alpha\}$ guaranteeing $\mathbb{E}[L_{n+1}(\hat{\lambda})] \le \alpha$; `compute_bayes_value_of_information` replaces heuristic entropy cutoffs with exact marginal cost-risk escalation $\text{VoI}(x) > c_{\text{S2}}$; and `select_omniscience_action` + `omniscience_abstention_loss` enforce exact Bayes-optimal $[-C, 0, +R]$ epistemic abstention at $p^* = C / (R + C)$ (`0.50` for symmetric $\pm 1$ scoring).
+- **Held-Out Competence Circuit Breaker and Multi-Class Dawid-Skene `PoE` Weights (`calibration.py`, `tests/test_v130_competence_and_fleet_router.py`)**: `DomainCompetenceProfile.is_negative_transfer` blocks Stage-2 escalation on domains where held-out escalation degrades Stage-1 accuracy (`+5.00 pp` and `-99.1%` cost on typed schema evaluation with `0.00 pp` loss across 11 suites), and `compute_dawid_skene_poe_weights` weights multi-class log-odds relative to `1/K` chance accuracy.
+- **17-Model Public Calibration, `CRC` Selective Abstention, and `Bayes VoI` Benchmark (`tests/test_v120_research_primitives.py`, `benchmarks/results/v12_research_science_report.md`)**: Evaluated across `17` open and commercial decision models (`N = 500` `DecisionBench`, `N = 50` multi-task calibration, and `N = 360` `XSTest` safety guardrails), verifying risk bounds across $\alpha \in \{0.02, 0.05, 0.10, 0.15\}$ (`90.0%` to `91.3%` committed selective accuracy on `DecisionBench` and `98.5%` safe-homonym auto-allow at `1.67%` realized false-allow risk on `XSTest`).
+
 ## [1.1.0] - 2026-11-12
 
 ### Added

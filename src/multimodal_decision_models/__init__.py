@@ -18,8 +18,8 @@ from .adapters import ADKToolGuardDecision, ActionStakesPolicy, create_adk_befor
 from .audio_video_decision import AV_REGIME_LABELS, TURN_TAKING_ACTIONS, AudioVisualAgreementResult, CompiledSpatioTemporalSheet, ConformalMartingaleStepResult, ConformalMartingaleTracker, SpatioTemporalFrameCandidate, SpatioTemporalSelectionResult, StreamingEarlyExitResult, TurnTakingDecisionResult, VoiceActivityProjectionConfig, WavAcousticSummary, WavAcousticWindowFeatures, compile_spatiotemporal_contact_sheet, compute_vap_prosodic_prior_logits, evaluate_audiovisual_event_agreement, evaluate_duplex_turn_taking_decision, evaluate_streaming_early_exit, extract_wav_acoustic_features, fence_untrusted_audio_transcript, jensen_shannon_divergence_bits, score_audiovisual_triangle_consistency, select_submodular_spatiotemporal_frames, write_pcm16_wav_bytes
 from .backends import GA_VERTEX_GEMINI_MODEL_PRESETS, GA_VERTEX_GEMINI_MODELS, OPENAI_MAX_TOP_LOGPROBS, BlackBoxSampledBackend, CascadeDecisionOrchestrator, DecisionBackend, DgemSystemOneBackend, GeminiDecisionsBackend, GevStudioSystemOneBackend, MockCallableBackend, OpenAILogprobBackend, VertexGeminiBackend, build_extended_255_code_bijection, is_raw_predict_endpoint, parse_url_origin
 from .bandit_router import BanditRoutingDecision, BanditStreamSummary, ModelArmSpec, PrimalDualParetoBanditRouter, evaluate_pareto_bandit_stream
-from .calibration import DEFAULT_EVIDENCE_CRITERIA, VALID_PRIOR_GATE_MODES, LTTFunnelCalibrationResult, LTTGateConfig, ReasoningToReadoutDistillationResult, SaerensEMPriorResult, SelectiveBrierSFTResult, TemperatureScalingModel, TrajectoryDelegationCalibrationResult, TriggerGuardUtilityResult, VectorScalingModel, apply_layer5_deterministic_guards, calibrate_ltt_funnel_gates, debiased_cyclic_permutation_probs, effective_top_m_entropy, estimate_saerens_em_prior_logits, evaluate_trigger_guard_utility, fit_temperature_scaling, fit_trajectory_delegation_threshold, fit_vector_scaling, inject_evidence_slot, normalized_entropy, pre_gated_bayesian_poe_fusion, reasoning_to_readout_distillation_loss, selective_teacher_brier_sft_loss, stage2a_fast_exit_gate
-from .conformal import DEFAULT_CONFORMAL_ABSTAIN_KEYS, DEFAULT_CONFORMAL_SEED_KEY, STANDARD_CONFORMAL_ABSTAIN_KEYS, ConformalCalibrationResult, ConformalSetResult, MondrianCalibrationResult, MultiSlotJointConformalResult, OnlineBCACIResult, OnlineBCACITracker, TwoStageCascadeRiskBound, calibrate_conformal_quantile, calibrate_mondrian_conformal_quantiles, calibrate_multislot_joint_conformal, conformal_prediction_set, evaluate_online_bc_aci_stream, evaluate_two_stage_cascade_risk_bound, hmac_uint64, hmac_uniform_float64, label_shift_weighted_conformal_prediction_set, mondrian_conformal_prediction_set, multislot_joint_conformal_sets, nonconformity_score, weighted_conformal_prediction_set
+from .calibration import DEFAULT_EVIDENCE_CRITERIA, VALID_PRIOR_GATE_MODES, DomainCompetenceProfile, LTTFunnelCalibrationResult, LTTGateConfig, ReasoningToReadoutDistillationResult, SaerensEMPriorResult, SelectiveBrierSFTResult, TemperatureScalingModel, TrajectoryDelegationCalibrationResult, TriggerGuardUtilityResult, VectorScalingModel, adapt_sld_label_shift_posteriors, apply_layer5_deterministic_guards, calibrate_ltt_funnel_gates, compute_dawid_skene_poe_weights, debias_null_prior_probabilities, debiased_cyclic_permutation_probs, effective_top_m_entropy, estimate_saerens_em_prior_logits, evaluate_trigger_guard_utility, fit_temperature_scaling, fit_trajectory_delegation_threshold, fit_vector_scaling, inject_evidence_slot, normalized_entropy, pre_gated_bayesian_poe_fusion, reasoning_to_readout_distillation_loss, selective_teacher_brier_sft_loss, stage2a_fast_exit_gate
+from .conformal import DEFAULT_CONFORMAL_ABSTAIN_KEYS, DEFAULT_CONFORMAL_SEED_KEY, STANDARD_CONFORMAL_ABSTAIN_KEYS, BayesValueOfInformationResult, ConformalCalibrationResult, ConformalRiskCalibrationResult, ConformalRiskDecisionResult, ConformalSetResult, MondrianCalibrationResult, MultiSlotJointConformalResult, OmniscienceActionDecision, OnlineBCACIResult, OnlineBCACITracker, TwoStageCascadeRiskBound, asymmetric_false_allow_loss, calibrate_conformal_quantile, calibrate_conformal_risk_control, calibrate_mondrian_conformal_quantiles, calibrate_multislot_joint_conformal, compute_bayes_value_of_information, conformal_prediction_set, evaluate_conformal_risk_decision, evaluate_online_bc_aci_stream, evaluate_two_stage_cascade_risk_bound, hmac_uint64, hmac_uniform_float64, label_shift_weighted_conformal_prediction_set, mondrian_conformal_prediction_set, multislot_joint_conformal_sets, nonconformity_score, omniscience_abstention_loss, select_omniscience_action, weighted_conformal_prediction_set
 from .consistency import BlindFirstConsensusResult, CorrelatedEnsembleCalibrationResult, CutPolytopeTriangleCertificate, TransitiveProjectionResult, arbitrate_swarm_locks, calibrate_correlated_ensemble_weights, check_transitive_triangles, compute_solo_commitment_digest, covariance_discounted_logit_pool, cut_polytope_triangle_consistency_score, evaluate_blind_first_consensus, parse_pack_multiplier, parse_unit_measure, probabilistic_triangle_contradiction, project_triangles_to_transitive_consistency, score_mechanism_shift_jsd, score_probabilistic_triangles, validate_pack_quantity_consistency
 from .context_pruner import ContextBlock, ContextPruneResult, build_context_pruning_questions, prune_agent_context_blocks
 from .contracts import UNTRUSTED_BOUNDARY_NOTICE, ContentAddressedDecisionCache, DecisionContractError, InvisibleSmugglingAudit, LogprobAlignmentError, SchemaContractViolationError, UpstreamTransientError, audit_and_normalize_untrusted_text, compute_decision_cache_key, normalize_and_strip_invisible_smuggling, sanitize_untrusted_text, verify_slot_domain_closure, wrap_untrusted_state
@@ -37,7 +37,7 @@ from .trajectory_control import NEVCInterventionDecision, NetExpectedValueContro
 from .types import DEFAULT_HESITATION_THRESHOLD, HARNESS_DECISION_POINTS, INTEGRATION_MODES, MAX_EXTENDED_OPTIONS_PER_SLOT, MAX_OPTIONS_PER_SLOT, MAX_SLOTS_PER_PASS, UNIVERSAL_256_DECISION_CODES, CandidateMark, DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory, PairwiseEdge, ProbabilisticTriangleScore, SlotReadout, SwarmAgentProposal, SwarmLockDecision, TriangleContradiction, UnitMeasure
 from .visual_compiler import CompiledContactSheet, ImageBuffer, VisualEvidenceAuditResult, apply_residual_mlp_adapter, compile_degraded_modality_twin, compile_dual_buffer_contact_sheet, compute_visual_evidence_gain, decode_png, decode_ppm, encode_png, encode_ppm, extract_inter_candidate_saliency_band, inner_crop_cie_lab_similarity, mean_inner_crop_cie_lab, shades_of_gray_white_balance
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "ADKToolGuardDecision",
@@ -46,6 +46,7 @@ __all__ = [
     "AudioVisualAgreementResult",
     "BanditRoutingDecision",
     "BanditStreamSummary",
+    "BayesValueOfInformationResult",
     "BlackBoxSampledBackend",
     "BlindFirstConsensusResult",
     "CanaryUntrustedEnvelope",
@@ -58,6 +59,8 @@ __all__ = [
     "ConformalCalibrationResult",
     "ConformalMartingaleStepResult",
     "ConformalMartingaleTracker",
+    "ConformalRiskCalibrationResult",
+    "ConformalRiskDecisionResult",
     "ConformalSetResult",
     "ConstrainedJointTupleResult",
     "ContentAddressedDecisionCache",
@@ -118,6 +121,7 @@ __all__ = [
     "NonInferiorityTestResult",
     "OOFCalibratedConformalBundle",
     "OPENAI_MAX_TOP_LOGPROBS",
+    "OmniscienceActionDecision",
     "OnlineBCACIResult",
     "OnlineBCACITracker",
     "OpenAILogprobBackend",
@@ -184,6 +188,7 @@ __all__ = [
     "__version__",
     "acceptable_set_accuracy",
     "acurank_trueskill_shortlist",
+    "adapt_sld_label_shift_posteriors",
     "adaptive_calibration_error",
     "apply_layer5_deterministic_guards",
     "apply_residual_mlp_adapter",
@@ -192,6 +197,7 @@ __all__ = [
     "assign_box_to_grid_cell",
     "assign_point_to_grid_4x4",
     "assign_point_to_grid_cell",
+    "asymmetric_false_allow_loss",
     "audit_and_normalize_untrusted_text",
     "audit_calibration_poisoning_influence",
     "binary_auroc",
@@ -213,6 +219,7 @@ __all__ = [
     "build_set_of_marks_questions",
     "build_single_factor_knock_ins",
     "calibrate_conformal_quantile",
+    "calibrate_conformal_risk_control",
     "calibrate_correlated_ensemble_weights",
     "calibrate_ltt_funnel_gates",
     "calibrate_mondrian_conformal_quantiles",
@@ -227,6 +234,7 @@ __all__ = [
     "compile_degraded_modality_twin",
     "compile_dual_buffer_contact_sheet",
     "compile_spatiotemporal_contact_sheet",
+    "compute_bayes_value_of_information",
     "compute_decision_cache_key",
     "compute_episode_content_sha256",
     "compute_exact_shapley_values",
@@ -242,6 +250,7 @@ __all__ = [
     "create_langgraph_decision_node",
     "csls_hubness_scores",
     "cut_polytope_triangle_consistency_score",
+    "debias_null_prior_probabilities",
     "debiased_cyclic_permutation_probs",
     "decode_constrained_joint_tuple",
     "decode_png",
@@ -257,6 +266,7 @@ __all__ = [
     "evaluate_adk_tool_guard",
     "evaluate_audiovisual_event_agreement",
     "evaluate_blind_first_consensus",
+    "evaluate_conformal_risk_decision",
     "evaluate_duplex_turn_taking_decision",
     "evaluate_online_bc_aci_stream",
     "evaluate_pareto_bandit_stream",
@@ -296,6 +306,7 @@ __all__ = [
     "normalize_and_strip_invisible_smuggling",
     "normalize_cosine_prior_logits",
     "normalized_entropy",
+    "omniscience_abstention_loss",
     "option_permutation_stability",
     "packed_bracket_pass_count",
     "paired_mcnemar_test",
@@ -324,6 +335,7 @@ __all__ = [
     "score_prm_rubric_distribution",
     "score_probabilistic_triangles",
     "select_containing_or_nearest_mark",
+    "select_omniscience_action",
     "select_submodular_spatiotemporal_frames",
     "selective_risk_coverage_aurc",
     "selective_teacher_brier_sft_loss",

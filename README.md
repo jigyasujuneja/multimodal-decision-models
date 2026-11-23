@@ -1,6 +1,6 @@
 # Multimodal Decision Models (`multimodal-decision-models`)
 
-Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.1.0`, zero external runtime dependencies across Python, Go, and TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
+Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.2.0`, zero external runtime dependencies across Python, Go, and TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
 
 One declarative policy definition runs across five inference backend surfaces:
 
@@ -33,6 +33,7 @@ Start at the **[Developer Documentation Hub (`docs/index.md`)](docs/index.md)** 
 - **[Architecture and Mathematical Design (`docs/architecture.md`)](docs/architecture.md)** & **[Practical Use-Case Recipes (`docs/practical_use_cases.md`)](docs/practical_use_cases.md)**: Module-by-module equations and runnable multi-domain patterns.
 - **[Five-Rung and $2^4$ Factorial Ablation Report (`benchmarks/results/mdm_factorial_ablation_report.md`)](benchmarks/results/mdm_factorial_ablation_report.md)**: Receipt-Grounded Replay across `1,200` `MDM-EpisodeBench` `Tier-2` episodes (`3,600` locked `D_test` turns), exact Shapley attributions, Yates two-way synergies, and matched-budget Controls `C1..C5`.
 - **[Canonical Policy Templates (`templates/`)](templates/)** & **[Multi-Language SDK Overview (`sdk/README.md`)](sdk/README.md)**: 8 `.json.tmpl` + `.examples.json` policy fixtures and Python/Go/TypeScript parity vectors.
+- **[`v1.2.0` Research Science Benchmark Report (`benchmarks/results/v12_research_science_report.md`)](benchmarks/results/v12_research_science_report.md)**: 17-model evaluation of Null-Prior Debiasing (`PriDe`), unlabeled `SLD` EM label-shift adaptation, Conformal Risk Control (`CRC`), Bayesian Value of Information (`VoI`), and epistemic abstention (`DecisionBench` `N = 500` and `XSTest` `N = 360`).
 - **[10-Model Calibration & Conformal Benchmark Report (`benchmarks/results/multimodel_benchmark_report.md`)](benchmarks/results/multimodel_benchmark_report.md)**: Full 20-arm leaderboard across Multi-Task Calibration ($N = 50$) and XSTest Safety Refusal Boundaries ($N = 360$).
 - **[Changelog (`CHANGELOG.md`)](CHANGELOG.md)**, **[Contributing Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)**, **[Citation Metadata (`CITATION.cff`)](CITATION.cff)**, and **[Apache-2.0 License (`LICENSE`)](LICENSE)**.
 
@@ -293,7 +294,7 @@ If you use `multimodal-decision-models` in your research or engineering systems,
   author       = {Juneja, Jigyasu},
   title        = {Calibrated Multimodal Decision Models at Catalog Scale: Model-Agnostic Readouts, Dual-Buffer Visual Contact Sheets, and Split Conformal Cascades},
   year         = {2026},
-  version      = {1.1.0},
+  version      = {1.2.0},
   url          = {https://github.com/jigyasujuneja/multimodal-decision-models},
   license      = {Apache-2.0}
 }

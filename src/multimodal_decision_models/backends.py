@@ -31,8 +31,10 @@ Supports:
 
 from __future__ import annotations
 
-import copy
+import base64
+import binascii
 import concurrent.futures as cf
+import copy
 import http.client
 import inspect
 import json
@@ -861,23 +863,62 @@ class GevStudioSystemOneBackend:
 
     @staticmethod
     def _infer_mime_and_b64(raw_item: str) -> dict[str, str]:
-        """Parse a data URI or raw base64 string into Gev Studio's {mime_type, data} media block."""
-        s = raw_item.strip()
-        if s.startswith("data:"):
-            semi = s.find(";base64,")
-            if semi > 5:
-                mime = s[5:semi].strip() or "image/png"
-                b64 = s[semi + 8 :].strip()
-                return {"mime_type": mime, "data": b64}
-        if s.startswith("/9j/"):
-            return {"mime_type": "image/jpeg", "data": s}
-        if s.startswith("iVBOR"):
-            return {"mime_type": "image/png", "data": s}
-        if s.startswith("R0lGR"):
-            return {"mime_type": "image/webp", "data": s}
-        if s.startswith("UklGR"):
-            return {"mime_type": "audio/wav", "data": s}
-        return {"mime_type": "image/png", "data": s}
+        """Parse a data URI or raw base64 string into a validated {mime_type, data} media block."""
+        if not isinstance(raw_item, str):
+            raise SchemaContractViolationError(
+                f"image/media item must be a string, got {type(raw_item).__qualname__}"
+            )
+        stripped_item = raw_item.strip()
+        if not stripped_item:
+            raise SchemaContractViolationError("image/media string must not be empty")
+        lowered_item = stripped_item.lower()
+        if lowered_item.startswith(("http://", "https://")):
+            raise SchemaContractViolationError(
+                "remote HTTP(S) image URLs are not supported; pass a data:...;base64,... URI or raw base64"
+            )
+        if lowered_item.startswith("data:"):
+            semi_idx = lowered_item.find(";base64,")
+            if semi_idx < 5:
+                raise SchemaContractViolationError(
+                    "data: image URI must include ';base64,' encoding specifier"
+                )
+            mime_type = stripped_item[5:semi_idx].split(";", 1)[0].strip() or "image/png"
+            b64_payload = "".join(stripped_item[semi_idx + 8 :].split())
+            if not b64_payload:
+                raise SchemaContractViolationError("data: image URI base64 payload must not be empty")
+            try:
+                decoded_bytes = base64.b64decode(b64_payload, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise SchemaContractViolationError(
+                    f"malformed base64 payload in data: URI: {exc}"
+                ) from exc
+            if not decoded_bytes:
+                raise SchemaContractViolationError("decoded base64 image payload must not be empty")
+            return {"mime_type": mime_type, "data": b64_payload}
+        if "://" in stripped_item:
+            raise SchemaContractViolationError(
+                "URI schemes are not supported for inline media; pass a data:...;base64,... URI or raw base64"
+            )
+        compact_b64 = "".join(stripped_item.split())
+        try:
+            decoded_bytes = base64.b64decode(compact_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise SchemaContractViolationError(
+                f"malformed raw base64 image payload: {exc}"
+            ) from exc
+        if not decoded_bytes:
+            raise SchemaContractViolationError("decoded base64 image payload must not be empty")
+        if compact_b64.startswith("/9j/"):
+            return {"mime_type": "image/jpeg", "data": compact_b64}
+        if compact_b64.startswith("iVBOR"):
+            return {"mime_type": "image/png", "data": compact_b64}
+        if compact_b64.startswith("R0lGR"):
+            return {"mime_type": "image/webp", "data": compact_b64}
+        if compact_b64.startswith("UklGR"):
+            return {"mime_type": "audio/wav", "data": compact_b64}
+        if compact_b64.startswith("R0lGOD"):
+            return {"mime_type": "image/gif", "data": compact_b64}
+        return {"mime_type": "image/png", "data": compact_b64}
 
     def build_url(self) -> str:
         """Return the resolved /api/gev/systemone URL with URL-encoded ?target=... query parameter."""
@@ -918,10 +959,11 @@ class GevStudioSystemOneBackend:
                     elif isinstance(m_item, str) and m_item.strip():
                         extracted_media.append(self._infer_mime_and_b64(m_item))
 
-        if images:
-            for img in images:
-                if isinstance(img, str) and img.strip():
-                    extracted_media.append(self._infer_mime_and_b64(img))
+        if images is not None:
+            if isinstance(images, (str, bytes, bytearray)) or not isinstance(images, Sequence):
+                raise SchemaContractViolationError("images must be a sequence of string payloads")
+            for image_item in images:
+                extracted_media.append(self._infer_mime_and_b64(image_item))
 
         if media:
             for m_item in media:
@@ -964,6 +1006,14 @@ class GevStudioSystemOneBackend:
             payload["temperature"] = self.temperature
         if extracted_media:
             payload["media"] = extracted_media
+            if "/v1/systemone" in self.build_url():
+                image_data_uris = [
+                    f"data:{media_block['mime_type']};base64,{media_block['data']}"
+                    for media_block in extracted_media
+                    if str(media_block.get("mime_type", "")).lower().startswith("image/")
+                ]
+                if image_data_uris:
+                    payload["images"] = image_data_uris
         return payload
 
     @staticmethod
@@ -1596,14 +1646,22 @@ class VertexGeminiBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         parts: list[dict[str, Any]] = []
-        for img in images or []:
-            if img.startswith("data:") and ";base64," in img:
-                header, b64_data = img.split(";base64,", 1)
-                mime_type = header[len("data:") :] or "image/png"
-                parts.append({"inlineData": {"mimeType": mime_type, "data": b64_data}})
+        if images is not None:
+            if isinstance(images, (str, bytes, bytearray)) or not isinstance(images, Sequence):
+                raise SchemaContractViolationError("images must be a sequence of string payloads")
+            for image_item in images:
+                inferred_media = GevStudioSystemOneBackend._infer_mime_and_b64(image_item)
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": inferred_media["mime_type"],
+                            "data": inferred_media["data"],
+                        }
+                    }
+                )
         prompt_lines = [
             UNTRUSTED_BOUNDARY_NOTICE,
             "Evaluate the state and answer each question using its assigned uppercase option letter.",
@@ -1803,8 +1861,8 @@ class VertexGeminiBackend:
     ) -> dict[str, dict[str, float]]:
         url = self.endpoint_url()
         _validate_http_url(url)
-        token = self._resolve_access_token()
         payload = self.build_generate_content_payload(state, questions, images)
+        token = self._resolve_access_token()
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
@@ -2105,12 +2163,7 @@ class GeminiDecisionsBackend:
     @staticmethod
     def _encode_inline_image(raw_image: str) -> dict[str, Any]:
         """Convert a data URI or base64 image string into an ``inline_data`` part."""
-        stripped = raw_image.strip()
-        if stripped.startswith("data:") and ";base64," in stripped:
-            header, b64_payload = stripped.split(";base64,", 1)
-            mime_type = header[len("data:") :].strip() or "image/png"
-            return {"inline_data": {"mime_type": mime_type, "data": b64_payload.strip()}}
-        inferred = GevStudioSystemOneBackend._infer_mime_and_b64(stripped)
+        inferred = GevStudioSystemOneBackend._infer_mime_and_b64(raw_image)
         return {"inline_data": {"mime_type": inferred["mime_type"], "data": inferred["data"]}}
 
     def build_decisions_payload(
@@ -2146,8 +2199,7 @@ class GeminiDecisionsBackend:
             for image_item in images:
                 if not isinstance(image_item, str):
                     raise SchemaContractViolationError("each image entry must be a string")
-                if image_item.strip():
-                    parts.append(self._encode_inline_image(image_item))
+                parts.append(self._encode_inline_image(image_item))
 
         prompt_text = f"{UNTRUSTED_BOUNDARY_NOTICE}\nState:\n{wrap_untrusted_state(state)}"
         parts.append({"text": prompt_text})
@@ -4071,7 +4123,7 @@ class CascadeDecisionOrchestrator:
                         if term == DecisionTerminalState.ABSTAIN_OOS
                         else FailureCategory.NONE
                     )
-                    res = DecisionResult(
+                    fast_exit_result = DecisionResult(
                         slots={
                             only_qid: SlotReadout(
                                 slot_id=only_qid,
@@ -4096,8 +4148,10 @@ class CascadeDecisionOrchestrator:
                         cache_key=cache_key,
                     )
                     if can_use_cache and self.response_cache is not None:
-                        self.response_cache.put(cache_key, res)
-                    return res
+                        self.response_cache.put(
+                            cache_key, fast_exit_result, tenant_id=tenant_id
+                        )
+                    return fast_exit_result
 
         # 2. Optional Wide-Option Shortlist for questions exceeding Stage-1 native ceiling
         stage1_ceiling = int(getattr(self.stage1_backend, "max_native_options", MAX_OPTIONS_PER_SLOT))
