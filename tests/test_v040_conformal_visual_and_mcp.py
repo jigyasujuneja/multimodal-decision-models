@@ -1031,6 +1031,8 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
                 "evaluate_conformal_decision",
                 "prune_context_blocks",
                 "compile_contact_sheet",
+                "audit_untrusted_candidates",
+                "evaluate_trajectory_guard",
             ],
         )
 

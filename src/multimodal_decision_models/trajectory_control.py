@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import math
 from typing import Mapping, Sequence
 
-from .conformal import DEFAULT_CONFORMAL_SEED_KEY, calibrate_conformal_quantile, conformal_prediction_set, hmac_uniform_float64
+from .conformal import DEFAULT_CONFORMAL_SEED_KEY, ConformalSetResult, calibrate_conformal_quantile, conformal_prediction_set, hmac_uniform_float64
 from .contracts import SchemaContractViolationError
 from .eval_suite import paired_mcnemar_test
 
@@ -200,6 +200,21 @@ class PolynomialAlphaSpendingTracker:
             )
             self._quantile_cache[step_index] = cal_res.q_hat
         return self._quantile_cache[step_index]
+
+    def prediction_set_for_step(
+        self,
+        step_index: int,
+        probs: Mapping[str, float],
+    ) -> ConformalSetResult:
+        """Compute the step-specific conformal prediction set at 1-based `step_index`."""
+        q_t = self.q_hat_for_step(step_index)
+        return conformal_prediction_set(
+            probs,
+            q_t,
+            method=self.conformal_method,
+            lam_reg=self.lam_reg,
+            k_reg=self.k_reg,
+        )
 
 
 def fit_markov_trajectory_slack(

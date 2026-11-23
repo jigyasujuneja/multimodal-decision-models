@@ -272,6 +272,8 @@ class V100AdaptersAndDynamicMcpTest(unittest.TestCase):
             configured_backends=["dgem_systemone", "vertex_gemini"],
             enable_visual_compiler=False,
             enable_context_pruner=False,
+            enable_security_auditor=False,
+            enable_trajectory_guard=False,
         )
         tool_names = [tool["name"] for tool in minimal_tools]
         self.assertEqual(tool_names, ["shortlist_candidates", "evaluate_conformal_decision"])

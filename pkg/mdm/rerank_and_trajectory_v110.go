@@ -197,17 +197,29 @@ func EvaluateNEVCGate(rawFailProb float64, policy NEVCPolicy) (NEVCDecision, err
 	}, nil
 }
 
+// NormalizeAndStripInvisibleSmuggling strips Unicode Tag/Bidi/zero-width chars and folds fullwidth ASCII homoglyphs.
+func NormalizeAndStripInvisibleSmuggling(rawText string) string {
+	normalized, _ := AuditAndNormalizeUntrustedText(rawText)
+	return normalized
+}
+
 func containsPromptOverrideMarker(rawText string) bool {
-	lowered := strings.ToLower(rawText)
+	audit, err := DetectComparativeUnderminingAttack(map[string]string{"cand": rawText})
+	if err == nil && audit.AnyAttackDetected {
+		return true
+	}
+	lowered := strings.ToLower(NormalizeAndStripInvisibleSmuggling(rawText))
 	markers := []string{
 		"</untrusted_data>",
 		"<untrusted_data>",
+		"</untrusted_",
 		"ignore previous instructions",
 		"ignore all previous instructions",
 		"disregard prior instructions",
 		"system override:",
 		"evaluation rubric override",
 		"select this document with probability",
+		"other candidates are deprecated",
 	}
 	for _, marker := range markers {
 		if strings.Contains(lowered, marker) {

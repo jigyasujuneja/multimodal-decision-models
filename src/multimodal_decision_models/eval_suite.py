@@ -32,6 +32,8 @@ import random
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from .conformal import calibrate_conformal_quantile, conformal_prediction_set, nonconformity_score
+
 
 @dataclass(frozen=True)
 class McNemarResult:
@@ -682,5 +684,887 @@ def acceptable_set_accuracy(
         if str(pred) in {str(x) for x in acc_seq}:
             hits += 1
     return float(hits) / float(n)
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Evaluate Lentz's continued fraction for the incomplete beta function."""
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c_val = 1.0
+    d_val = 1.0 - qab * x / qap
+    if abs(d_val) < 1e-30:
+        d_val = 1e-30
+    d_val = 1.0 / d_val
+    h_val = d_val
+    for step_m in range(1, 201):
+        m2 = 2 * step_m
+        aa_even = (
+            float(step_m) * (b - float(step_m)) * x / ((qam + float(m2)) * (a + float(m2)))
+        )
+        d_val = 1.0 + aa_even * d_val
+        if abs(d_val) < 1e-30:
+            d_val = 1e-30
+        c_val = 1.0 + aa_even / c_val
+        if abs(c_val) < 1e-30:
+            c_val = 1e-30
+        d_val = 1.0 / d_val
+        h_val *= d_val * c_val
+
+        aa_odd = (
+            -(a + float(step_m))
+            * (qab + float(step_m))
+            * x
+            / ((a + float(m2)) * (qap + float(m2)))
+        )
+        d_val = 1.0 + aa_odd * d_val
+        if abs(d_val) < 1e-30:
+            d_val = 1e-30
+        c_val = 1.0 + aa_odd / c_val
+        if abs(c_val) < 1e-30:
+            c_val = 1e-30
+        d_val = 1.0 / d_val
+        delta = d_val * c_val
+        h_val *= delta
+        if abs(delta - 1.0) < 1e-14:
+            break
+    return h_val
+
+
+def _regularized_incomplete_beta(x: float, a: float, b: float) -> float:
+    """Compute regularized incomplete beta function I_x(a, b) in [0, 1]."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    if x > (a + 1.0) / (a + b + 2.0):
+        return 1.0 - _regularized_incomplete_beta(1.0 - x, b, a)
+    log_beta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    log_front = a * math.log(x) + b * math.log(1.0 - x) - math.log(a) - log_beta
+    if log_front < -740.0:
+        return 0.0
+    return min(1.0, max(0.0, math.exp(log_front) * _betacf(a, b, x)))
+
+
+def _student_t_two_sided_p(abs_t: float, df: float) -> float:
+    """Compute exact two-sided Student-t tail probability P(|T_df| >= |t|)."""
+    if not math.isfinite(abs_t) or abs_t < 0.0:
+        return 0.0 if math.isinf(abs_t) else 1.0
+    if abs_t == 0.0:
+        return 1.0
+    eff_df = max(1.0, float(df))
+    x_ratio = eff_df / (eff_df + abs_t * abs_t)
+    return _regularized_incomplete_beta(x_ratio, 0.5 * eff_df, 0.5)
+
+
+def _normal_two_sided_z(alpha: float) -> float:
+    """Compute standard normal two-sided upper critical value z_{1 - alpha/2}."""
+    half_alpha = min(0.499999, max(1e-15, 0.5 * float(alpha)))
+    t_val = math.sqrt(-2.0 * math.log(half_alpha))
+    num = 2.515517 + 0.802853 * t_val + 0.010328 * t_val * t_val
+    den = 1.0 + 1.432788 * t_val + 0.189269 * t_val * t_val + 0.001308 * (t_val**3)
+    return max(1e-6, t_val - (num / den))
+
+
+def _student_t_critical(alpha: float, df: float) -> float:
+    """Invert exact Student-t two-sided tail probability P(|T_df| >= t_crit) == alpha."""
+    target_alpha = min(0.999999, max(1e-15, float(alpha)))
+    eff_df = max(1.0, float(df))
+    lo = 0.0
+    hi = max(2.0, _normal_two_sided_z(target_alpha) * 2.0)
+    while _student_t_two_sided_p(hi, eff_df) > target_alpha and hi < 1e9:
+        lo = hi
+        hi *= 2.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if _student_t_two_sided_p(mid, eff_df) > target_alpha:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+@dataclass(frozen=True)
+class PPIConfidenceInterval:
+    """Power-Tuned Prediction-Powered Inference (PPI++) point estimate and confidence interval."""
+
+    estimate: float
+    ci_low: float
+    ci_high: float
+    standard_error: float
+    gold_only_mean: float
+    gold_only_ci_low: float
+    gold_only_ci_high: float
+    gold_only_se: float
+    naive_autorater_mean: float
+    naive_autorater_ci_low: float
+    naive_autorater_ci_high: float
+    lambda_star: float
+    n_gold: int
+    n_unlabeled: int
+    effective_sample_size_ratio: float
+
+
+@dataclass(frozen=True)
+class PPIPairedWinRateResult:
+    """Debiased PPI++ paired model win-rate difference and hypothesis test."""
+
+    delta_estimate: float
+    ci_low: float
+    ci_high: float
+    standard_error: float
+    z_statistic: float
+    p_two_sided: float
+    lambda_star: float
+    effective_sample_size_ratio: float
+
+
+@dataclass(frozen=True)
+class RoganGladenVsPPIComparison:
+    """Diagnostic selector comparing PPI++ and Rogan-Gladen autorater estimators."""
+
+    ppi_estimate: float
+    ppi_standard_error: float
+    rogan_gladen_estimate: float
+    rogan_gladen_standard_error: float
+    prevalence_shift_abs: float
+    youden_j: float
+    recommended_estimator: str
+    recommendation_reason: str
+
+
+@dataclass(frozen=True)
+class ParaphraseStabilityAudit:
+    """Prompt-paraphrase conformal stability and worst-case coverage envelope audit."""
+
+    num_paraphrases: int
+    n_calib: int
+    n_eval: int
+    single_template_q_hat: float
+    envelope_q_hat: float
+    q_hat_spread: float
+    single_template_worst_coverage: float
+    envelope_worst_coverage: float
+    envelope_mean_set_size: float
+
+
+@dataclass(frozen=True)
+class PositionSwappedJudgeAudit:
+    """Bilateral (A, B) vs (B, A) autorater positional-bias and debiasing audit."""
+
+    n_pairs: int
+    single_order_flip_rate: float
+    first_position_bias: float
+    post_debias_flip_rate: float
+    debiased_win_rate_a: float
+    debiased_win_rate_b: float
+    debiased_distributions: tuple[dict[str, float], ...]
+
+
+@dataclass(frozen=True)
+class TrajectoryStageRecord:
+    """Four-stage agent trajectory verification record (pre-guard and post-guard)."""
+
+    trajectory_id: str
+    pre_guard_stages: Mapping[str, bool]
+    post_guard_stages: Mapping[str, bool]
+    final_output_passed: bool
+
+
+@dataclass(frozen=True)
+class FourStageTrajectoryAudit:
+    """Summary of 4-stage Agent-as-a-Judge trajectory verification (arXiv:2410.10934)."""
+
+    n_trajectories: int
+    final_output_only_pass_rate: float
+    pre_guard_trajectory_pass_rate: float
+    post_guard_trajectory_pass_rate: float
+    hidden_process_violation_rate: float
+    pre_guard_stage_pass_rates: dict[str, float]
+    post_guard_stage_pass_rates: dict[str, float]
+    first_fault_stage_by_id: dict[str, str]
+
+
+def _clamp_interval_value(val: float, low: float, high: float) -> float:
+    return min(high, max(low, val))
+
+
+def _compute_ppi_core(
+    gold_labels: Sequence[float],
+    gold_autorater_scores: Sequence[float],
+    unlabeled_autorater_scores: Sequence[float],
+    *,
+    alpha: float,
+    small_sample_shrinkage: bool,
+) -> tuple[PPIConfidenceInterval, float]:
+    """Compute unclipped PPI++ interval statistics and Welch-Satterthwaite degrees of freedom."""
+    n_gold = len(gold_labels)
+    n_unlab = len(unlabeled_autorater_scores)
+    if n_gold < 4 or len(gold_autorater_scores) != n_gold:
+        raise ValueError("gold_labels and gold_autorater_scores must match and have length >= 4")
+    if n_unlab < 2:
+        raise ValueError("unlabeled_autorater_scores must have length >= 2")
+    if isinstance(alpha, bool) or not math.isfinite(alpha) or alpha <= 0.0 or alpha >= 1.0:
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
+
+    for seq_name, seq_vals in (
+        ("gold_labels", gold_labels),
+        ("gold_autorater_scores", gold_autorater_scores),
+        ("unlabeled_autorater_scores", unlabeled_autorater_scores),
+    ):
+        for raw_item in seq_vals:
+            if isinstance(raw_item, bool) or not isinstance(raw_item, (int, float)):
+                raise ValueError(f"{seq_name} must contain finite non-boolean numbers")
+
+    y_vals = [float(v) for v in gold_labels]
+    f_gold = [float(v) for v in gold_autorater_scores]
+    f_unlab = [float(v) for v in unlabeled_autorater_scores]
+    if not all(math.isfinite(x) for x in y_vals + f_gold + f_unlab):
+        raise ValueError("all gold and autorater scores must be finite")
+
+    mean_y = sum(y_vals) / float(n_gold)
+    mean_f_unlab = sum(f_unlab) / float(n_unlab)
+    var_y = sum((yv - mean_y) ** 2 for yv in y_vals) / float(n_gold - 1)
+    var_f_unlab = sum((fv - mean_f_unlab) ** 2 for fv in f_unlab) / float(n_unlab - 1)
+
+    def _fit_lambda(y_sub: Sequence[float], f_sub: Sequence[float]) -> float:
+        m_sub = len(y_sub)
+        if m_sub < 3:
+            return 0.0
+        my = sum(y_sub) / float(m_sub)
+        mf = sum(f_sub) / float(m_sub)
+        vf = sum((fv - mf) ** 2 for fv in f_sub) / float(m_sub - 1)
+        cyf = sum((yv - my) * (fv - mf) for yv, fv in zip(y_sub, f_sub)) / float(m_sub - 1)
+        pf = (float(m_sub - 1) * vf + float(n_unlab - 1) * var_f_unlab) / float(
+            m_sub + n_unlab - 2
+        )
+        den = (1.0 + float(n_gold) / float(n_unlab)) * pf
+        if den <= 1e-12:
+            return 0.0
+        raw = cyf / den
+        sh = max(0.0, float(m_sub - 2) / float(m_sub)) if small_sample_shrinkage else 1.0
+        return min(1.0, max(0.0, raw * sh))
+
+    if n_gold >= 8:
+        # 2-fold cross-fitted PPI++ (Zrnic & Candes, PNAS 2024): split via Thue-Morse parity
+        # and pool centered within-fold residual variances so lam_A != lam_B mean shifts never leak.
+        y_a = [yv for idx_i, yv in enumerate(y_vals) if idx_i.bit_count() % 2 == 0]
+        f_a = [fv for idx_i, fv in enumerate(f_gold) if idx_i.bit_count() % 2 == 0]
+        y_b = [yv for idx_i, yv in enumerate(y_vals) if idx_i.bit_count() % 2 == 1]
+        f_b = [fv for idx_i, fv in enumerate(f_gold) if idx_i.bit_count() % 2 == 1]
+        lam_for_a = _fit_lambda(y_b, f_b)
+        lam_for_b = _fit_lambda(y_a, f_a)
+        r_a = [yv - lam_for_a * fv for yv, fv in zip(y_a, f_a)]
+        r_b = [yv - lam_for_b * fv for yv, fv in zip(y_b, f_b)]
+        mean_r_a = sum(r_a) / float(len(r_a))
+        mean_r_b = sum(r_b) / float(len(r_b))
+        var_r_a = sum((rv - mean_r_a) ** 2 for rv in r_a) / float(max(1, len(r_a) - 1))
+        var_r_b = sum((rv - mean_r_b) ** 2 for rv in r_b) / float(max(1, len(r_b) - 1))
+        w_a = float(len(r_a)) / float(n_gold)
+        w_b = float(len(r_b)) / float(n_gold)
+        lam_star = w_a * lam_for_a + w_b * lam_for_b
+        ppi_est = w_a * (lam_for_a * mean_f_unlab + mean_r_a) + w_b * (
+            lam_for_b * mean_f_unlab + mean_r_b
+        )
+        v_gold_term = (float(len(r_a)) * var_r_a + float(len(r_b)) * var_r_b) / float(
+            n_gold * n_gold
+        )
+        resid_df = max(2.0, float(n_gold - 2))
+    else:
+        lam_star = _fit_lambda(y_vals, f_gold)
+        rectified = [yv - lam_star * fv for yv, fv in zip(y_vals, f_gold)]
+        mean_rect = sum(rectified) / float(n_gold)
+        resid_df = max(1.0, float(n_gold - 2))
+        var_rect = sum((rv - mean_rect) ** 2 for rv in rectified) / resid_df
+        ppi_est = lam_star * mean_f_unlab + mean_rect
+        v_gold_term = var_rect / float(n_gold)
+
+    v_unlab_term = (lam_star * lam_star * var_f_unlab) / float(n_unlab)
+    ppi_var = max(1e-15, v_gold_term + v_unlab_term)
+    ppi_se = math.sqrt(ppi_var)
+
+    # Welch-Satterthwaite effective degrees of freedom across anchor and unlabeled components.
+    ws_num = ppi_var * ppi_var
+    ws_den = (v_gold_term * v_gold_term) / resid_df + (
+        v_unlab_term * v_unlab_term
+    ) / max(1.0, float(n_unlab - 1))
+    eff_df = ws_num / ws_den if ws_den > 1e-24 else resid_df
+    t_crit = _student_t_critical(alpha, eff_df)
+    t_gold = _student_t_critical(alpha, float(n_gold - 1))
+
+    gold_se = math.sqrt(max(1e-15, var_y / float(n_gold)))
+    all_autorater = f_gold + f_unlab
+    n_all = len(all_autorater)
+    naive_mean = sum(all_autorater) / float(n_all)
+    naive_var = sum((fv - naive_mean) ** 2 for fv in all_autorater) / float(n_all - 1)
+    naive_se = math.sqrt(max(1e-15, naive_var / float(n_all)))
+    z_norm = _normal_two_sided_z(alpha)
+
+    ci_lo = ppi_est - t_crit * ppi_se
+    ci_hi = ppi_est + t_crit * ppi_se
+    gold_lo = mean_y - t_gold * gold_se
+    gold_hi = mean_y + t_gold * gold_se
+    naive_lo = naive_mean - z_norm * naive_se
+    naive_hi = naive_mean + z_norm * naive_se
+
+    n_eff_ratio = max(1.0, (var_y / float(n_gold)) / ppi_var) if var_y > 1e-12 else 1.0
+    interval = PPIConfidenceInterval(
+        estimate=ppi_est,
+        ci_low=ci_lo,
+        ci_high=ci_hi,
+        standard_error=ppi_se,
+        gold_only_mean=mean_y,
+        gold_only_ci_low=gold_lo,
+        gold_only_ci_high=gold_hi,
+        gold_only_se=gold_se,
+        naive_autorater_mean=naive_mean,
+        naive_autorater_ci_low=naive_lo,
+        naive_autorater_ci_high=naive_hi,
+        lambda_star=lam_star,
+        n_gold=n_gold,
+        n_unlabeled=n_unlab,
+        effective_sample_size_ratio=n_eff_ratio,
+    )
+    return interval, eff_df
+
+
+def power_tuned_ppi_mean_ci(
+    gold_labels: Sequence[float],
+    gold_autorater_scores: Sequence[float],
+    unlabeled_autorater_scores: Sequence[float],
+    *,
+    alpha: float = 0.05,
+    small_sample_shrinkage: bool = True,
+    clip_bounds: tuple[float, float] | None = None,
+) -> PPIConfidenceInterval:
+    """Compute Power-Tuned Prediction-Powered Inference (PPI++) mean and confidence interval.
+
+    Implements PPI++ (Angelopoulos et al., JMLR; Arawjo, arXiv:2609.35815; Chen et al.,
+    arXiv:2601.05420) combining `n` anchor gold labels `(Y_i, f_hat_i)` with `N` unlabeled
+    autorater scores `f_tilde_j` via shrinkage-stabilized optimal power tuning `lambda* in [0, 1]`.
+
+    Args:
+        gold_labels: Ground-truth scalar outcomes `Y_1..Y_n` on the labeled anchor slice.
+        gold_autorater_scores: Autorater predictions `f_hat_1..f_hat_n` on the same anchor slice.
+        unlabeled_autorater_scores: Autorater predictions `f_tilde_1..f_tilde_N` on unlabeled items.
+        alpha: Two-sided miscoverage level in `(0, 1)` (default `0.05` for 95% CI).
+        small_sample_shrinkage: Shrink `lambda*` by `(n - 2)/n` to prevent small-n overfitting.
+        clip_bounds: Optional `(low, high)` domain bounds applied symmetrically to estimates and CIs.
+
+    Returns:
+        `PPIConfidenceInterval` comparing `PPI++`, gold-only, and naive autorater intervals.
+
+    Raises:
+        ValueError: If inputs have `< 4` anchor items, mismatched lengths, or invalid bounds.
+    """
+    if clip_bounds is not None:
+        if (
+            len(clip_bounds) != 2
+            or isinstance(clip_bounds[0], bool)
+            or isinstance(clip_bounds[1], bool)
+            or not isinstance(clip_bounds[0], (int, float))
+            or not isinstance(clip_bounds[1], (int, float))
+        ):
+            raise ValueError("clip_bounds must be a 2-tuple of finite numbers (low, high)")
+        b_lo, b_hi = float(clip_bounds[0]), float(clip_bounds[1])
+        if not (math.isfinite(b_lo) and math.isfinite(b_hi)) or b_lo >= b_hi:
+            raise ValueError(f"clip_bounds must satisfy finite low < high, got {clip_bounds!r}")
+    else:
+        b_lo, b_hi = -math.inf, math.inf
+
+    unclipped, _ = _compute_ppi_core(
+        gold_labels,
+        gold_autorater_scores,
+        unlabeled_autorater_scores,
+        alpha=alpha,
+        small_sample_shrinkage=small_sample_shrinkage,
+    )
+    if clip_bounds is None:
+        return unclipped
+
+    return PPIConfidenceInterval(
+        estimate=_clamp_interval_value(unclipped.estimate, b_lo, b_hi),
+        ci_low=_clamp_interval_value(unclipped.ci_low, b_lo, b_hi),
+        ci_high=_clamp_interval_value(unclipped.ci_high, b_lo, b_hi),
+        standard_error=unclipped.standard_error,
+        gold_only_mean=_clamp_interval_value(unclipped.gold_only_mean, b_lo, b_hi),
+        gold_only_ci_low=_clamp_interval_value(unclipped.gold_only_ci_low, b_lo, b_hi),
+        gold_only_ci_high=_clamp_interval_value(unclipped.gold_only_ci_high, b_lo, b_hi),
+        gold_only_se=unclipped.gold_only_se,
+        naive_autorater_mean=_clamp_interval_value(unclipped.naive_autorater_mean, b_lo, b_hi),
+        naive_autorater_ci_low=_clamp_interval_value(unclipped.naive_autorater_ci_low, b_lo, b_hi),
+        naive_autorater_ci_high=_clamp_interval_value(unclipped.naive_autorater_ci_high, b_lo, b_hi),
+        lambda_star=unclipped.lambda_star,
+        n_gold=unclipped.n_gold,
+        n_unlabeled=unclipped.n_unlabeled,
+        effective_sample_size_ratio=unclipped.effective_sample_size_ratio,
+    )
+
+
+def ppi_paired_win_rate_test(
+    gold_diff_outcomes: Sequence[float],
+    gold_autorater_diffs: Sequence[float],
+    unlabeled_autorater_diffs: Sequence[float],
+    *,
+    alpha: float = 0.05,
+) -> PPIPairedWinRateResult:
+    """Test paired win-rate difference `theta_A - theta_B` using PPI++ debiased inference.
+
+    Args:
+        gold_diff_outcomes: Anchor paired differences `Y_{A,i} - Y_{B,i}` in `[-1, 1]`.
+        gold_autorater_diffs: Autorater score differences `f_{A,i} - f_{B,i}` on anchor pairs.
+        unlabeled_autorater_diffs: Autorater score differences on unlabeled pairs.
+        alpha: Two-sided significance level in `(0, 1)` used only for confidence interval bounds.
+
+    Returns:
+        `PPIPairedWinRateResult` with CI, standard error, t-statistic, and exact Student-t p-value.
+    """
+    unclipped, eff_df = _compute_ppi_core(
+        gold_diff_outcomes,
+        gold_autorater_diffs,
+        unlabeled_autorater_diffs,
+        alpha=alpha,
+        small_sample_shrinkage=True,
+    )
+    se = max(1e-12, unclipped.standard_error)
+    t_stat = 0.0 if abs(unclipped.estimate) <= 1e-15 else (unclipped.estimate / se)
+    p_val = _student_t_two_sided_p(abs(t_stat), eff_df)
+    return PPIPairedWinRateResult(
+        delta_estimate=_clamp_interval_value(unclipped.estimate, -1.0, 1.0),
+        ci_low=_clamp_interval_value(unclipped.ci_low, -1.0, 1.0),
+        ci_high=_clamp_interval_value(unclipped.ci_high, -1.0, 1.0),
+        standard_error=unclipped.standard_error,
+        z_statistic=t_stat,
+        p_two_sided=p_val,
+        lambda_star=unclipped.lambda_star,
+        effective_sample_size_ratio=unclipped.effective_sample_size_ratio,
+    )
+
+
+def compare_rogan_gladen_vs_ppi(
+    gold_binary_labels: Sequence[int | bool],
+    gold_autorater_probs: Sequence[float],
+    unlabeled_autorater_probs: Sequence[float],
+    *,
+    decision_threshold: float = 0.50,
+    shift_tolerance: float = 0.12,
+) -> RoganGladenVsPPIComparison:
+    """Compare PPI++ continuous rectification against Rogan-Gladen binary prevalence adjustment.
+
+    Grounded in Chen et al. (arXiv:2601.05420, ICML 2026): PPI++ achieves strictly smaller
+    standard error when the anchor and unlabeled slices are exchangeable and continuous judge
+    posteriors are available, whereas Rogan-Gladen remains consistent under severe target label
+    prevalence shift provided class-conditional `TPR` and `TNR` stay invariant.
+
+    Args:
+        gold_binary_labels: Anchor binary labels (`0`/`1` or `bool`).
+        gold_autorater_probs: Autorater positive-class probabilities on anchor items.
+        unlabeled_autorater_probs: Autorater positive-class probabilities on target unlabeled items.
+        decision_threshold: Threshold converting probabilities into binary calls for Rogan-Gladen.
+        shift_tolerance: Absolute autorater-rate drift threshold triggering a shift warning.
+
+    Returns:
+        `RoganGladenVsPPIComparison` with both estimates, SEs, and regime recommendation.
+
+    Raises:
+        ValueError: If inputs are non-binary, non-finite, lack both classes, or Youden's J <= 0.
+    """
+    if (
+        isinstance(decision_threshold, bool)
+        or not isinstance(decision_threshold, (int, float))
+        or not math.isfinite(float(decision_threshold))
+        or float(decision_threshold) <= 0.0
+        or float(decision_threshold) >= 1.0
+    ):
+        raise ValueError(f"decision_threshold must lie strictly in (0, 1), got {decision_threshold!r}")
+    if (
+        isinstance(shift_tolerance, bool)
+        or not isinstance(shift_tolerance, (int, float))
+        or not math.isfinite(float(shift_tolerance))
+        or float(shift_tolerance) < 0.0
+    ):
+        raise ValueError(f"shift_tolerance must be finite and >= 0, got {shift_tolerance!r}")
+
+    y_bin: list[float] = []
+    for raw_label in gold_binary_labels:
+        if isinstance(raw_label, bool):
+            y_bin.append(1.0 if raw_label else 0.0)
+        elif isinstance(raw_label, (int, float)) and math.isfinite(float(raw_label)) and float(raw_label) in (0.0, 1.0):
+            y_bin.append(float(raw_label))
+        else:
+            raise ValueError(
+                f"gold_binary_labels must contain binary values in {{0, 1}} or bool, got {raw_label!r}"
+            )
+
+    for seq_name, seq_vals in (
+        ("gold_autorater_probs", gold_autorater_probs),
+        ("unlabeled_autorater_probs", unlabeled_autorater_probs),
+    ):
+        for raw_prob in seq_vals:
+            if isinstance(raw_prob, bool) or not isinstance(raw_prob, (int, float)):
+                raise ValueError(f"{seq_name} must contain finite non-boolean probabilities")
+            if not math.isfinite(float(raw_prob)) or float(raw_prob) < 0.0 or float(raw_prob) > 1.0:
+                raise ValueError(f"{seq_name} probabilities must lie in [0, 1], got {raw_prob!r}")
+
+    f_gold = [float(v) for v in gold_autorater_probs]
+    f_unlab = [float(v) for v in unlabeled_autorater_probs]
+    ppi_ci = power_tuned_ppi_mean_ci(y_bin, f_gold, f_unlab, clip_bounds=(0.0, 1.0))
+
+    positives = [fv >= decision_threshold for yv, fv in zip(y_bin, f_gold) if yv > 0.5]
+    negatives = [fv < decision_threshold for yv, fv in zip(y_bin, f_gold) if yv < 0.5]
+    if not positives or not negatives:
+        raise ValueError("gold_binary_labels must contain at least one positive and one negative")
+
+    tpr = sum(1.0 for ok in positives if ok) / float(len(positives))
+    tnr = sum(1.0 for ok in negatives if ok) / float(len(negatives))
+    youden_j = tpr + tnr - 1.0
+    if youden_j <= 1e-6:
+        raise ValueError(f"uninformative autorater for Rogan-Gladen: Youden's J = {youden_j:.4f}")
+
+    p_gold_bin = sum(1.0 for fv in f_gold if fv >= decision_threshold) / float(len(f_gold))
+    p_unlab_bin = sum(1.0 for fv in f_unlab if fv >= decision_threshold) / float(len(f_unlab))
+    rg_est = rogan_gladen_prevalence(p_unlab_bin, tpr, tnr)
+
+    # Delta-method standard error of Rogan-Gladen accounting for finite TPR, TNR, and p_hat_unlab.
+    var_p = p_unlab_bin * (1.0 - p_unlab_bin) / float(len(f_unlab))
+    var_tpr = tpr * (1.0 - tpr) / float(len(positives))
+    var_tnr = tnr * (1.0 - tnr) / float(len(negatives))
+    rg_var = (
+        var_p + (rg_est * rg_est) * var_tpr + ((1.0 - rg_est) ** 2) * var_tnr
+    ) / max(1e-9, youden_j * youden_j)
+    rg_se = math.sqrt(max(1e-15, rg_var))
+
+    shift_abs = abs(p_unlab_bin - p_gold_bin)
+    if shift_abs >= shift_tolerance:
+        rec = "rogan_gladen"
+        reason = (
+            f"detected large prevalence shift |p_unlab - p_gold| = {shift_abs:.3f} >= "
+            f"{shift_tolerance:.3f}; Rogan-Gladen preserves consistency under label shift"
+        )
+    else:
+        rec = "ppi_plusplus"
+        reason = (
+            f"exchangeable regime (|p_unlab - p_gold| = {shift_abs:.3f} < {shift_tolerance:.3f}); "
+            f"PPI++ reduces SE ({ppi_ci.standard_error:.4f} vs {rg_se:.4f})"
+        )
+
+    return RoganGladenVsPPIComparison(
+        ppi_estimate=ppi_ci.estimate,
+        ppi_standard_error=ppi_ci.standard_error,
+        rogan_gladen_estimate=rg_est,
+        rogan_gladen_standard_error=rg_se,
+        prevalence_shift_abs=shift_abs,
+        youden_j=youden_j,
+        recommended_estimator=rec,
+        recommendation_reason=reason,
+    )
+
+
+def paraphrase_conformal_stability_audit(
+    calib_probs_by_paraphrase: Sequence[Sequence[Mapping[str, float]]],
+    calib_golds: Sequence[str],
+    eval_probs_by_paraphrase: Sequence[Sequence[Mapping[str, float]]],
+    eval_golds: Sequence[str],
+    *,
+    alpha: float = 0.10,
+    method: str = "raps",
+    lam_reg: float = 0.01,
+    k_reg: int = 1,
+) -> ParaphraseStabilityAudit:
+    """Audit conformal threshold sensitivity across prompt paraphrases and fit envelope `q_hat`.
+
+    Implements Paraphrase-Aware Conformal Prediction (arXiv:2610.04239, Oct 2026): calibrates
+    `q_hat_env` on the per-example worst-paraphrase nonconformity score `max_m s(p_{i,m}, y_i)` so
+    prediction sets maintain `>= 1 - alpha` simultaneous worst-paraphrase coverage.
+
+    Args:
+        calib_probs_by_paraphrase: Per-item list of `M >= 2` paraphrase distributions (calib).
+        calib_golds: Ground-truth labels for calibration items.
+        eval_probs_by_paraphrase: Per-item list of `M >= 2` paraphrase distributions (eval).
+        eval_golds: Ground-truth labels for evaluation items.
+        alpha: Target miscoverage rate in `(0, 1)`.
+        method: Conformal score method (`"lac"`, `"aps"`, or `"raps"`).
+        lam_reg: RAPS penalty weight.
+        k_reg: RAPS onset rank.
+
+    Returns:
+        `ParaphraseStabilityAudit` comparing single-phrasing vs. paraphrase-envelope coverage.
+
+    Raises:
+        ValueError: If item counts or paraphrase counts `M >= 2` are inconsistent.
+    """
+    n_calib = len(calib_probs_by_paraphrase)
+    n_eval = len(eval_probs_by_paraphrase)
+    if n_calib == 0 or len(calib_golds) != n_calib or n_eval == 0 or len(eval_golds) != n_eval:
+        raise ValueError("calibration and evaluation sequences must be non-empty and match gold lengths")
+
+    m_count = len(calib_probs_by_paraphrase[0])
+    if m_count < 2:
+        raise ValueError("at least M >= 2 paraphrases per item are required")
+    for seq in list(calib_probs_by_paraphrase) + list(eval_probs_by_paraphrase):
+        if len(seq) != m_count:
+            raise ValueError("every item must contain the exact same number of paraphrases M")
+
+    per_template_q_hats: list[float] = []
+    for m_idx in range(m_count):
+        slice_probs = [item[m_idx] for item in calib_probs_by_paraphrase]
+        cal_m = calibrate_conformal_quantile(
+            slice_probs,
+            calib_golds,
+            alpha=alpha,
+            method=method,
+            lam_reg=lam_reg,
+            k_reg=k_reg,
+        )
+        per_template_q_hats.append(cal_m.q_hat)
+
+    single_q_hat = per_template_q_hats[0]
+    finite_qs = [q for q in per_template_q_hats if math.isfinite(q)]
+    q_spread = (max(finite_qs) - min(finite_qs)) if len(finite_qs) >= 2 else 0.0
+
+    # Paraphrase-envelope calibration over s_i^{max} = max_{m=1..M} s(p_{i,m}, y_i).
+    max_calib_scores: list[float] = []
+    for item_paraphrases, gold in zip(calib_probs_by_paraphrase, calib_golds):
+        worst_score = max(
+            nonconformity_score(
+                dist,
+                str(gold),
+                method=method,
+                lam_reg=lam_reg,
+                k_reg=k_reg,
+                randomized=False,
+            )
+            for dist in item_paraphrases
+        )
+        max_calib_scores.append(worst_score)
+
+    sorted_max = sorted(max_calib_scores)
+    k_rank = math.ceil((n_calib + 1) * (1.0 - alpha))
+    envelope_q_hat = sorted_max[k_rank - 1] if k_rank <= n_calib else float("inf")
+
+    single_all_covered = 0
+    env_all_covered = 0
+    total_env_size = 0
+    for item_paraphrases, gold in zip(eval_probs_by_paraphrase, eval_golds):
+        gold_str = str(gold)
+        ok_single = True
+        ok_env = True
+        for dist in item_paraphrases:
+            c_single = conformal_prediction_set(
+                dist, single_q_hat, method=method, lam_reg=lam_reg, k_reg=k_reg
+            )
+            c_env = conformal_prediction_set(
+                dist, envelope_q_hat, method=method, lam_reg=lam_reg, k_reg=k_reg
+            )
+            total_env_size += len(c_env.prediction_set)
+            if gold_str not in c_single.prediction_set:
+                ok_single = False
+            if gold_str not in c_env.prediction_set:
+                ok_env = False
+        if ok_single:
+            single_all_covered += 1
+        if ok_env:
+            env_all_covered += 1
+
+    return ParaphraseStabilityAudit(
+        num_paraphrases=m_count,
+        n_calib=n_calib,
+        n_eval=n_eval,
+        single_template_q_hat=single_q_hat,
+        envelope_q_hat=envelope_q_hat,
+        q_hat_spread=q_spread,
+        single_template_worst_coverage=float(single_all_covered) / float(n_eval),
+        envelope_worst_coverage=float(env_all_covered) / float(n_eval),
+        envelope_mean_set_size=float(total_env_size) / float(n_eval * m_count),
+    )
+
+
+def position_swapped_autorater_audit(
+    forward_ab_probs: Sequence[Mapping[str, float]],
+    reverse_ba_mapped_probs: Sequence[Mapping[str, float]],
+) -> PositionSwappedJudgeAudit:
+    """Audit and debias bilateral `(A, B)` vs. `(B, A)` pairwise autorater posteriors.
+
+    Follows Zheng et al. (arXiv:2306.05685): `forward_ab_probs` scores `(A first, B second)` and
+    `reverse_ba_mapped_probs` scores `(B first, A second)` with labels already mapped back onto
+    canonical keys `("a", "b")` (plus optional `"tie"`). Averaging both directions guarantees
+    exact permutation symmetry (`post_debias_flip_rate == 0.0`).
+
+    Args:
+        forward_ab_probs: Forward `(A, B)` distributions over `{"a", "b"}` (and optional `"tie"`).
+        reverse_ba_mapped_probs: Swapped `(B, A)` distributions mapped back to `{"a", "b", ...}`.
+
+    Returns:
+        `PositionSwappedJudgeAudit` with single-order flip rate, first-slot bias, and debiased probs.
+
+    Raises:
+        ValueError: If sequences are empty, differ in length, or lack `"a"` / `"b"` keys.
+    """
+    n_pairs = len(forward_ab_probs)
+    if n_pairs == 0 or len(reverse_ba_mapped_probs) != n_pairs:
+        raise ValueError("forward_ab_probs and reverse_ba_mapped_probs must match and be non-empty")
+
+    flips = 0
+    first_bias_sum = 0.0
+    post_flips = 0
+    wins_a = 0
+    wins_b = 0
+    debiased_list: list[dict[str, float]] = []
+
+    for fwd_raw, rev_raw in zip(forward_ab_probs, reverse_ba_mapped_probs):
+        fwd = _normalize_dist(fwd_raw)
+        rev = _normalize_dist(rev_raw)
+        if "a" not in fwd or "b" not in fwd or "a" not in rev or "b" not in rev:
+            raise ValueError("pairwise distributions must include canonical keys 'a' and 'b'")
+
+        keys = sorted(set(fwd.keys()) | set(rev.keys()))
+        top_fwd = max(keys, key=lambda key: (fwd.get(key, 0.0), key))
+        top_rev = max(keys, key=lambda key: (rev.get(key, 0.0), key))
+        if top_fwd != top_rev:
+            flips += 1
+
+        # First-position bias: excess mass assigned to whichever candidate occupied slot 1.
+        first_bias_sum += 0.5 * ((fwd["a"] - rev["a"]) + (rev["b"] - fwd["b"]))
+
+        deb_ab = {key: 0.5 * (fwd.get(key, 0.0) + rev.get(key, 0.0)) for key in keys}
+        # Verify exact symmetry if caller had passed (B, A) as the primary pair:
+        deb_ba_mapped = {key: 0.5 * (rev.get(key, 0.0) + fwd.get(key, 0.0)) for key in keys}
+
+        def _modal_pairwise_winner(dist: Mapping[str, float]) -> str:
+            pa = dist.get("a", 0.0)
+            pb = dist.get("b", 0.0)
+            ptie = dist.get("tie", 0.0)
+            if ptie >= max(pa, pb) - 1e-12 or abs(pa - pb) <= 1e-12:
+                return "tie"
+            return "a" if pa > pb else "b"
+
+        win_ab = _modal_pairwise_winner(deb_ab)
+        win_ba = _modal_pairwise_winner(deb_ba_mapped)
+        if win_ab != win_ba:
+            post_flips += 1
+        if win_ab == "a":
+            wins_a += 1
+        elif win_ab == "b":
+            wins_b += 1
+        debiased_list.append(deb_ab)
+
+    return PositionSwappedJudgeAudit(
+        n_pairs=n_pairs,
+        single_order_flip_rate=float(flips) / float(n_pairs),
+        first_position_bias=first_bias_sum / float(n_pairs),
+        post_debias_flip_rate=float(post_flips) / float(n_pairs),
+        debiased_win_rate_a=float(wins_a) / float(n_pairs),
+        debiased_win_rate_b=float(wins_b) / float(n_pairs),
+        debiased_distributions=tuple(debiased_list),
+    )
+
+
+def evaluate_4stage_trajectory_judge(
+    trajectories: Sequence[TrajectoryStageRecord],
+    *,
+    stage_order: Sequence[str] = (
+        "1_routing",
+        "2_retrieval_ipi",
+        "3_conformal_stakes_guard",
+        "4_domain_closure",
+    ),
+) -> FourStageTrajectoryAudit:
+    """Evaluate 4-stage Agent-as-a-Judge trajectory verification with Pre/Post-Guard reporting.
+
+    Follows Zhuge et al. (arXiv:2410.10934): final-output-only evaluation misses intermediate
+    routing, indirect prompt injection, or uncalibrated tool-guard violations that coincidentally
+    land on an acceptable final string. Reports both Pre-Guard and Post-Guard stage pass rates
+    and localizes the earliest failing stage per trajectory.
+
+    Args:
+        trajectories: Non-empty sequence of `TrajectoryStageRecord` instances.
+        stage_order: Ordered unique stage names verified for every trajectory.
+
+    Returns:
+        `FourStageTrajectoryAudit` with dual Pre/Post-Guard metrics and fault localization.
+
+    Raises:
+        ValueError: If `trajectories` or `stage_order` is empty, has duplicates, or has non-bools.
+    """
+    n_traj = len(trajectories)
+    ordered_stages = [str(st) for st in stage_order]
+    if n_traj == 0 or not ordered_stages:
+        raise ValueError("trajectories and stage_order must be non-empty")
+    if any(not st.strip() for st in ordered_stages):
+        raise ValueError("stage_order entries must be non-empty strings")
+    if len(set(ordered_stages)) != len(ordered_stages):
+        raise ValueError("stage_order must not contain duplicate stage names")
+
+    final_only_ok = 0
+    pre_all_ok = 0
+    post_all_ok = 0
+    hidden_violations = 0
+    pre_stage_counts = {st: 0 for st in ordered_stages}
+    post_stage_counts = {st: 0 for st in ordered_stages}
+    first_fault_map: dict[str, str] = {}
+    seen_ids: set[str] = set()
+
+    for rec in trajectories:
+        if not isinstance(rec.trajectory_id, str) or not rec.trajectory_id.strip():
+            raise ValueError("trajectory_id must be a non-empty string")
+        if rec.trajectory_id in seen_ids:
+            raise ValueError(f"duplicate trajectory_id {rec.trajectory_id!r}")
+        seen_ids.add(rec.trajectory_id)
+        if not isinstance(rec.final_output_passed, bool):
+            raise ValueError(
+                f"trajectory {rec.trajectory_id!r} final_output_passed must be a bool"
+            )
+        for st in ordered_stages:
+            if st not in rec.pre_guard_stages or st not in rec.post_guard_stages:
+                raise ValueError(
+                    f"trajectory {rec.trajectory_id!r} missing required stage {st!r}"
+                )
+            if not isinstance(rec.pre_guard_stages[st], bool) or not isinstance(
+                rec.post_guard_stages[st], bool
+            ):
+                raise ValueError(
+                    f"trajectory {rec.trajectory_id!r} stage {st!r} pass flags must be bool"
+                )
+
+        pre_ok = True
+        post_ok = True
+        first_fault = "none"
+        for st in ordered_stages:
+            if rec.pre_guard_stages[st]:
+                pre_stage_counts[st] += 1
+            else:
+                if pre_ok:
+                    first_fault = st
+                pre_ok = False
+            if rec.post_guard_stages[st]:
+                post_stage_counts[st] += 1
+            else:
+                post_ok = False
+
+        if rec.final_output_passed:
+            final_only_ok += 1
+            if not pre_ok:
+                hidden_violations += 1
+        if pre_ok:
+            pre_all_ok += 1
+        if post_ok:
+            post_all_ok += 1
+        first_fault_map[rec.trajectory_id] = first_fault
+
+    return FourStageTrajectoryAudit(
+        n_trajectories=n_traj,
+        final_output_only_pass_rate=float(final_only_ok) / float(n_traj),
+        pre_guard_trajectory_pass_rate=float(pre_all_ok) / float(n_traj),
+        post_guard_trajectory_pass_rate=float(post_all_ok) / float(n_traj),
+        hidden_process_violation_rate=float(hidden_violations) / float(n_traj),
+        pre_guard_stage_pass_rates={
+            st: float(pre_stage_counts[st]) / float(n_traj) for st in ordered_stages
+        },
+        post_guard_stage_pass_rates={
+            st: float(post_stage_counts[st]) / float(n_traj) for st in ordered_stages
+        },
+        first_fault_stage_by_id=first_fault_map,
+    )
+
 
 

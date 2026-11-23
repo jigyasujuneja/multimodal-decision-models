@@ -43,6 +43,9 @@ jobs:
       - name: Run Python unit tests
         run: PYTHONPATH=src python -m unittest discover -s tests -v
 
+      - name: Verify v1.1.0 10-experiment benchmark and security gates
+        run: PYTHONPATH=src python benchmarks/run_v110_frontier_security_evals_bench.py --verify-gates
+
       - name: Run TypeScript SDK build and unit tests
         run: |
           npm --prefix sdk/ts ci

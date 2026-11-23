@@ -2913,6 +2913,7 @@ class CascadeDecisionOrchestrator:
         rank1_visual_similarity: float | None = None,
         sister_pack_collision: bool = False,
         layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
+        tenant_id: str = "default",
     ) -> DecisionResult:
         t0 = time.perf_counter()
         cache_key = ""
@@ -3078,18 +3079,23 @@ class CascadeDecisionOrchestrator:
                     extra_cfg["conformal_randomized"] = self.conformal_randomized
                     extra_cfg["conformal_seed"] = self.conformal_seed
 
+            require_explicit_tenant = bool(
+                self.response_cache is not None and self.response_cache.require_explicit_tenant
+            )
             cache_key = compute_decision_cache_key(
                 f"{s1_name}->{s2_name}",
                 state,
                 questions,
                 images,
                 extra_config=extra_cfg,
+                tenant_id=tenant_id,
+                require_explicit_tenant=require_explicit_tenant,
             )
             can_use_cache = self.response_cache is not None and not (
                 clean_q_hat is not None and self.conformal_randomized
             )
             if can_use_cache and self.response_cache is not None:
-                cached = self.response_cache.get(cache_key)
+                cached = self.response_cache.get(cache_key, tenant_id=tenant_id)
                 if cached is not None:
                     cached.latency_ms = (time.perf_counter() - t0) * 1000.0
                     return cached
@@ -3098,6 +3104,7 @@ class CascadeDecisionOrchestrator:
                 t0=t0,
                 cache_key=cache_key,
                 can_use_cache=can_use_cache,
+                tenant_id=tenant_id,
                 state=state,
                 questions=questions,
                 images=images,
@@ -3122,6 +3129,7 @@ class CascadeDecisionOrchestrator:
         t0: float,
         cache_key: str,
         can_use_cache: bool = True,
+        tenant_id: str = "default",
         state: Any,
         questions: Mapping[str, DecisionQuestion],
         images: list[str] | None,
@@ -3498,5 +3506,5 @@ class CascadeDecisionOrchestrator:
             cache_key=cache_key,
         )
         if can_use_cache and self.response_cache is not None:
-            self.response_cache.put(cache_key, result)
+            self.response_cache.put(cache_key, result, tenant_id=tenant_id)
         return result

@@ -38,6 +38,7 @@ from .backends import DecisionBackend, MAX_HTTP_RESPONSE_BYTES, _build_origin_gu
 from .backends import _read_bounded_utf8_response, _validate_header_map, parse_url_origin
 from .conformal import conformal_prediction_set
 from .contracts import SchemaContractViolationError, UpstreamTransientError, sanitize_untrusted_text, wrap_untrusted_state
+from .security import detect_comparative_undermining_attack
 from .types import DecisionQuestion
 
 DEFAULT_ABSTAIN_DOC_ID: str = "__no_relevant_doc__"
@@ -653,10 +654,19 @@ def conformal_rag_context_filter(
             raw_val, f"relevance_probabilities[{raw_key!r}]"
         )
 
+    cua_quarantined: set[str] = set()
+    if quarantine_injections:
+        cua_audit = detect_comparative_undermining_attack(
+            {cand.doc_id: cand.text for cand in candidates}
+        )
+        cua_quarantined = set(cua_audit.quarantined_ids)
+
     quarantined: list[str] = []
     safe_ids: list[str] = []
     for cand in candidates:
-        if quarantine_injections and _contains_untrusted_override_marker(cand.text):
+        if quarantine_injections and (
+            cand.doc_id in cua_quarantined or _contains_untrusted_override_marker(cand.text)
+        ):
             quarantined.append(cand.doc_id)
         else:
             safe_ids.append(cand.doc_id)
