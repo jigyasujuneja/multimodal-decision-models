@@ -1,6 +1,6 @@
 # Multimodal Decision Models (`multimodal-decision-models`)
 
-Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.0.0`, zero external runtime dependencies across Python, Go, and TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
+Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.1.0`, zero external runtime dependencies across Python, Go, and TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
 
 One declarative policy definition runs across four inference paradigms:
 
@@ -22,6 +22,8 @@ Start at the **[Developer Documentation Hub (`docs/index.md`)](docs/index.md)** 
 | **[Agentic Shared Control & Context Pruning (`docs/agentic-shared-control.md`)](docs/agentic-shared-control.md)** | Action-Stakes $V_{\text{irrev}}$ vs. $V_{\text{rev}}$ guards (`Google ADK`, `LangGraph`, `Genkit`), `<untrusted_data>` quarantine, and 8-slot `MCKP` context pruning. |
 | **[Distillation, Tuning & Recalibration (`docs/distillation-and-tuning.md`)](docs/distillation-and-tuning.md)** | `<think>` leakage prevention, Equation 12 reasoning-to-readout posterior distillation, and Selective Teacher Brier SFT on `must_ask` states. |
 | **[Production Deployment, Terraform & MCP (`docs/production-deployment.md`)](docs/production-deployment.md)** | Digest-pinned Cloud Run + Vertex AI Terraform (`deploy/terraform/`), `RETRY_PENDING` SLA quarantine, SHA-256 cache, and dynamic MCP schemas. |
+| **[Architectural Boundaries & Hybrid Patterns (`docs/architectural-boundaries.md`)](docs/architectural-boundaries.md)** | Hybrid cross-encoder + `AcuRank` reranking, polynomial $\alpha$-spending + `NEVC` trajectory control, blind-first swarm consensus, constrained joint MAP / `DEMASK`, and `AVCD` visual prior-trap guards. |
+| **[Security Hardening & Eval Science (`docs/security-and-eval-science.md`)](docs/security-and-eval-science.md)** | `HMAC` canary envelopes, Unicode/Bidi/`CUA` quarantine, trimmed poisoning-robust conformal quantiles, tenant-isolated caches, cross-fitted `PPI++` vs. `Rogan-Gladen`, and 4-stage `Agent-as-a-Judge`. |
 
 ### Research Manuscripts & Benchmark Reports
 
@@ -80,6 +82,9 @@ Full results and 95% cluster bootstrap confidence intervals are available in [`b
 | **[`eval_suite.py`](src/multimodal_decision_models/eval_suite.py)** | **Scoring & Statistical Suite:** Multiclass Brier score, exact four-term Murphy (`REL`, `RES`, `UNC`, `WBV`) decomposition, NLL, `ECE`, quantile-binned `ACE`, Macro-F1, `nDCG@k`, `AUROC`, selective `AURC`, exact paired McNemar test, Rogan-Gladen prevalence, Cohen's $\kappa$, and cluster bootstrap CIs. |
 | **[`audio_video_decision.py`](src/multimodal_decision_models/audio_video_decision.py)** | **Streaming Audio, Video, & Full-Duplex Decisions (`v0.8.0`):** Cost-sensitive Voice Activity Projection (`VAP`) turn-taking (`evaluate_duplex_turn_taking_decision`), anytime-valid Conformal Test Martingale streaming early-exit (`ConformalMartingaleTracker`, `evaluate_streaming_early_exit`), cross-modal `JSD` + 3-slot triangle `AVEL` spoof gating (`evaluate_audiovisual_event_agreement`), and pure-stdlib 16-bit PCM `WAV` Goertzel spectral extraction + Spatio-Temporal Contact Sheets (`extract_wav_acoustic_features`, `compile_spatiotemporal_contact_sheet`). |
 | **[`adapters.py`](src/multimodal_decision_models/adapters.py)** | **Agent Framework Guards (`Google ADK` & `LangGraph`):** `ActionStakesPolicy`, `create_adk_before_tool_guard`, `create_langgraph_decision_node`, and `neutralize_untrusted_delimiters` enforcing asymmetric $V_{\text{irrev}}$ vs. $V_{\text{rev}}$ confidence gates, 2-slot joint conformal escalation, and fail-closed `RETRY_PENDING` quarantine. |
+| **[`reranking.py`](src/multimodal_decision_models/reranking.py)** | **Hybrid Cross-Encoder Margin + `AcuRank` Reranking (`v1.1.0`):** `HttpCrossEncoderRerankBackend`, Bayesian TrueSkill `acurank_trueskill_shortlist` with explicit `__no_relevant_doc__` abstention, and `conformal_rag_context_filter`. |
+| **[`trajectory_control.py`](src/multimodal_decision_models/trajectory_control.py)** | **Sequential Trajectory Risk Control & `NEVC` (`v1.1.0`):** `PolynomialAlphaSpendingTracker`, `fit_markov_trajectory_slack`, `NetExpectedValueController` (`NEVC`), and `evaluate_placebo_controller_baseline`. |
+| **[`security.py`](src/multimodal_decision_models/security.py)** | **Adversarial Security & Poisoning Defense (`v1.1.0`):** `wrap_canary_untrusted_envelope`, `detect_comparative_undermining_attack`, `calibrate_trimmed_robust_conformal_quantile`, and `audit_calibration_poisoning_influence`. |
 | **[`pkg/mdm/`](pkg/mdm/)** | **Go Reference Package (`package mdm`):** Zero-dependency Go 1.22 implementation covering `HmacUint64`, `CalibrateConformalQuantileWithSeedKey`, `ConformalPredictionSetWithSeedKey`, `PruneAgentContextBlocks`, pre-gated prior fusion, shortlisting, taxonomy tries, Set-of-Marks geometry, triangle scoring, pack-quantity guards, and `v0.8.0` streaming audio/video primitives (`pkg/mdm/audio_video_v080.go`). |
 | **[`sdk/ts/`](sdk/ts/)** | **TypeScript SDK (`@mdm/client`):** Zero-runtime-dependency Node.js 20+ client (`MDMClient` for `/v1/systemone`, `:rawPredict`, and `/v1/chat/completions`), stateless `HMAC-SHA256` conformal/joint-conformal calibration, Bayesian `PoE` fusion, and Genkit JS guards (`createGenkitToolGuard`, `createGenkitDecisionStep`). |
 | **[`deploy/terraform/`](deploy/terraform/)** | **Declarative GCP Terraform Root Module:** Digest-pinned Cloud Run `v2` orchestrator, versioned calibration GCS bucket, Artifact Registry, Secret Manager binding, 6 Cloud Logging funnel metrics + Monitoring dashboard, and optional GPU-backed Vertex AI `/v1/systemone` endpoint. |
@@ -160,8 +165,26 @@ python3 scripts/docs_link_check.py
 PYTHONPATH=src python3 benchmarks/run_multimodel_benchmark.py
 PYTHONPATH=src python3 benchmarks/run_mdm_bench.py
 PYTHONPATH=src python3 benchmarks/run_real_public_benchmarks.py
+PYTHONPATH=src python3 benchmarks/run_v110_frontier_security_evals_bench.py --verify-gates
 PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 ```
+
+## Architectural Boundaries, Adversarial Security, and Eval Science (`v1.1.0`, $N = 1,000$ Instances)
+
+See [`benchmarks/results/v110_frontier_security_evals_report.md`](benchmarks/results/v110_frontier_security_evals_report.md), [`docs/architectural-boundaries.md`](docs/architectural-boundaries.md), and [`docs/security-and-eval-science.md`](docs/security-and-eval-science.md) for all 10 pre-registered zero-RNG experiments (`10/10` Holm-Bonferroni FWER gates passed at $\alpha = 0.05$):
+
+| Study (`N = 100` each) | Wave and Focus | Standalone / Vulnerable Baseline | `v1.1.0` Hybrid / Hardened Stack | Holm-Adjusted $p$ |
+| :--- | :--- | :---: | :---: | :---: |
+| **`EXP-V11-01`** | M5: Hybrid Reranking + `AcuRank` | Pointwise `nDCG@10 = 0.0974`; Margin `no_doc` TNR `= 0.1600` | **`nDCG@10 = 1.0000`**, **`no_doc` TNR `= 1.0000`** (`1.27` passes) | `0.00e+00` |
+| **`EXP-V11-02`** | M5: Trajectory $\alpha$-Spending + `NEVC` | Flat cov `= 0.4800`; Placebo net value `= 0.7050` | **Trajectory cov `= 0.9500`**; **`NEVC` net value `= 0.9350`** (`-94.83%` wasted turns) | `0.00e+00` |
+| **`EXP-V11-03`** | M6: Blind-First Swarm Consensus | Peer-conditioned uncertain-panel cov `= 0.0000` | **Blind-First uncertain-panel cov `= 0.9571`** (`0.9700` overall) | `0.00e+00` |
+| **`EXP-V11-04`** | M6: Constrained Joint MAP and `DEMASK` | `32.0%` invalid tuples (`0.6000` joint acc) | **`0.0%` invalid tuples**, **`0.8800` joint acc** (`1.30` mean RPCs) | `1.70e-07` |
+| **`EXP-V11-05`** | M6: Visual Contrastive `AVCD` Guard | `25/25` prior-trap errors (`AURC = 0.2371`) | **`0/25` prior-trap errors** (**`AURC = 0.1948`**) | `1.70e-07` |
+| **`EXP-V11-06`** | M7: Unicode / `NFKC` / `CUA` Quarantine | Static ASCII fence `80.0%` escape | **`0.0%` escape**, **`100.0%` recall**, **`0.0%` benign FPR** | `0.00e+00` |
+| **`EXP-V11-07`** | M7: Poisoning-Robust Conformal | `8%` poisoning clean cov `= 0.7700` | **Trimmed robust clean cov `= 0.9000`** (**`1.0000` `AUROC`**) | `2.44e-04` |
+| **`EXP-V11-08`** | M7: Tenant `HMAC` Cache and MCP Fuzz | Cross-tenant hash oracle / parser faults | **`0.0%` cross-tenant hits**, **`100/100` (`100.0%`)** fail-closed rejections | `0.00e+00` |
+| **`EXP-V11-09`** | M8: Cross-Fitted `PPI++` vs. `RG` | Naive autorater 95% CI cov `= 0.0000` | **`0.9440` 95% CI cov**, **`-38.99%` CI width** (`2.70x` $N_{\text{eff}}/n$, `0.0500` FPR) | `3.00e-08` |
+| **`EXP-V11-10`** | M8: Paraphrase, Swap, and 4-Stage Judge | Paraphrase cov `0.5500`; Swap flip `51.0%` | **Envelope cov `0.9100`**, **`0.0%` flip**, **`100.0%` first-fault recall** | `0.00e+00` |
 
 ## Real Public Benchmarks (`DecisionBench`, `TypedDecisions`, `arXiv:2610.03935`, and `arXiv:2610.21412v1`)
 
@@ -245,7 +268,7 @@ If you use `multimodal-decision-models` in your research or engineering systems,
   author       = {Juneja, Jigyasu},
   title        = {Calibrated Multimodal Decision Models at Catalog Scale: Model-Agnostic Readouts, Dual-Buffer Visual Contact Sheets, and Split Conformal Cascades},
   year         = {2026},
-  version      = {1.0.0},
+  version      = {1.1.0},
   url          = {https://github.com/jigyasujuneja/multimodal-decision-models},
   license      = {Apache-2.0}
 }

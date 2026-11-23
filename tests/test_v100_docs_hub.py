@@ -37,6 +37,8 @@ EXPECTED_DOCS_HUB_GUIDES: tuple[str, ...] = (
     "docs/agentic-shared-control.md",
     "docs/distillation-and-tuning.md",
     "docs/production-deployment.md",
+    "docs/architectural-boundaries.md",
+    "docs/security-and-eval-science.md",
 )
 
 PRESERVED_RESEARCH_DOCS: tuple[str, ...] = (
@@ -70,10 +72,19 @@ class V100DocumentationHubTest(unittest.TestCase):
     def test_readme_changelog_and_link_checker_pass(self) -> None:
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("docs/index.md", readme_text)
-        self.assertIn("v1.0.0", readme_text)
+        self.assertIn("v1.1.0", readme_text)
+        self.assertIn("docs/architectural-boundaries.md", readme_text)
+        self.assertIn("docs/security-and-eval-science.md", readme_text)
 
         changelog_text = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("## [1.1.0]", changelog_text)
         self.assertIn("## [1.0.0]", changelog_text)
+
+        prod_deploy_text = (REPO_ROOT / "docs" / "production-deployment.md").read_text(encoding="utf-8")
+        self.assertIn(
+            f"version `{mdm.mcp_server.MCP_SERVER_VERSION}`",
+            prod_deploy_text,
+        )
 
         completed = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "docs_link_check.py")],
@@ -146,7 +157,7 @@ class V100DocumentationHubTest(unittest.TestCase):
                         )
                         go_blocks_compiled += 1
 
-        self.assertGreaterEqual(python_blocks_executed, 9)
+        self.assertGreaterEqual(python_blocks_executed, 19)
         self.assertGreaterEqual(go_blocks_compiled, 1)
 
 
