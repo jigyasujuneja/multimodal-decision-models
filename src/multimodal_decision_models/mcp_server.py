@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 import math
 import re
@@ -36,23 +37,20 @@ import sys
 from typing import Any, BinaryIO, Collection, Mapping, Sequence
 
 from .calibration import VALID_PRIOR_GATE_MODES, effective_top_m_entropy, pre_gated_bayesian_poe_fusion
-from .conformal import (
-    DEFAULT_CONFORMAL_ABSTAIN_KEYS,
-    calibrate_conformal_quantile,
-    conformal_prediction_set,
-)
+from .conformal import DEFAULT_CONFORMAL_ABSTAIN_KEYS, DEFAULT_CONFORMAL_SEED_KEY, calibrate_conformal_quantile, conformal_prediction_set
 from .context_pruner import ContextBlock, prune_agent_context_blocks
 from .contracts import DecisionContractError
 from .embedding_index import MultimodalEmbeddingIndex
-from .visual_compiler import (
-    ImageBuffer,
-    compile_dual_buffer_contact_sheet,
-    decode_png,
-    decode_ppm,
-)
+from .visual_compiler import ImageBuffer, compile_dual_buffer_contact_sheet, decode_png, decode_ppm
 
 MCP_SERVER_NAME = "dgem-catalog"
-MCP_SERVER_VERSION = "0.4.0"
+MCP_SERVER_VERSION = "1.0.0"
+SUPPORTED_BACKEND_PARADIGMS: tuple[str, ...] = (
+    "dgem_systemone",
+    "openai_logprobs",
+    "vertex_gemini",
+    "blackbox_sampled",
+)
 DEFAULT_MCP_PROTOCOL_VERSION: str = "2024-11-05"
 MAX_FRAME_BYTES: int = 16 * 1024 * 1024
 MAX_CONTENT_LENGTH_BYTES: int = MAX_FRAME_BYTES
@@ -228,6 +226,9 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "default": "hesitant",
                 },
                 "hesitation_threshold": {"type": "number", "default": 0.16},
+                "randomized": {"type": "boolean", "default": False},
+                "seed_key": {"type": "string", "default": DEFAULT_CONFORMAL_SEED_KEY},
+                "item_key": {"type": "string", "default": ""},
             },
             "required": ["probabilities"],
         },
@@ -288,6 +289,60 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+def build_mcp_tool_schemas(
+    *,
+    configured_backends: Sequence[str] | None = None,
+    enable_visual_compiler: bool = True,
+    enable_context_pruner: bool = True,
+) -> list[dict[str, Any]]:
+    """Build capability-aware MCP tool schemas reflecting configured backends and enabled compilers.
+
+    Args:
+        configured_backends: Optional non-empty sequence of active backend paradigm identifiers.
+        enable_visual_compiler: Include ``compile_contact_sheet`` when True.
+        enable_context_pruner: Include ``prune_context_blocks`` when True.
+
+    Returns:
+        Deep-copied list of JSON Schema tool descriptors for ``tools/list``.
+
+    Raises:
+        ValueError: If ``configured_backends`` is empty or contains an unknown paradigm name.
+    """
+    if not isinstance(enable_visual_compiler, bool) or not isinstance(enable_context_pruner, bool):
+        raise ValueError("enable_visual_compiler and enable_context_pruner must be booleans")
+
+    active_paradigms: list[str] | None = None
+    if configured_backends is not None:
+        if isinstance(configured_backends, (str, bytes)) or not configured_backends:
+            raise ValueError("configured_backends must be a non-empty sequence of backend names")
+        active_paradigms = []
+        for raw_backend in configured_backends:
+            backend_id = str(raw_backend).strip()
+            if backend_id not in SUPPORTED_BACKEND_PARADIGMS:
+                raise ValueError(
+                    f"unsupported backend paradigm {raw_backend!r}; expected subset of {list(SUPPORTED_BACKEND_PARADIGMS)}"
+                )
+            if backend_id not in active_paradigms:
+                active_paradigms.append(backend_id)
+
+    selected_tools: list[dict[str, Any]] = []
+    for base_schema in _TOOL_SCHEMAS:
+        tool_name = base_schema["name"]
+        if tool_name == "compile_contact_sheet" and not enable_visual_compiler:
+            continue
+        if tool_name == "prune_context_blocks" and not enable_context_pruner:
+            continue
+        cloned = copy.deepcopy(base_schema)
+        if tool_name == "evaluate_conformal_decision" and active_paradigms is not None:
+            cloned["inputSchema"]["properties"]["backend_paradigm"] = {
+                "type": "string",
+                "enum": list(active_paradigms),
+                "description": "Active backend paradigm bound to this server deployment.",
+            }
+        selected_tools.append(cloned)
+    return selected_tools
 
 
 def _decode_image_spec(spec: Any, field: str = "image") -> ImageBuffer:
@@ -436,6 +491,26 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         if "k_reg" in args and args["k_reg"] is not None
         else 1
     )
+    randomized = (
+        _require_bool(args["randomized"], "randomized")
+        if "randomized" in args and args["randomized"] is not None
+        else False
+    )
+    seed_key = (
+        _require_str(args["seed_key"], "seed_key")
+        if "seed_key" in args and args["seed_key"] is not None
+        else None
+    )
+    item_key = (
+        _require_str(args["item_key"], "item_key")
+        if "item_key" in args and args["item_key"] is not None
+        else ""
+    )
+    effective_hmac_seed = (
+        (seed_key if seed_key else DEFAULT_CONFORMAL_SEED_KEY)
+        if (seed_key is not None or (randomized and item_key != ""))
+        else None
+    )
 
     c_probs: list[dict[str, float]] | None = None
     c_labels: list[str] | None = None
@@ -490,6 +565,8 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
             method=method,
             lam_reg=lam_reg,
             k_reg=k_reg,
+            randomized=randomized,
+            seed_key=effective_hmac_seed,
         )
         q_hat = cal_res.q_hat
     else:
@@ -512,7 +589,10 @@ def _tool_evaluate_conformal_decision(args: Mapping[str, Any]) -> dict[str, Any]
         method=method,
         lam_reg=lam_reg,
         k_reg=k_reg,
+        randomized=randomized,
         abstain_keys=abstain_keys_resolved,
+        seed_key=effective_hmac_seed,
+        item_key=item_key,
     )
 
     prior_logits_raw = args.get("prior_logits")
@@ -694,8 +774,20 @@ def _tool_compile_contact_sheet(args: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
+def handle_jsonrpc_message(
+    msg: Mapping[str, Any],
+    *,
+    configured_backends: Sequence[str] | None = None,
+    enable_visual_compiler: bool = True,
+    enable_context_pruner: bool = True,
+) -> dict[str, Any] | None:
     """Process a single JSON-RPC 2.0 request or notification and return response dict (or None)."""
+    active_schemas = build_mcp_tool_schemas(
+        configured_backends=configured_backends,
+        enable_visual_compiler=enable_visual_compiler,
+        enable_context_pruner=enable_context_pruner,
+    )
+    enabled_tool_names = {schema["name"] for schema in active_schemas}
     has_id = "id" in msg
     req_id = msg.get("id")
     if has_id and req_id is not None and (
@@ -763,7 +855,7 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
 
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": _TOOL_SCHEMAS}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": active_schemas}}
 
     if method == "tools/call":
         tool_name = params.get("name")
@@ -783,6 +875,29 @@ def handle_jsonrpc_message(msg: Mapping[str, Any]) -> dict[str, Any] | None:
                 "id": req_id,
                 "error": {"code": -32602, "message": "tools/call requires object arguments"},
             }
+        if tool_name not in enabled_tool_names:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Unknown tool: {tool_name!r}"},
+            }
+        if (
+            tool_name == "evaluate_conformal_decision"
+            and configured_backends is not None
+            and "backend_paradigm" in tool_args
+            and tool_args["backend_paradigm"] is not None
+        ):
+            requested_paradigm = str(tool_args["backend_paradigm"]).strip()
+            allowed_paradigms = {str(b).strip() for b in configured_backends}
+            if requested_paradigm not in allowed_paradigms:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": f"Invalid params: backend_paradigm {requested_paradigm!r} not enabled",
+                    },
+                }
         dispatch = {
             "shortlist_candidates": _tool_shortlist_candidates,
             "evaluate_conformal_decision": _tool_evaluate_conformal_decision,
@@ -931,8 +1046,20 @@ def _write_frame(stream: BinaryIO, response: Mapping[str, Any], use_content_leng
     stream.flush()
 
 
-def serve_stdio(stdin: BinaryIO | None = None, stdout: BinaryIO | None = None) -> int:
+def serve_stdio(
+    stdin: BinaryIO | None = None,
+    stdout: BinaryIO | None = None,
+    *,
+    configured_backends: Sequence[str] | None = None,
+    enable_visual_compiler: bool = True,
+    enable_context_pruner: bool = True,
+) -> int:
     """Run the synchronous `dgem-catalog` MCP JSON-RPC 2.0 server loop until EOF."""
+    build_mcp_tool_schemas(
+        configured_backends=configured_backends,
+        enable_visual_compiler=enable_visual_compiler,
+        enable_context_pruner=enable_context_pruner,
+    )
     in_stream = stdin if stdin is not None else sys.stdin.buffer
     out_stream = stdout if stdout is not None else sys.stdout.buffer
 
@@ -982,7 +1109,12 @@ def serve_stdio(stdin: BinaryIO | None = None, stdout: BinaryIO | None = None) -
             _write_frame(out_stream, err_resp, framed)
             continue
 
-        response = handle_jsonrpc_message(parsed)
+        response = handle_jsonrpc_message(
+            parsed,
+            configured_backends=configured_backends,
+            enable_visual_compiler=enable_visual_compiler,
+            enable_context_pruner=enable_context_pruner,
+        )
         if response is not None:
             _write_frame(out_stream, response, framed)
 

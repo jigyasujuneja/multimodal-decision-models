@@ -14,6 +14,7 @@
 
 """Backend-agnostic Calibrated Multimodal Decision Models."""
 
+from .adapters import ActionStakesPolicy, ADKToolGuardDecision, create_adk_before_tool_guard, create_langgraph_decision_node, evaluate_adk_tool_guard, neutralize_untrusted_delimiters
 from .audio_video_decision import (
     AV_REGIME_LABELS,
     TURN_TAKING_ACTIONS,
@@ -51,6 +52,8 @@ from .backends import (
     OpenAILogprobBackend,
     VertexGeminiBackend,
     build_extended_255_code_bijection,
+    is_raw_predict_endpoint,
+    parse_url_origin,
 )
 from .bandit_router import (
     BanditRoutingDecision,
@@ -89,6 +92,7 @@ from .calibration import (
 )
 from .conformal import (
     DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+    DEFAULT_CONFORMAL_SEED_KEY,
     STANDARD_CONFORMAL_ABSTAIN_KEYS,
     ConformalCalibrationResult,
     ConformalSetResult,
@@ -103,6 +107,8 @@ from .conformal import (
     conformal_prediction_set,
     evaluate_online_bc_aci_stream,
     evaluate_two_stage_cascade_risk_bound,
+    hmac_uint64,
+    hmac_uniform_float64,
     label_shift_weighted_conformal_prediction_set,
     mondrian_conformal_prediction_set,
     multislot_joint_conformal_sets,
@@ -175,13 +181,18 @@ from .hierarchy import (
     HierarchicalDecisionRouter,
     TaxonomyLeaf,
     TaxonomyTrie,
+    WideRoutingRecommendation,
     build_prefix_taxonomy_trie,
     packed_bracket_pass_count,
+    recommend_wide_routing_strategy,
     sinkhorn_dealiased_trie_decode,
     trie_constrained_joint_decode,
 )
 from .mcp_server import (
     MCP_SERVER_NAME,
+    MCP_SERVER_VERSION,
+    SUPPORTED_BACKEND_PARADIGMS,
+    build_mcp_tool_schemas,
     handle_jsonrpc_message,
     serve_stdio,
 )
@@ -255,11 +266,14 @@ from .visual_compiler import (
     shades_of_gray_white_balance,
 )
 
-__version__ = "0.4.0"
+__version__ = "1.0.0"
 
 __all__ = [
+    "ADKToolGuardDecision",
     "AV_REGIME_LABELS",
+    "ActionStakesPolicy",
     "DEFAULT_CONFORMAL_ABSTAIN_KEYS",
+    "DEFAULT_CONFORMAL_SEED_KEY",
     "DEFAULT_COSINE_PRIOR_TEMPERATURE",
     "DEFAULT_EVIDENCE_CRITERIA",
     "DEFAULT_HESITATION_THRESHOLD",
@@ -269,8 +283,10 @@ __all__ = [
     "MAX_OPTIONS_PER_SLOT",
     "MAX_SLOTS_PER_PASS",
     "MCP_SERVER_NAME",
+    "MCP_SERVER_VERSION",
     "OPENAI_MAX_TOP_LOGPROBS",
     "STANDARD_CONFORMAL_ABSTAIN_KEYS",
+    "SUPPORTED_BACKEND_PARADIGMS",
     "TURN_TAKING_ACTIONS",
     "UNIVERSAL_256_DECISION_CODES",
     "UNTRUSTED_BOUNDARY_NOTICE",
@@ -352,6 +368,7 @@ __all__ = [
     "VoiceActivityProjectionConfig",
     "WavAcousticSummary",
     "WavAcousticWindowFeatures",
+    "WideRoutingRecommendation",
     "__version__",
     "acceptable_set_accuracy",
     "adaptive_calibration_error",
@@ -371,6 +388,7 @@ __all__ = [
     "build_context_pruning_questions",
     "build_contrastive_criteria",
     "build_extended_255_code_bijection",
+    "build_mcp_tool_schemas",
     "build_prefix_taxonomy_trie",
     "build_set_of_marks_questions",
     "calibrate_conformal_quantile",
@@ -390,6 +408,8 @@ __all__ = [
     "conformal_prediction_set",
     "cosine_similarity",
     "covariance_discounted_logit_pool",
+    "create_adk_before_tool_guard",
+    "create_langgraph_decision_node",
     "csls_hubness_scores",
     "cut_polytope_triangle_consistency_score",
     "debiased_cyclic_permutation_probs",
@@ -399,6 +419,7 @@ __all__ = [
     "encode_png",
     "encode_ppm",
     "estimate_saerens_em_prior_logits",
+    "evaluate_adk_tool_guard",
     "evaluate_audiovisual_event_agreement",
     "evaluate_duplex_turn_taking_decision",
     "evaluate_online_bc_aci_stream",
@@ -417,9 +438,12 @@ __all__ = [
     "fit_vector_scaling",
     "grid_4x4_cell_bounds",
     "handle_jsonrpc_message",
+    "hmac_uint64",
+    "hmac_uniform_float64",
     "holm_bonferroni_adjust",
     "inject_evidence_slot",
     "inner_crop_cie_lab_similarity",
+    "is_raw_predict_endpoint",
     "jensen_shannon_divergence_bits",
     "label_shift_weighted_conformal_prediction_set",
     "macro_f1_score",
@@ -428,6 +452,7 @@ __all__ = [
     "multislot_joint_conformal_sets",
     "ndcg_at_k",
     "negative_log_likelihood",
+    "neutralize_untrusted_delimiters",
     "normalize_cosine_prior_logits",
     "normalized_entropy",
     "option_permutation_stability",
@@ -435,12 +460,14 @@ __all__ = [
     "paired_mcnemar_test",
     "parse_pack_multiplier",
     "parse_unit_measure",
+    "parse_url_origin",
     "point_in_box",
     "pre_gated_bayesian_poe_fusion",
     "probabilistic_triangle_contradiction",
     "project_triangles_to_transitive_consistency",
     "prune_agent_context_blocks",
     "reasoning_to_readout_distillation_loss",
+    "recommend_wide_routing_strategy",
     "rogan_gladen_prevalence",
     "run_calibrated_prm_puct_search",
     "safe_expected_mark_center",

@@ -102,7 +102,7 @@ def _make_solid_buffer(width: int, height: int, rgb_triplet: tuple[int, int, int
 
 class V040ConformalVisualAndMcpTest(unittest.TestCase):
     def test_v040_version_and_public_contract_exports(self) -> None:
-        self.assertEqual(mdm.__version__, "0.4.0")
+        self.assertEqual(mdm.__version__, "1.0.0")
         self.assertEqual(mdm.MCP_SERVER_NAME, "dgem-catalog")
         expected_exports = [
             "BlackBoxSampledBackend",

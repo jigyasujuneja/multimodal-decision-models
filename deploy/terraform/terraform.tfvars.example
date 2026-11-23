@@ -1,0 +1,13 @@
+project_id                   = "example-mdm-prod"
+region                       = "us-central1"
+name_prefix                  = "mdm"
+orchestrator_container_image = "us-central1-docker.pkg.dev/example-mdm-prod/mdm-containers/orchestrator@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+enable_vertex_systemone_endpoint = false
+cloudrun_ingress                 = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+invoker_members = [
+  "serviceAccount:gateway-caller@example-mdm-prod.iam.gserviceaccount.com",
+]
+
+hesitation_threshold = 0.16
+conformal_alpha      = 0.10
