@@ -1,0 +1,51 @@
+{
+  "schema": {
+    "instructions": "Evaluate the streaming 16kHz acoustic prosody summary, fenced ASR transcript, and spatio-temporal video contact sheet to decide full-duplex turn-taking and cross-modal audio-visual event consistency.",
+    "questions": [
+      {
+        "id": "turn_taking_action",
+        "type": "choice",
+        "instructions": "Which full-duplex voice agent turn-taking action applies at the current frame boundary?",
+        "options": [
+          {"name": "wait_hold_floor", "description": "Caller is mid-utterance or in a thinking pause (flat pitch, incomplete clause); remain silent"},
+          {"name": "backchannel_ack", "description": "Emit brief non-interrupting acknowledgment while caller continues"},
+          {"name": "take_turn_respond", "description": "Caller completed turn with terminal prosodic fall and syntactic closure; begin response"},
+          {"name": "urgent_safety_barge_in", "description": "Immediate compliance or safety hazard requires interrupting caller"}
+        ]
+      },
+      {
+        "id": "avel_regime",
+        "type": "choice",
+        "instructions": "What is the cross-modal audio-visual event localization (AVEL) agreement regime?",
+        "options": [
+          {"name": "joint_visible_audible", "description": "Active speaker or event is coherently visible in video frames and audible in PCM16 stream"},
+          {"name": "audible_offscreen", "description": "Valid acoustic event or off-camera speaker without contradictory visual spoof cues"},
+          {"name": "visible_silent", "description": "Visual gesture or state transition occurs during acoustic silence"},
+          {"name": "cross_modal_spoof_conflict", "description": "Audio stream asserts high-stakes speech while video shows static/closed lips or replayed frame"}
+        ]
+      },
+      {
+        "id": "spoof_or_replay_suspected",
+        "type": "boolean",
+        "instructions": "Do acoustic and visual cues conflict in a way consistent with replay spoofing or injected synthetic audio?"
+      },
+      {
+        "id": "prosodic_completion_score",
+        "type": "score",
+        "instructions": "Degree of prosodic and semantic turn completion at the trailing 400ms window:",
+        "levels": [
+          "mid_token_active_speech",
+          "hesitation_or_clause_hold",
+          "probable_turn_yield",
+          "definite_terminal_yield"
+        ]
+      }
+    ],
+    "samples": {{ default 1 .samples | toJson }}
+  },
+  "state": {
+    "acoustic_summary": {{ default "{\"rms_db\": -18.4, \"trailing_silence_ms\": 210, \"f0_slope_hz_per_s\": -4.0}" .acoustic_summary | toJson }},
+    "fenced_transcript": {{ default "<untrusted_audio_transcript>My account routing number starts with zero two one, um...</untrusted_audio_transcript>" .fenced_transcript | toJson }},
+    "video_sheet_summary": {{ default "4-frame ST-SoM strip: active speaker looking down at paper, lips mid-articulation" .video_sheet_summary | toJson }}
+  }
+}

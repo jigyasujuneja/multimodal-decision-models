@@ -1,0 +1,39 @@
+{
+  "examples": [
+    {
+      "name": "typical",
+      "unambiguous": true,
+      "variables": {
+        "cand_a": "Sparkling Water Original 330ml Single Can",
+        "cand_b": "Sparkling Water Original 6x330ml Multipack",
+        "cand_c": "Sparkling Water Lemon 330ml Single Can",
+        "cand_d": "Sparkling Water Blood Orange 330ml Single Can",
+        "cand_e": "Still Mineral Water 500ml Bottle",
+        "query_context": "Panel 0 shows a single 330ml green sparkling water can with Original crest",
+        "shortlist_source": "csls_top5",
+        "samples": 1
+      },
+      "expected_answers": {
+        "evidence_feature": "exact_typography_and_badge",
+        "visual_match_choice": "panel_a",
+        "pack_size_consistent": true
+      }
+    },
+    {
+      "name": "edge",
+      "variables": {
+        "query_context": "Panel 0 shows a bare wooden shelf plank with price tag occluded by glare",
+        "shortlist_source": "csls_top5",
+        "samples": 1
+      },
+      "expected_answers": {
+        "evidence_feature": "unlisted_product_or_empty",
+        "visual_match_choice": "none_of_the_above"
+      }
+    },
+    {
+      "name": "minimal",
+      "variables": {}
+    }
+  ]
+}

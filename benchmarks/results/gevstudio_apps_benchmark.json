@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-10-30T20:50:57Z",
-  "endpoint": "https://gevstudio.corp.google.com/api/gev/systemone",
+  "endpoint": "https://gevstudio.example.com/api/gev/systemone",
   "vision_arena": {
     "total_scenes": 3,
     "total_questions": 48,

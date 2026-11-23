@@ -1,0 +1,93 @@
+{
+  "schema": {
+    "instructions": "Score all 8 agent trajectory context blocks in a single forward pass for Multiple-Choice Knapsack (MCKP) token-budget pruning across full retention, compact signature stubbing, and dropping.",
+    "questions": [
+      {
+        "id": "block_01_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 1 (pinned user goal or system contract):",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text because exact details are required for the next step"},
+          {"name": "stub", "description": "Compress to function signatures, file paths, and error headers"},
+          {"name": "drop", "description": "Omit superseded or irrelevant trajectory output"}
+        ]
+      },
+      {
+        "id": "block_02_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 2:",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      },
+      {
+        "id": "block_03_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 3:",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      },
+      {
+        "id": "block_04_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 4:",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      },
+      {
+        "id": "block_05_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 5:",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      },
+      {
+        "id": "block_06_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 6:",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      },
+      {
+        "id": "block_07_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 7:",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      },
+      {
+        "id": "block_08_action",
+        "type": "choice",
+        "instructions": "Retention action for Trajectory Block 8 (latest failing test or active frontier):",
+        "options": [
+          {"name": "full", "description": "Retain full verbatim text"},
+          {"name": "stub", "description": "Compress to compact structural summary"},
+          {"name": "drop", "description": "Omit superseded or irrelevant output"}
+        ]
+      }
+    ],
+    "samples": {{ default 1 .samples | toJson }}
+  },
+  "state": {
+    "token_budget": {{ default 2048 .token_budget | toJson }},
+    "active_goal": {{ default "Fix cross-origin redirect credential stripping in backends.py" .active_goal | toJson }},
+    "block_summaries": {{ default "b1: user goal (120 tok); b2..b7: old search logs (2400 tok); b8: failing traceback (380 tok)" .block_summaries | toJson }}
+  }
+}

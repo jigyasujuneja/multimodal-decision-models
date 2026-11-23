@@ -35,13 +35,13 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
 
     def test_gevstudio_build_url_encodes_target_query_param(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
-            endpoint_url="https://gevstudio.corp.google.com",
+            endpoint_url="https://gevstudio.example.com",
             target="beyond-decision:/models/gemini-v4xs-decisions?hc=true;temp=1.0",
         )
         url = backend.build_url()
         self.assertEqual(
             url,
-            "https://gevstudio.corp.google.com/api/gev/systemone"
+            "https://gevstudio.example.com/api/gev/systemone"
             "?target=beyond-decision%3A%2Fmodels%2Fgemini-v4xs-decisions%3Fhc%3Dtrue%3Btemp%3D1.0",
         )
 
@@ -174,7 +174,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
 
     def test_gevstudio_cascade_orchestrator_end_to_end(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
-            endpoint_url="https://gevstudio.corp.google.com/api/gev/systemone",
+            endpoint_url="https://gevstudio.example.com/api/gev/systemone",
             target="gemini-v4xs-decisions",
         )
         questions = {

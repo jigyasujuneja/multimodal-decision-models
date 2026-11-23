@@ -32,6 +32,7 @@ Supports:
 from __future__ import annotations
 
 import concurrent.futures as cf
+import http.client
 import inspect
 import json
 import math
@@ -39,14 +40,15 @@ import os
 import random
 import re
 import socket
+import ssl
 import string
 import subprocess
 import tempfile
 import time
+from typing import Any, Callable, Collection, Mapping, Protocol, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Collection, Mapping, Protocol
 
 from .calibration import (
     VALID_PRIOR_GATE_MODES,
@@ -86,6 +88,19 @@ from .types import (
 
 OPENAI_MAX_TOP_LOGPROBS = 20
 _THINKING_TAG_TOKENS = frozenset({"<think>", "</think>", "<|thought|>", "<thought>", "thought"})
+
+
+def _logaddexp(log_a: float, log_b: float) -> float:
+    """Compute log(exp(log_a) + exp(log_b)) stably without overflow or underflow."""
+    if log_a == float("-inf"):
+        return log_b
+    if log_b == float("-inf"):
+        return log_a
+    if log_a < log_b:
+        log_a, log_b = log_b, log_a
+    if math.isinf(log_a):
+        return log_a
+    return log_a + math.log1p(math.exp(log_b - log_a))
 
 
 def build_extended_255_code_bijection(
@@ -150,16 +165,188 @@ _ALLOWED_DRAW_META_KEYS = frozenset(
 _CHOICE_ALIAS_KEYS = ("choice", "answer", "selected", "predicted")
 
 
+CONNECT_TIMEOUT_SECONDS: float = 20.0
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
+_CREDENTIAL_HEADER_NAMES: frozenset[str] = frozenset(
+    {"authorization", "x-dgem-key", "x-dgem-api-key", "x-goog-api-key"}
+)
+
+
+def parse_url_origin(
+    raw_url: str,
+    *,
+    allow_insecure_http: bool = True,
+) -> tuple[str, str, int]:
+    """Validate an HTTP(S) URL and return its normalized ``(scheme, hostname, port)`` origin tuple.
+
+    Args:
+        raw_url: Target HTTP or HTTPS URL string.
+        allow_insecure_http: Whether non-loopback cleartext ``http://`` URLs are permitted.
+
+    Returns:
+        Normalized ``(scheme, hostname, port)`` tuple.
+
+    Raises:
+        SchemaContractViolationError: If ``raw_url`` contains control chars, uses a forbidden scheme, or lacks a host.
+    """
+    if not isinstance(raw_url, str):
+        raise SchemaContractViolationError(f"endpoint URL must be a string, got {raw_url!r}")
+    if "\r" in raw_url or "\n" in raw_url or "\x00" in raw_url:
+        raise SchemaContractViolationError("endpoint URL must not contain CR, LF, or NUL characters")
+    try:
+        parsed = urllib.parse.urlparse(raw_url.strip())
+        scheme = (parsed.scheme or "").lower()
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError as exc:
+        raise SchemaContractViolationError(f"invalid endpoint URL {raw_url!r}: {exc}") from exc
+    if scheme not in ("http", "https") or not hostname:
+        raise SchemaContractViolationError(
+            f"endpoint URL must use http:// or https:// with a valid host, got {raw_url!r}"
+        )
+    if scheme == "http" and not allow_insecure_http and hostname not in _LOOPBACK_HOSTS:
+        raise SchemaContractViolationError(
+            f"cleartext http:// is restricted to loopback hosts unless allow_insecure_http=True: {raw_url!r}"
+        )
+    resolved_port = port if port is not None else (443 if scheme == "https" else 80)
+    return (scheme, hostname, resolved_port)
+
+
+def is_raw_predict_endpoint(raw_url: str) -> bool:
+    """Return True when ``raw_url`` targets a single-route Vertex ``:rawPredict`` or ``:predict`` endpoint."""
+    if not isinstance(raw_url, str):
+        return False
+    parsed = urllib.parse.urlparse(raw_url.strip())
+    path = (parsed.path or "").rstrip("/")
+    return path.endswith(":rawPredict") or path.endswith(":predict")
+
+
 def _validate_http_url(url: str) -> str:
     """Validate that an endpoint URL uses http or https with a non-empty host (blocks file:// SSRF)."""
-    if not isinstance(url, str):
-        raise SchemaContractViolationError(f"endpoint URL must be a string, got {url!r}")
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise SchemaContractViolationError(
-            f"endpoint URL must use http:// or https:// with a valid host, got {url!r}"
-        )
+    parse_url_origin(url)
     return url
+
+
+def _validate_header_map(headers: Mapping[str, str]) -> dict[str, str]:
+    """Validate header names and values against CR/LF header injection."""
+    clean_headers: dict[str, str] = {}
+    for raw_name, raw_value in headers.items():
+        header_name = str(raw_name)
+        header_value = str(raw_value)
+        if "\r" in header_name or "\n" in header_name or "\r" in header_value or "\n" in header_value:
+            raise SchemaContractViolationError(
+                f"HTTP header {header_name!r} must not contain CR or LF characters"
+            )
+        clean_headers[header_name] = header_value
+    return clean_headers
+
+
+class _BoundedConnectHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection capping TCP + TLS handshake latency at ``CONNECT_TIMEOUT_SECONDS``."""
+
+    def connect(self) -> None:
+        read_timeout = self.timeout
+        if isinstance(read_timeout, (int, float)) and math.isfinite(read_timeout):
+            self.timeout = min(float(read_timeout), CONNECT_TIMEOUT_SECONDS)
+        else:
+            self.timeout = CONNECT_TIMEOUT_SECONDS
+        try:
+            super().connect()
+        finally:
+            self.timeout = read_timeout
+        if self.sock is not None and isinstance(read_timeout, (int, float)):
+            self.sock.settimeout(float(read_timeout))
+
+
+class _BoundedConnectHTTPSHandler(urllib.request.HTTPSHandler):
+    """urllib HTTPS handler binding ``_BoundedConnectHTTPSConnection``."""
+
+    def __init__(self, context: ssl.SSLContext | None = None) -> None:
+        super().__init__(context=context)
+        self._ssl_context = context
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(
+            _BoundedConnectHTTPSConnection,
+            req,
+            context=self._ssl_context,
+        )
+
+
+class _OriginGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Preserve 307/308 POST bodies while stripping credentials and blocking HTTPS->HTTP downgrades."""
+
+    def __init__(self, *, allow_insecure_http: bool = True) -> None:
+        super().__init__()
+        self._allow_insecure_http = bool(allow_insecure_http)
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: http.client.HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        first_origin = getattr(
+            request,
+            "_mdm_first_origin",
+            parse_url_origin(request.full_url, allow_insecure_http=self._allow_insecure_http),
+        )
+        resolved_url = urllib.parse.urljoin(request.full_url, newurl.replace(" ", "%20"))
+        next_origin = parse_url_origin(resolved_url, allow_insecure_http=self._allow_insecure_http)
+        if first_origin[0] == "https" and next_origin[0] != "https":
+            raise SchemaContractViolationError(
+                f"refusing HTTPS-to-HTTP downgrade redirect from {request.full_url!r} to {resolved_url!r}"
+            )
+        method = request.get_method()
+        if code in (307, 308) and method not in ("GET", "HEAD"):
+            copied_headers = {
+                key: val
+                for key, val in request.header_items()
+                if key.lower() not in ("host", "content-length")
+            }
+            redirected: urllib.request.Request | None = urllib.request.Request(
+                resolved_url,
+                data=request.data,
+                headers=copied_headers,
+                origin_req_host=request.origin_req_host,
+                unverifiable=True,
+                method=method,
+            )
+        else:
+            redirected = super().redirect_request(request, fp, code, msg, headers, newurl)
+            if redirected is None:
+                return None
+            next_origin = parse_url_origin(
+                redirected.full_url, allow_insecure_http=self._allow_insecure_http
+            )
+            if first_origin[0] == "https" and next_origin[0] != "https":
+                raise SchemaContractViolationError(
+                    f"refusing HTTPS-to-HTTP downgrade redirect from {request.full_url!r} to {redirected.full_url!r}"
+                )
+
+        crossed_origin = bool(
+            getattr(request, "_mdm_crossed_origin", False) or (first_origin != next_origin)
+        )
+        setattr(redirected, "_mdm_first_origin", first_origin)
+        setattr(redirected, "_mdm_crossed_origin", crossed_origin)
+        if crossed_origin:
+            for header_dict in (redirected.headers, redirected.unredirected_hdrs):
+                removable = [
+                    key for key in header_dict if key.lower() in _CREDENTIAL_HEADER_NAMES
+                ]
+                for key in removable:
+                    del header_dict[key]
+        return redirected
+
+
+def _build_origin_guarded_opener(*, allow_insecure_http: bool = True) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        _OriginGuardedRedirectHandler(allow_insecure_http=allow_insecure_http),
+        _BoundedConnectHTTPSHandler(),
+    )
 
 
 def _validate_resource_segment(label: str, value: str) -> str:
@@ -233,6 +420,21 @@ def _validate_slot_distribution(dist: Any, label: str) -> dict[str, float]:
     return clean
 
 
+MAX_HTTP_RESPONSE_BYTES: int = 8 * 1024 * 1024
+
+
+def _read_bounded_utf8_response(response: http.client.HTTPResponse, max_bytes: int = MAX_HTTP_RESPONSE_BYTES) -> str:
+    raw_bytes = response.read(max_bytes + 1)
+    if len(raw_bytes) > max_bytes:
+        raise SchemaContractViolationError(
+            f"upstream HTTP response exceeded maximum size limit ({max_bytes} bytes)"
+        )
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SchemaContractViolationError(f"upstream HTTP response is not valid UTF-8: {exc}") from exc
+
+
 def _post_json_with_retry(
     url: str,
     payload: Mapping[str, Any],
@@ -242,14 +444,18 @@ def _post_json_with_retry(
     max_retries: int = 2,
     base_backoff_sec: float = 0.05,
     sla_deadline_monotonic: float | None = None,
+    allow_insecure_http: bool = True,
 ) -> dict[str, Any]:
     """Execute a JSON POST with bounded jittered retries on transient HTTP/network errors."""
+    parse_url_origin(url, allow_insecure_http=allow_insecure_http)
+    clean_headers = _validate_header_map(headers)
     try:
         raw_body = json.dumps(payload, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise SchemaContractViolationError(f"failed to serialize request payload: {exc}") from exc
     attempts = max(0, int(max_retries)) + 1
     last_err: Exception | None = None
+    opener = _build_origin_guarded_opener(allow_insecure_http=allow_insecure_http)
 
     for attempt in range(attempts):
         now = time.monotonic()
@@ -260,12 +466,12 @@ def _post_json_with_retry(
                 raise UpstreamTransientError("SLA deadline exhausted before upstream call")
             eff_timeout = min(timeout_sec, rem)
 
-        req = urllib.request.Request(url, data=raw_body, headers=dict(headers), method="POST")
+        request = urllib.request.Request(url, data=raw_body, headers=dict(clean_headers), method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=eff_timeout) as resp:
-                raw_resp = resp.read().decode("utf-8")
+            with opener.open(request, timeout=eff_timeout) as response:
+                raw_response_text = _read_bounded_utf8_response(response)
             try:
-                parsed = json.loads(raw_resp)
+                parsed = json.loads(raw_response_text)
             except json.JSONDecodeError as exc:
                 raise SchemaContractViolationError(f"upstream returned invalid JSON: {exc}") from exc
             if not isinstance(parsed, dict):
@@ -283,7 +489,9 @@ def _post_json_with_retry(
                     f"non-retryable upstream HTTP {code} from {url}",
                     status_code=code,
                 ) from exc
-        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        except SchemaContractViolationError:
+            raise
+        except (TimeoutError, socket.timeout, urllib.error.URLError, http.client.HTTPException) as exc:
             last_err = UpstreamTransientError(f"upstream timeout or transport error: {exc}")
 
         if attempt + 1 < attempts:
@@ -325,8 +533,10 @@ class MockCallableBackend:
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise SchemaContractViolationError("MockCallableBackend name must be a non-empty string")
-        if not callable(fn):
-            raise SchemaContractViolationError("MockCallableBackend fn must be callable")
+        if not callable(fn) or inspect.iscoroutinefunction(fn):
+            raise SchemaContractViolationError(
+                "MockCallableBackend fn must be a synchronous callable, not a coroutine function"
+            )
         self.name = name
         self._fn = fn
         self.last_evidence: dict[str, str] = {}
@@ -351,27 +561,107 @@ class DgemSystemOneBackend:
         max_retries: int = 2,
         base_backoff_sec: float = 0.05,
         name: str = "dgem_systemone",
+        *,
+        server_key: str | None = None,
+        allow_insecure_http: bool = True,
     ) -> None:
         if not isinstance(endpoint_url, str):
             raise SchemaContractViolationError(
                 f"endpoint_url must be a string, got {endpoint_url!r}"
             )
         clean_url = endpoint_url.rstrip("/")
-        _validate_http_url(clean_url)
+        self.allow_insecure_http = bool(allow_insecure_http)
+        parse_url_origin(clean_url, allow_insecure_http=self.allow_insecure_http)
         if api_key is not None and not isinstance(api_key, str):
             raise SchemaContractViolationError(
                 f"api_key must be a string or None, got {api_key!r}"
             )
+        if server_key is not None and not isinstance(server_key, str):
+            raise SchemaContractViolationError(
+                f"server_key must be a string or None, got {server_key!r}"
+            )
+        resolved_server_key: str | None = None
+        if server_key:
+            for candidate_key in server_key.split(","):
+                stripped_key = candidate_key.strip()
+                if stripped_key:
+                    resolved_server_key = stripped_key
+                    break
+        if api_key:
+            _validate_header_map({"Authorization": f"Bearer {api_key}"})
+        if resolved_server_key:
+            _validate_header_map({"X-DGem-Key": resolved_server_key})
         if not isinstance(name, str) or not name.strip():
             raise SchemaContractViolationError("DgemSystemOneBackend name must be a non-empty string")
         self.endpoint_url = clean_url
         self.api_key = api_key
+        self.server_key = resolved_server_key
         self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
         self.max_retries = _require_nonneg_int(max_retries, "max_retries")
         self.base_backoff_sec = _require_nonneg_finite_number(base_backoff_sec, "base_backoff_sec")
         self.name = name
         self.last_evidence: dict[str, str] = {}
         self.last_trace: dict[str, Any] = {}
+
+    def resolve_predict_url(self) -> str:
+        """Resolve the prediction route, preserving single-route Vertex ``:rawPredict`` endpoints."""
+        if self.endpoint_url.endswith("/v1/systemone") or is_raw_predict_endpoint(self.endpoint_url):
+            return self.endpoint_url
+        if self.endpoint_url.endswith("/v1"):
+            return f"{self.endpoint_url}/systemone"
+        return f"{self.endpoint_url}/v1/systemone"
+
+    def _build_auth_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.server_key:
+            headers["X-DGem-Key"] = self.server_key
+        return _validate_header_map(headers)
+
+    def health(self) -> dict[str, Any]:
+        """Probe backend health via ``POST {"health": true}`` on ``:rawPredict`` or ``GET /health``."""
+        headers = self._build_auth_headers()
+        if is_raw_predict_endpoint(self.endpoint_url):
+            return _post_json_with_retry(
+                self.endpoint_url,
+                {"health": True},
+                headers,
+                timeout_sec=self.timeout_sec,
+                max_retries=self.max_retries,
+                base_backoff_sec=self.base_backoff_sec,
+                allow_insecure_http=self.allow_insecure_http,
+            )
+        base_root = self.endpoint_url
+        for suffix in ("/v1/systemone", "/v1"):
+            if base_root.endswith(suffix):
+                base_root = base_root[: -len(suffix)]
+                break
+        health_url = f"{base_root}/health"
+        parse_url_origin(health_url, allow_insecure_http=self.allow_insecure_http)
+        opener = _build_origin_guarded_opener(allow_insecure_http=self.allow_insecure_http)
+        request = urllib.request.Request(
+            health_url,
+            headers={k: v for k, v in headers.items() if k.lower() != "content-type"},
+            method="GET",
+        )
+        try:
+            with opener.open(request, timeout=self.timeout_sec) as response:
+                parsed = json.loads(_read_bounded_utf8_response(response))
+        except SchemaContractViolationError:
+            raise
+        except urllib.error.HTTPError as exc:
+            code = int(exc.code)
+            if code in _RETRYABLE_HTTP_STATUS:
+                raise UpstreamTransientError(f"transient upstream HTTP {code} from {health_url}", status_code=code) from exc
+            raise SchemaContractViolationError(f"non-retryable upstream HTTP {code} from {health_url}", status_code=code) from exc
+        except (TimeoutError, socket.timeout, urllib.error.URLError, http.client.HTTPException) as exc:
+            raise UpstreamTransientError(f"upstream health error: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise SchemaContractViolationError(f"upstream health returned invalid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise SchemaContractViolationError("upstream health JSON root must be an object")
+        return parsed
 
     def build_payload(
         self,
@@ -495,15 +785,9 @@ class DgemSystemOneBackend:
         questions: Mapping[str, DecisionQuestion],
         images: list[str] | None = None,
     ) -> dict[str, dict[str, float]]:
-        url = (
-            self.endpoint_url
-            if self.endpoint_url.endswith("/v1/systemone")
-            else f"{self.endpoint_url}/v1/systemone"
-        )
-        _validate_http_url(url)
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        url = self.resolve_predict_url()
+        parse_url_origin(url, allow_insecure_http=self.allow_insecure_http)
+        headers = self._build_auth_headers()
         data = _post_json_with_retry(
             url,
             self.build_payload(state, questions, images),
@@ -511,6 +795,7 @@ class DgemSystemOneBackend:
             timeout_sec=self.timeout_sec,
             max_retries=self.max_retries,
             base_backoff_sec=self.base_backoff_sec,
+            allow_insecure_http=self.allow_insecure_http,
         )
         dists, ev_map, trace = self.parse_response(data, questions)
         self.last_evidence = ev_map
@@ -530,7 +815,7 @@ class GevStudioSystemOneBackend:
 
     def __init__(
         self,
-        endpoint_url: str = "https://gevstudio.corp.google.com/api/gev/systemone",
+        endpoint_url: str | None = None,
         target: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
@@ -543,11 +828,19 @@ class GevStudioSystemOneBackend:
         base_backoff_sec: float = 0.05,
         name: str | None = None,
     ) -> None:
-        if not isinstance(endpoint_url, str):
-            raise SchemaContractViolationError(
-                f"endpoint_url must be a string, got {endpoint_url!r}"
+        resolved_endpoint_url = (
+            endpoint_url
+            if endpoint_url is not None
+            else os.environ.get(
+                "GEV_STUDIO_ENDPOINT_URL",
+                "https://gevstudio.example.com/api/gev/systemone",
             )
-        clean_url = endpoint_url.rstrip("/")
+        )
+        if not isinstance(resolved_endpoint_url, str):
+            raise SchemaContractViolationError(
+                f"endpoint_url must be a string, got {resolved_endpoint_url!r}"
+            )
+        clean_url = resolved_endpoint_url.rstrip("/")
         _validate_http_url(clean_url)
         if target is not None and (not isinstance(target, str) or not target.strip()):
             raise SchemaContractViolationError(f"target must be a non-empty string or None, got {target!r}")
@@ -1081,12 +1374,12 @@ class OpenAILogprobBackend:
             )
 
         for letter, key in letter_to_key.items():
-            best_lp = float("-inf")
+            accumulated_lp = float("-inf")
             for tok, lp in top_logprobs.items():
                 val = float(lp)
-                if tok.strip() == letter and val > best_lp:
-                    best_lp = val
-            letter_logits[key] = best_lp
+                if tok.strip() == letter:
+                    accumulated_lp = _logaddexp(accumulated_lp, val)
+            letter_logits[key] = accumulated_lp
 
         finite_vals = [v for v in letter_logits.values() if math.isfinite(v)]
         if not finite_vals:
@@ -1454,29 +1747,37 @@ class VertexGeminiBackend:
                     raise SchemaContractViolationError(
                         "Vertex Gemini topCandidates.candidates must be a JSON array"
                     )
+                dedup_cands: dict[tuple[str, Any], float] = {}
+                for c_entry in cands or []:
+                    if not isinstance(c_entry, Mapping):
+                        raise SchemaContractViolationError(
+                            "Vertex Gemini topCandidates entry must be a JSON object"
+                        )
+                    raw_tok_obj = c_entry.get("token", "")
+                    ct = str(raw_tok_obj).strip('" ')
+                    if ct in letter_to_key or ct in key_to_letter:
+                        raw_lp = c_entry.get("logProbability", float("-inf"))
+                        if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, float)):
+                            raise SchemaContractViolationError(
+                                f"non-numeric logProbability on slot {qid!r}: {raw_lp!r}"
+                            )
+                        lp = float(raw_lp)
+                        if math.isnan(lp) or (math.isinf(lp) and lp > 0.0):
+                            raise LogprobAlignmentError(
+                                f"invalid non-finite logProbability {lp!r} on slot {qid!r}"
+                            )
+                        dedup_key = (str(raw_tok_obj), c_entry.get("tokenId"))
+                        if dedup_key not in dedup_cands or lp > dedup_cands[dedup_key]:
+                            dedup_cands[dedup_key] = lp
+
                 logits: dict[str, float] = {}
                 for ltr, k in letter_to_key.items():
-                    best_lp = float("-inf")
-                    for c_entry in cands or []:
-                        if not isinstance(c_entry, Mapping):
-                            raise SchemaContractViolationError(
-                                "Vertex Gemini topCandidates entry must be a JSON object"
-                            )
-                        ct = str(c_entry.get("token", "")).strip('" ')
+                    accumulated_lp = float("-inf")
+                    for (raw_tok_str, _tok_id), lp in dedup_cands.items():
+                        ct = raw_tok_str.strip('" ')
                         if ct == ltr or ct == k:
-                            raw_lp = c_entry.get("logProbability", float("-inf"))
-                            if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, float)):
-                                raise SchemaContractViolationError(
-                                    f"non-numeric logProbability on slot {qid!r}: {raw_lp!r}"
-                                )
-                            lp = float(raw_lp)
-                            if math.isnan(lp) or (math.isinf(lp) and lp > 0.0):
-                                raise LogprobAlignmentError(
-                                    f"invalid non-finite logProbability {lp!r} on slot {qid!r}"
-                                )
-                            if lp > best_lp:
-                                best_lp = lp
-                    logits[k] = best_lp
+                            accumulated_lp = _logaddexp(accumulated_lp, lp)
+                    logits[k] = accumulated_lp
 
                 finite = [v for v in logits.values() if math.isfinite(v)]
                 if finite and math.isfinite(logits.get(selected_key, float("-inf"))):
@@ -2977,7 +3278,7 @@ class CascadeDecisionOrchestrator:
                         method=self.conformal_method,
                         lam_reg=self.conformal_lam_reg,
                         k_reg=self.conformal_k_reg,
-                        abstain_keys=self.oos_keys | DEFAULT_CONFORMAL_ABSTAIN_KEYS,
+                        abstain_keys=self.oos_keys,
                         randomized=self.conformal_randomized,
                         seed=self.conformal_seed,
                         rng=self.conformal_rng,

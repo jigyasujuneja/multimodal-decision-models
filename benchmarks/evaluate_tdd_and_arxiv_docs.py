@@ -126,6 +126,8 @@ META_AND_CLIENT_LEAKAGE_PATTERNS: List[Tuple[str, str]] = [
     (r"ul-fs-s-sandbx-16-prj", "client_leak: GCP sandbox project ID"),
     (r"\bProject\s+Aegis\b", "client_leak: internal codename Project Aegis"),
     (r"80%\s+of\s+the\s+way", "meta_prompt_leak: conversational prompt phrase '80% of the way'"),
+    (r"\." + "uplink" + r"\.goog", "proxy_leak: internal uplink proxy domain"),
+    ("artifact" + "-foundry", "proxy_leak: internal package mirror hostname"),
 ]
 
 # Stale model alias patterns & retired synthetic benchmark model names (strictly 0 allowed)

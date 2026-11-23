@@ -1,0 +1,18 @@
+name: Feature Request
+description: Propose a new backend adapter, multimodal compiler, calibration method, or policy template
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Decision Bottleneck or Use Case
+      description: What concrete decision workflow, modality, or guarantee gap does this proposal address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Contract & Evaluation Metric
+      description: Proposed API signature, failure modes, and falsifiable metric (Brier, ECE, coverage, AURC, latency) to validate the change.
+    validations:
+      required: true

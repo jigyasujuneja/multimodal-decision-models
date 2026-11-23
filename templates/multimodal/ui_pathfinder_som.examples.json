@@ -1,0 +1,37 @@
+{
+  "examples": [
+    {
+      "name": "typical",
+      "unambiguous": true,
+      "variables": {
+        "goal": "Submit the deployment configuration form by clicking the enabled primary CTA button [M5]",
+        "step": 3,
+        "viewport": "desktop-1440x900",
+        "samples": 1
+      },
+      "expected_answers": {
+        "next_target_mark": "M5",
+        "element_state": "interactive_ready",
+        "loop_or_error_detected": false
+      }
+    },
+    {
+      "name": "edge",
+      "variables": {
+        "goal": "Dismiss the blocking cookie consent banner [M7] occluding the checkout form",
+        "step": 1,
+        "viewport": "mobile-390x844",
+        "samples": 1
+      },
+      "expected_answers": {
+        "next_target_mark": "M7",
+        "element_state": "occluded_by_modal",
+        "loop_or_error_detected": true
+      }
+    },
+    {
+      "name": "minimal",
+      "variables": {}
+    }
+  ]
+}
