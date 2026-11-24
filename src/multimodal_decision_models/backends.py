@@ -54,7 +54,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .calibration import VALID_PRIOR_GATE_MODES, DomainCompetenceProfile, apply_layer5_deterministic_guards, compute_dawid_skene_poe_weights, inject_evidence_slot, is_uniform_distribution, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
+from .calibration import MAX_TEMPERATURE, MIN_TEMPERATURE, VALID_PRIOR_GATE_MODES, DomainCompetenceProfile, apply_layer5_deterministic_guards, compute_dawid_skene_poe_weights, inject_evidence_slot, is_uniform_distribution, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
 from .conformal import compute_bayes_value_of_information, conformal_prediction_set
 from .contracts import UNTRUSTED_BOUNDARY_NOTICE, ContentAddressedDecisionCache, DecisionContractError, LogprobAlignmentError, SchemaContractViolationError, UpstreamTransientError, _sanitize_value, compute_decision_cache_key, wrap_untrusted_state
 from .shortlist import prune_choice_top_k, shortlist_wide_question, split_identifier_tokens
@@ -3652,7 +3652,12 @@ class CascadeDecisionOrchestrator:
         )
         self.prior_weight = _require_nonneg_finite_number(prior_weight, "prior_weight")
         self.prior_gate_mode = prior_gate_mode
-        self.temperature = _require_positive_finite_number(temperature, "temperature")
+        clean_init_temp = _require_positive_finite_number(temperature, "temperature")
+        if not (MIN_TEMPERATURE <= clean_init_temp <= MAX_TEMPERATURE):
+            raise SchemaContractViolationError(
+                f"temperature must lie in [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}], got {temperature!r}"
+            )
+        self.temperature = clean_init_temp
         self.shortlist_top_k = _require_nonneg_int(shortlist_top_k, "shortlist_top_k")
         self.shortlist_pairwise_diff = shortlist_pairwise_diff
         self.evidence_prompt = evidence_prompt
@@ -4028,8 +4033,10 @@ class CascadeDecisionOrchestrator:
             clean_hes = _require_finite_number(self.hesitation_threshold, "hesitation_threshold")
             clean_pw = _require_nonneg_finite_number(self.prior_weight, "prior_weight")
             clean_temp = _require_finite_number(self.temperature, "temperature")
-            if clean_temp <= 0.0:
-                raise SchemaContractViolationError(f"temperature must be > 0, got {self.temperature!r}")
+            if not (MIN_TEMPERATURE <= clean_temp <= MAX_TEMPERATURE):
+                raise SchemaContractViolationError(
+                    f"temperature must lie in [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}], got {self.temperature!r}"
+                )
             clean_top_k = _require_strict_int(self.shortlist_top_k, "shortlist_top_k")
             clean_sla = _require_finite_number(self.sla_timeout_sec, "sla_timeout_sec")
             if clean_sla <= 0.0:

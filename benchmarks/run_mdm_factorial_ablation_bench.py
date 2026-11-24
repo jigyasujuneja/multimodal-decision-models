@@ -2003,7 +2003,13 @@ def run_tier_ablation(
                 "p_exact_two_sided": mc.p_two_sided,
             }
         )
-    adj_mc_p, rej_mc = holm_bonferroni_adjust(raw_mcnemar_p, alpha=0.05)
+    adj_mc_p, rej_mc = holm_bonferroni_adjust(
+        raw_mcnemar_p,
+        alpha=0.05,
+        effect_signs=[
+            rec["arm_wins_n01"] > rec["baseline_wins_n10"] for rec in mcnemar_records
+        ],
+    )
     for idx, rec_mc in enumerate(mcnemar_records):
         rec_mc["p_holm_adjusted"] = adj_mc_p[idx]
         rec_mc["significant_fwer_005"] = rej_mc[idx]

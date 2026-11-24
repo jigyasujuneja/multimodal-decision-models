@@ -257,7 +257,12 @@ func (c CascadeConfig) Validate() error {
 		return fmt.Errorf("mdm: HesitationThreshold must be finite and >= 0, got %v", c.HesitationThreshold)
 	}
 	if math.IsNaN(c.Temperature) || math.IsInf(c.Temperature, 0) || c.Temperature < 0 {
-		return fmt.Errorf("mdm: Temperature must be finite and > 0, got %v", c.Temperature)
+		return fmt.Errorf("mdm: Temperature must lie in [%v, %v] when set (or 0 for default 1.0), got %v", MinTemperature, MaxTemperature, c.Temperature)
+	}
+	if c.Temperature != 0 {
+		if err := ValidateTemperature(c.Temperature); err != nil {
+			return err
+		}
 	}
 	if math.IsNaN(c.PriorWeight) || math.IsInf(c.PriorWeight, 0) || c.PriorWeight < 0 {
 		return fmt.Errorf("mdm: PriorWeight must be finite and >= 0, got %v", c.PriorWeight)

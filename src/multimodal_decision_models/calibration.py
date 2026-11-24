@@ -38,6 +38,9 @@ from typing import Mapping, Sequence
 from .contracts import SchemaContractViolationError
 from .types import DEFAULT_HESITATION_THRESHOLD, MAX_OPTIONS_PER_SLOT, MAX_SLOTS_PER_PASS, DecisionQuestion
 
+MIN_TEMPERATURE: float = 1e-3
+MAX_TEMPERATURE: float = 100.0
+
 VALID_PRIOR_GATE_MODES: tuple[str, ...] = (
     "always",
     "confident",
@@ -139,9 +142,11 @@ def pre_gated_bayesian_poe_fusion(
         isinstance(temperature, bool)
         or not isinstance(temperature, (int, float))
         or not math.isfinite(float(temperature))
-        or float(temperature) <= 0.0
+        or not (MIN_TEMPERATURE <= float(temperature) <= MAX_TEMPERATURE)
     ):
-        raise SchemaContractViolationError(f"temperature must be > 0, got {temperature!r}")
+        raise SchemaContractViolationError(
+            f"temperature must lie in [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}], got {temperature!r}"
+        )
     if (
         isinstance(prior_weight, bool)
         or not isinstance(prior_weight, (int, float))
@@ -198,18 +203,27 @@ def pre_gated_bayesian_poe_fusion(
     if (not prior_logits or eff_weight == 0.0) and math.isclose(temp_f, 1.0):
         return dict(norm_raw), h_raw, should_escalate
 
-    # Step 2: Log-space Bayesian Product-of-Experts fusion:
-    # log P_fused(k) = (1 / T) * log P_raw(k) + eff_weight * prior_logit(k)
+    # Step 2: Log-space Bayesian Product-of-Experts fusion with pre-division logit shift:
+    # log P_fused(k) = ((log P_raw(k) - max_j log P_raw(j)) / T) + eff_weight * prior_logit(k)
     eps = 1e-12
+    raw_logits: dict[str, float] = {
+        option_key: math.log(max(eps, prob_val)) for option_key, prob_val in norm_raw.items()
+    }
+    max_raw_log = max(raw_logits.values())
     log_scores: dict[str, float] = {}
-    for k, p in norm_raw.items():
-        prior_val = float(prior_logits.get(k, 0.0)) if prior_logits else 0.0
-        log_scores[k] = (math.log(max(eps, p)) / temp_f) + (eff_weight * prior_val)
+    for option_key, raw_log_val in raw_logits.items():
+        prior_val = float(prior_logits.get(option_key, 0.0)) if prior_logits else 0.0
+        log_scores[option_key] = ((raw_log_val - max_raw_log) / temp_f) + (
+            eff_weight * prior_val
+        )
 
     max_log = max(log_scores.values())
-    exp_scores = {k: math.exp(v - max_log) for k, v in log_scores.items()}
+    exp_scores = {
+        option_key: math.exp(score_val - max_log)
+        for option_key, score_val in log_scores.items()
+    }
     denom = sum(exp_scores.values())
-    fused = {k: v / denom for k, v in exp_scores.items()}
+    fused = {option_key: exp_val / denom for option_key, exp_val in exp_scores.items()}
     return fused, h_raw, should_escalate
 
 

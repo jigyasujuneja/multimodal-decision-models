@@ -38,13 +38,17 @@ from .conformal import calibrate_conformal_quantile, conformal_prediction_set, h
 
 @dataclass(frozen=True)
 class McNemarResult:
-    """Two-sided exact binomial and continuity-corrected chi-square Paired McNemar test."""
+    """Exact binomial and directional superiority Paired McNemar test result."""
 
     n_pairs: int
     n01_arm_wins: int
     n10_baseline_wins: int
     chi2_cc: float
     p_two_sided: float
+    p_one_sided_greater: float = 1.0
+    positive_direction: bool = False
+    significant_improvement: bool = False
+    reject_h0: bool = False
 
 
 def _normalize_dist(dist: Mapping[str, float]) -> dict[str, float]:
@@ -162,10 +166,32 @@ def selective_risk_coverage_aurc(
 def paired_mcnemar_test(
     arm_correct: Sequence[bool],
     baseline_correct: Sequence[bool],
+    *,
+    alpha: float = 0.05,
 ) -> McNemarResult:
-    """Evaluate paired binary accuracy differences via exact log-gamma binomial tail."""
+    """Evaluate paired binary accuracy differences via exact binomial tails and direction guard.
+
+    Args:
+      arm_correct: Per-item correctness flags for the candidate arm.
+      baseline_correct: Per-item correctness flags for the baseline arm.
+      alpha: Significance threshold in (0, 1) for directional superiority.
+
+    Returns:
+      `McNemarResult` containing two-sided exact p-value, one-sided superiority
+      p-value, `positive_direction` (`n01 > n10`), and directional rejection flags.
+
+    Raises:
+      ValueError: If sequence lengths differ, are empty, or `alpha` is outside (0, 1).
+    """
     if len(arm_correct) != len(baseline_correct) or not arm_correct:
         raise ValueError("arm_correct and baseline_correct must be non-empty sequences of equal length")
+    if (
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not math.isfinite(float(alpha))
+        or not (0.0 < float(alpha) < 1.0)
+    ):
+        raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
     n01 = 0  # baseline wrong, arm right
     n10 = 0  # baseline right, arm wrong
     for arm_ok, base_ok in zip(arm_correct, baseline_correct):
@@ -175,23 +201,23 @@ def paired_mcnemar_test(
             n10 += 1
 
     discordant_total = n01 + n10
-    if discordant_total == 0 or n01 == n10:
+    if discordant_total == 0:
         return McNemarResult(
             n_pairs=len(arm_correct),
             n01_arm_wins=n01,
             n10_baseline_wins=n10,
             chi2_cc=0.0,
             p_two_sided=1.0,
+            p_one_sided_greater=1.0,
+            positive_direction=False,
+            significant_improvement=False,
+            reject_h0=False,
         )
-    chi2_cc = (
-        ((abs(n01 - n10) - 1.0) ** 2) / float(discordant_total)
-        if abs(n01 - n10) > 1
-        else 0.0
-    )
-    k_min = min(n01, n10)
+
     log_denom = float(discordant_total) * math.log(2.0)
     lgamma_total = math.lgamma(discordant_total + 1)
-    one_tail = sum(
+    k_min = min(n01, n10)
+    tail_terms = [
         math.exp(
             lgamma_total
             - math.lgamma(idx + 1)
@@ -199,14 +225,46 @@ def paired_mcnemar_test(
             - log_denom
         )
         for idx in range(k_min + 1)
+    ]
+    one_tail = sum(tail_terms)
+    if n01 == 0:
+        upper_tail = 1.0
+    elif n01 > n10:
+        upper_tail = min(1.0, one_tail)
+    else:
+        upper_tail = min(1.0, max(0.0, 1.0 - sum(tail_terms[:-1])))
+
+    if n01 == n10:
+        return McNemarResult(
+            n_pairs=len(arm_correct),
+            n01_arm_wins=n01,
+            n10_baseline_wins=n10,
+            chi2_cc=0.0,
+            p_two_sided=1.0,
+            p_one_sided_greater=upper_tail,
+            positive_direction=False,
+            significant_improvement=False,
+            reject_h0=False,
+        )
+
+    chi2_cc = (
+        ((abs(n01 - n10) - 1.0) ** 2) / float(discordant_total)
+        if abs(n01 - n10) > 1
+        else 0.0
     )
     p_val = min(1.0, 2.0 * one_tail)
+    positive_direction = n01 > n10
+    significant_win = bool(positive_direction and p_val <= float(alpha))
     return McNemarResult(
         n_pairs=len(arm_correct),
         n01_arm_wins=n01,
         n10_baseline_wins=n10,
         chi2_cc=chi2_cc,
         p_two_sided=p_val,
+        p_one_sided_greater=upper_tail,
+        positive_direction=positive_direction,
+        significant_improvement=significant_win,
+        reject_h0=significant_win,
     )
 
 
@@ -660,21 +718,50 @@ def holm_bonferroni_adjust(
     p_values: Sequence[float],
     *,
     alpha: float = 0.05,
+    effect_signs: Sequence[float | bool] | None = None,
 ) -> tuple[list[float], list[bool]]:
     """Apply Holm-Bonferroni step-down family-wise error rate adjustment (Holm 1979).
 
-    Returns `(adjusted_p_values, rejected_flags)` in the original input order.
+    Args:
+      p_values: Raw hypothesis p-values in [0.0, 1.0].
+      alpha: Family-wise error rate threshold in (0.0, 1.0).
+      effect_signs: Optional directional indicators (`bool` or numeric effect deltas
+        such as `arm_wins - baseline_wins`). When provided, any hypothesis with a
+        non-positive direction (`False` or `<= 0.0`) cannot be marked rejected.
+
+    Returns:
+      `(adjusted_p_values, rejected_flags)` in the original input order.
+
+    Raises:
+      ValueError: If `p_values` is empty, `alpha` is outside (0, 1), any p-value is
+        invalid, or `effect_signs` length/values are invalid.
     """
     m = len(p_values)
     if m == 0:
         raise ValueError("p_values must be non-empty")
     if (
-        not isinstance(alpha, (int, float))
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
         or not math.isfinite(float(alpha))
         or float(alpha) <= 0.0
         or float(alpha) >= 1.0
     ):
         raise ValueError(f"alpha must lie in (0, 1), got {alpha!r}")
+
+    positive_flags: list[bool] = [True] * m
+    if effect_signs is not None:
+        if len(effect_signs) != m:
+            raise ValueError(
+                f"effect_signs length ({len(effect_signs)}) must match p_values length ({m})"
+            )
+        positive_flags = []
+        for idx, sign_val in enumerate(effect_signs):
+            if isinstance(sign_val, bool):
+                positive_flags.append(sign_val)
+            elif isinstance(sign_val, (int, float)) and not math.isnan(float(sign_val)):
+                positive_flags.append(float(sign_val) > 0.0)
+            else:
+                raise ValueError(f"invalid effect_signs entry at index {idx}: {sign_val!r}")
 
     validated_pairs: list[tuple[int, float]] = []
     for orig_idx, raw_p in enumerate(p_values):
@@ -698,7 +785,7 @@ def holm_bonferroni_adjust(
         running_max = max(running_max, min(1.0, p_val * mult))
         adj[orig_idx] = running_max
         if still_rejecting and running_max <= alpha_bound:
-            rej[orig_idx] = True
+            rej[orig_idx] = positive_flags[orig_idx]
         else:
             still_rejecting = False
             rej[orig_idx] = False
