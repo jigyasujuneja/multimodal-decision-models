@@ -395,3 +395,99 @@ func TestCascadeContextCancellationAndVoIConfigBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestTemperatureBoundsLogSpaceStabilityAndPreSharpeningEntropy(t *testing.T) {
+	keys := []string{"opt_a", "opt_b", "opt_c"}
+	rawThree := map[string]float64{"opt_a": 0.35, "opt_b": 0.33, "opt_c": 0.32}
+
+	_, _, _, expectedUnscaledH := NormalizeAndScale(rawThree, keys, 1.0)
+	sharpProbs, sharpWin, _, _ := NormalizeAndScale(rawThree, keys, MinTemperature)
+	if sharpWin != "opt_a" {
+		t.Fatalf("expected winner opt_a at T=%v, got %q", MinTemperature, sharpWin)
+	}
+	probSum := 0.0
+	for _, k := range keys {
+		p := sharpProbs[k]
+		if math.IsNaN(p) || math.IsInf(p, 0) {
+			t.Fatalf("non-finite probability for %q at T=%v: %v", k, MinTemperature, p)
+		}
+		probSum += p
+	}
+	if math.Abs(probSum-1.0) > 1e-12 || math.Abs(sharpProbs["opt_a"]-1.0) > 1e-12 {
+		t.Fatalf("expected sharp sum=1.0 and opt_a=1.0, got sum=%v opt_a=%v", probSum, sharpProbs["opt_a"])
+	}
+
+	// Config validation: 0 (default 1.0), 1e-3, and 100.0 accepted; outside [1e-3, 100.0] rejected.
+	for _, validTemp := range []float64{0.0, MinTemperature, 0.5, 1.0, MaxTemperature} {
+		cfg := DefaultCascadeConfig()
+		cfg.Temperature = validTemp
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected Temperature=%v to pass Validate(), got %v", validTemp, err)
+		}
+	}
+	for _, badTemp := range []float64{-0.1, 9.99e-4, 100.01, math.NaN(), math.Inf(1)} {
+		cfg := DefaultCascadeConfig()
+		cfg.Temperature = badTemp
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("expected Temperature=%v to fail Validate()", badTemp)
+		}
+	}
+
+	// Pre-sharpening rawNormH in FusePriorWithGate: T=0.1 must not sharpen rawNormH or suppress escalation.
+	twoKeys := []string{"opt_a", "opt_b"}
+	hesRaw := map[string]float64{"opt_a": 0.6, "opt_b": 0.4}
+	flipPrior := map[string]float64{"opt_a": -3.0, "opt_b": 3.0}
+	_, _, _, unscaledTwoH := NormalizeAndScale(hesRaw, twoKeys, 1.0)
+
+	confProbs, confWin, _, confRawH, confFused := FusePriorWithGate(hesRaw, flipPrior, twoKeys, 0.1, 1.0, 0.50, "confident")
+	if confFused {
+		t.Fatal("expected gateMode=confident not to fuse when pre-sharpening rawNormH >= 0.50")
+	}
+	if confWin != "opt_a" || confProbs["opt_a"] <= 0.95 {
+		t.Fatalf("expected sharpened Stage-1 winner opt_a without prior flip, got win=%q probs=%v", confWin, confProbs)
+	}
+	if math.Abs(confRawH-unscaledTwoH) > 1e-12 {
+		t.Fatalf("expected pre-sharpening rawNormH=%v, got %v", unscaledTwoH, confRawH)
+	}
+
+	hesProbs, hesWin, _, hesRawH, hesFused := FusePriorWithGate(hesRaw, flipPrior, twoKeys, 0.1, 1.0, 0.50, "hesitant")
+	if !hesFused {
+		t.Fatal("expected gateMode=hesitant to fuse when pre-sharpening rawNormH >= 0.50")
+	}
+	if hesWin != "opt_b" || hesProbs["opt_b"] <= 0.5 {
+		t.Fatalf("expected prior to flip hesitant slot at T=0.1 when weight is strong, got win=%q probs=%v", hesWin, hesProbs)
+	}
+	if math.Abs(hesRawH-unscaledTwoH) > 1e-12 {
+		t.Fatalf("expected pre-sharpening rawNormH=%v, got %v", unscaledTwoH, hesRawH)
+	}
+	_ = expectedUnscaledH
+
+	// CascadeOrchestrator at T=0.1 still escalates hesitant unscaled Stage-1 slot and reports Confidence = 1 - HRaw.
+	cfgSharp := DefaultCascadeConfig()
+	cfgSharp.Temperature = 0.1
+	cfgSharp.HesitationThreshold = 0.50
+	var s2Calls int32
+	orchSharp, err := NewCascadeOrchestrator(
+		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
+			return map[string]map[string]float64{"q1": {"opt_a": 0.6, "opt_b": 0.4}}, nil
+		}),
+		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
+			atomic.AddInt32(&s2Calls, 1)
+			return map[string]map[string]float64{"q1": {"opt_a": 0.15, "opt_b": 0.85}}, nil
+		}),
+		cfgSharp,
+	)
+	if err != nil {
+		t.Fatalf("NewCascadeOrchestrator sharp failed: %v", err)
+	}
+	sharpRes, err := orchSharp.Evaluate(context.Background(), "s", []ChoiceQuestion{{ID: "q1", Options: twoKeys}})
+	if err != nil {
+		t.Fatalf("Evaluate sharp failed: %v", err)
+	}
+	if !sharpRes.Escalated || atomic.LoadInt32(&s2Calls) != 1 {
+		t.Fatalf("expected T=0.1 hesitant slot to escalate via pre-sharpening rawNormH, escalated=%v s2Calls=%d", sharpRes.Escalated, s2Calls)
+	}
+	if math.Abs(sharpRes.Slots["q1"].Confidence-(1.0-sharpRes.Slots["q1"].HRaw)) > 1e-12 {
+		t.Fatalf("expected Confidence == 1 - HRaw, got %v vs %v", sharpRes.Slots["q1"].Confidence, 1.0-sharpRes.Slots["q1"].HRaw)
+	}
+}

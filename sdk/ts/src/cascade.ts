@@ -15,7 +15,8 @@
  */
 
 import {
-  applyTemperature,
+  MAX_TEMPERATURE,
+  MIN_TEMPERATURE,
   computeDawidSkenePoeWeights,
   fusePriorProbabilities,
   isNegativeTransfer,
@@ -285,8 +286,15 @@ function validateCascadeConfig(config: CascadeConfig): Required<
     throw new MDMValidationError("hesitationThreshold must be a finite number >= 0");
   }
   const temperature = config.temperature ?? 1.0;
-  if (typeof temperature !== "number" || !Number.isFinite(temperature) || temperature <= 0.0) {
-    throw new MDMValidationError("temperature must be a finite number > 0");
+  if (
+    typeof temperature !== "number" ||
+    !Number.isFinite(temperature) ||
+    temperature < MIN_TEMPERATURE ||
+    temperature > MAX_TEMPERATURE
+  ) {
+    throw new MDMValidationError(
+      `temperature must lie in [${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}]`,
+    );
   }
   const priorWeight = config.priorWeight ?? 0.0;
   if (typeof priorWeight !== "number" || !Number.isFinite(priorWeight) || priorWeight < 0.0) {
@@ -451,6 +459,17 @@ export class CascadeOrchestrator {
     const startedAt = performance.now();
     throwIfAborted(request.signal);
 
+    const effTemp = request.temperature ?? this.config.temperature;
+    if (
+      typeof effTemp !== "number" ||
+      !Number.isFinite(effTemp) ||
+      effTemp < MIN_TEMPERATURE ||
+      effTemp > MAX_TEMPERATURE
+    ) {
+      throw new MDMValidationError(
+        `temperature must lie in [${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}]`,
+      );
+    }
     const questionEntries = Object.entries(request.questions ?? {});
     if (questionEntries.length === 0) {
       throw new MDMValidationError("questions must contain at least one slot");
@@ -545,18 +564,16 @@ export class CascadeOrchestrator {
           hRaw = 1.0;
           hesEsc = 1.0 >= this.config.hesitationThreshold;
         } else {
-          const effTemp = request.temperature ?? this.config.temperature;
-          const tempScaled =
-            effTemp === 1.0 ? rawNorm : applyTemperature(rawNorm, effTemp);
-          const poe = fusePriorProbabilities(tempScaled, {
+          const poe = fusePriorProbabilities(rawNorm, {
             priorLogits: slotPrior,
             priorWeight: slotPrior ? this.config.priorWeight : 0.0,
+            temperature: effTemp,
             hesitationThreshold: this.config.hesitationThreshold,
             gateMode: this.config.priorGateMode,
           });
           fusedProbs = poe.probabilities;
-          hRaw = normalizedEntropy(rawNorm);
-          hesEsc = hRaw >= this.config.hesitationThreshold;
+          hRaw = poe.hRaw;
+          hesEsc = poe.escalated;
         }
 
         const predicted = argmaxOption(fusedProbs, optionKeys);
@@ -591,7 +608,7 @@ export class CascadeOrchestrator {
           probabilities: fusedProbs,
           rawProbabilities: rawNorm,
           hRaw,
-          confidence: fusedProbs[predicted] ?? 0.0,
+          confidence: 1.0 - hRaw,
           escalated: false,
           passesUsed: 1,
         };
@@ -769,7 +786,7 @@ export class CascadeOrchestrator {
               probabilities: finalProbs,
               rawProbabilities: expandedS2,
               hRaw: finalHRaw,
-              confidence: finalProbs[finalPred] ?? 0.0,
+              confidence: 1.0 - finalHRaw,
               escalated: true,
               passesUsed: 2,
             };

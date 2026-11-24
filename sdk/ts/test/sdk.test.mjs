@@ -20,8 +20,10 @@ import {
   CascadeOrchestrator,
   DEFAULT_ABSTAIN_LABELS,
   DEFAULT_CONFORMAL_SEED_KEY,
+  MAX_TEMPERATURE,
   MDMClient,
   MDMValidationError,
+  MIN_TEMPERATURE,
   STANDARD_ABSTAIN_LABELS,
   applyTemperature,
   auditAndNormalizeUntrustedText,
@@ -43,6 +45,7 @@ import {
   neutralizeUntrustedDelimiters,
   normalizeAndStripInvisibleSmuggling,
   normalizeCosinePriorLogits,
+  normalizedEntropy,
   polynomialAlphaAtStep,
   pruneChoiceTopK,
   wrapCanaryUntrustedEnvelope,
@@ -1296,6 +1299,124 @@ async function runTests() {
       MDMValidationError,
     );
   }
+
+  // 15. Temperature [1e-3, 100.0] bounds, pre-division logit shift, pre-sharpening hRaw, and confidence = 1 - hRaw.
+  assert.equal(MIN_TEMPERATURE, 1e-3);
+  assert.equal(MAX_TEMPERATURE, 100.0);
+
+  const sharpThree = applyTemperature({ opt_a: 0.35, opt_b: 0.33, opt_c: 0.32 }, 1e-3);
+  assert.ok(Number.isFinite(sharpThree.opt_a) && Number.isFinite(sharpThree.opt_b) && Number.isFinite(sharpThree.opt_c));
+  assert.ok(Math.abs(sharpThree.opt_a + sharpThree.opt_b + sharpThree.opt_c - 1.0) < 1e-12);
+  assert.ok(Math.abs(sharpThree.opt_a - 1.0) < 1e-12);
+
+  const flatThree = applyTemperature({ opt_a: 0.35, opt_b: 0.33, opt_c: 0.32 }, 100.0);
+  assert.ok(Math.abs(flatThree.opt_a + flatThree.opt_b + flatThree.opt_c - 1.0) < 1e-12);
+
+  for (const badTemp of [0.0, -0.5, 9.99e-4, 100.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => applyTemperature({ opt_a: 0.6, opt_b: 0.4 }, badTemp), MDMValidationError);
+    assert.throws(
+      () => fusePriorProbabilities({ opt_a: 0.6, opt_b: 0.4 }, { temperature: badTemp }),
+      MDMValidationError,
+    );
+    assert.throws(
+      () =>
+        new CascadeOrchestrator(
+          async () => ({ slots: {}, latencyMs: 0, backendName: "s1" }),
+          undefined,
+          { temperature: badTemp },
+        ),
+      MDMValidationError,
+    );
+    await assert.rejects(
+      () =>
+        evaluateCascade(
+          async () => ({ slots: {}, latencyMs: 0, backendName: "s1" }),
+          undefined,
+          { state: {}, questions: { q1: twoOptChoice }, temperature: badTemp },
+        ),
+      MDMValidationError,
+    );
+  }
+
+  // Pre-temperature hRaw gating at T=0.1: {0.6, 0.4} has unscaled hRaw ~ 0.97095 >= 0.50
+  const unscaledTwoH = normalizedEntropy({ opt_a: 0.6, opt_b: 0.4 });
+  const confPoe = fusePriorProbabilities(
+    { opt_a: 0.6, opt_b: 0.4 },
+    {
+      priorLogits: { opt_a: -3.0, opt_b: 3.0 },
+      priorWeight: 1.0,
+      temperature: 0.1,
+      hesitationThreshold: 0.5,
+      gateMode: "confident",
+    },
+  );
+  assert.ok(Math.abs(confPoe.hRaw - unscaledTwoH) < 1e-12);
+  assert.equal(confPoe.escalated, true);
+  assert.ok(confPoe.probabilities.opt_a > 0.95);
+
+  let sharpCascadeS2Calls = 0;
+  const sharpCascadeResp = await evaluateCascade(
+    async () => ({
+      slots: {
+        q1: {
+          slotId: "q1",
+          predicted: "opt_a",
+          probabilities: { opt_a: 0.6, opt_b: 0.4 },
+          rawProbabilities: { opt_a: 0.6, opt_b: 0.4 },
+          hRaw: unscaledTwoH,
+          confidence: 1.0 - unscaledTwoH,
+        },
+      },
+      latencyMs: 1,
+      backendName: "mock_s1",
+    }),
+    async () => {
+      sharpCascadeS2Calls += 1;
+      return {
+        slots: {
+          q1: {
+            slotId: "q1",
+            predicted: "opt_b",
+            probabilities: { opt_a: 0.15, opt_b: 0.85 },
+            rawProbabilities: { opt_a: 0.15, opt_b: 0.85 },
+            hRaw: normalizedEntropy({ opt_a: 0.15, opt_b: 0.85 }),
+            confidence: 1.0 - normalizedEntropy({ opt_a: 0.15, opt_b: 0.85 }),
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s2",
+      };
+    },
+    {
+      state: { id: 99 },
+      questions: {
+        q1: {
+          ...twoOptChoice,
+          priorLogits: { opt_a: -3.0, opt_b: 3.0 },
+        },
+      },
+    },
+    {
+      temperature: 0.1,
+      priorWeight: 1.0,
+      priorGateMode: "confident",
+      hesitationThreshold: 0.5,
+    },
+  );
+  assert.equal(sharpCascadeS2Calls, 1);
+  assert.equal(sharpCascadeResp.escalated, true);
+  assert.ok(
+    Math.abs(
+      sharpCascadeResp.slots.q1.confidence -
+        (1.0 - normalizedEntropy({ opt_a: 0.15, opt_b: 0.85 })),
+    ) < 1e-12,
+  );
+  assert.ok(
+    Math.abs(
+      specBlockedResp.slots.q1.confidence -
+        (1.0 - normalizedEntropy(specBlockedResp.slots.q1.probabilities)),
+    ) < 1e-12,
+  );
 
   console.log("PASSED: @mdm/client TypeScript SDK tests (all assertions green).");
 }

@@ -924,6 +924,134 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
                     voi_stage2_expected_accuracy=invalid_voi_acc,  # type: ignore[arg-type]
                 )
 
+    def test_temperature_bounds_and_pre_division_logit_shift_stability(self) -> None:
+        """Verify [1e-3, 100.0] temperature bounds and log-space pre-division shift."""
+        self.assertEqual(mdm.MIN_TEMPERATURE, 1e-3)
+        self.assertEqual(mdm.MAX_TEMPERATURE, 100.0)
+
+        raw_three = {"opt_a": 0.35, "opt_b": 0.33, "opt_c": 0.32}
+        expected_unscaled_h = mdm.normalized_entropy(raw_three)
+
+        fused_sharp, h_sharp, esc_sharp = mdm.pre_gated_bayesian_poe_fusion(
+            raw_three,
+            temperature=1e-3,
+            hesitation_threshold=0.50,
+        )
+        self.assertTrue(all(math.isfinite(prob) for prob in fused_sharp.values()))
+        self.assertAlmostEqual(sum(fused_sharp.values()), 1.0, places=12)
+        self.assertAlmostEqual(fused_sharp["opt_a"], 1.0, places=12)
+        self.assertAlmostEqual(h_sharp, expected_unscaled_h, places=12)
+        self.assertTrue(esc_sharp)
+
+        fused_flat, h_flat, _ = mdm.pre_gated_bayesian_poe_fusion(
+            raw_three,
+            prior_logits={"opt_a": 0.5, "opt_b": -0.2, "opt_c": -0.3},
+            prior_weight=0.4,
+            temperature=100.0,
+        )
+        self.assertTrue(all(math.isfinite(prob) for prob in fused_flat.values()))
+        self.assertAlmostEqual(sum(fused_flat.values()), 1.0, places=12)
+        self.assertAlmostEqual(h_flat, expected_unscaled_h, places=12)
+
+        choice_q = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Choose option.",
+            criteria={"opt_a": "A", "opt_b": "B", "opt_c": "C"},
+        )
+        min_temp_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1_three",
+                lambda _s, _q, _i: {"slot": dict(raw_three)},
+            ),
+            temperature=1e-3,
+        )
+        min_temp_res = min_temp_orch.evaluate({"id": 1}, {"slot": choice_q})
+        self.assertEqual(min_temp_res.slots["slot"].predicted, "opt_a")
+        self.assertAlmostEqual(min_temp_res.slots["slot"].probabilities["opt_a"], 1.0, places=12)
+        self.assertAlmostEqual(
+            min_temp_res.slots["slot"].confidence,
+            1.0 - expected_unscaled_h,
+            places=12,
+        )
+
+        for invalid_temp in (True, False, 0.0, -0.5, 9.99e-4, 100.01, float("nan"), float("inf")):
+            with self.assertRaises(mdm.SchemaContractViolationError):
+                mdm.pre_gated_bayesian_poe_fusion(
+                    raw_three,
+                    temperature=invalid_temp,  # type: ignore[arg-type]
+                )
+            with self.assertRaises(mdm.SchemaContractViolationError):
+                mdm.CascadeDecisionOrchestrator(
+                    stage1_backend=mdm.MockCallableBackend(
+                        "s1_bad_temp",
+                        lambda _s, _q, _i: {"slot": dict(raw_three)},
+                    ),
+                    temperature=invalid_temp,  # type: ignore[arg-type]
+                )
+
+        mutated_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1_mut_temp",
+                lambda _s, _q, _i: {"slot": dict(raw_three)},
+            ),
+            total_contract_mode=False,
+        )
+        mutated_orch.temperature = 5e-4
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            mutated_orch.evaluate({"id": 2}, {"slot": choice_q})
+
+    def test_directional_paired_mcnemar_and_holm_superiority_guard(self) -> None:
+        """Verify arm_wins < baseline_wins never sets directional win or Holm rejection."""
+        arm_inferior = [False] * 10
+        base_superior = [True] * 10
+        loss_res = mdm.paired_mcnemar_test(arm_inferior, base_superior, alpha=0.05)
+        self.assertEqual(loss_res.n01_arm_wins, 0)
+        self.assertEqual(loss_res.n10_baseline_wins, 10)
+        self.assertLess(loss_res.p_two_sided, 0.01)
+        self.assertEqual(loss_res.p_one_sided_greater, 1.0)
+        self.assertFalse(loss_res.positive_direction)
+        self.assertFalse(loss_res.significant_improvement)
+        self.assertFalse(loss_res.reject_h0)
+
+        arm_superior = [True] * 10
+        base_inferior = [False] * 10
+        win_res = mdm.paired_mcnemar_test(arm_superior, base_inferior, alpha=0.05)
+        self.assertEqual(win_res.n01_arm_wins, 10)
+        self.assertEqual(win_res.n10_baseline_wins, 0)
+        self.assertLess(win_res.p_two_sided, 0.01)
+        self.assertLess(win_res.p_one_sided_greater, 0.001)
+        self.assertTrue(win_res.positive_direction)
+        self.assertTrue(win_res.significant_improvement)
+        self.assertTrue(win_res.reject_h0)
+
+        adj_bool, rej_bool = mdm.holm_bonferroni_adjust(
+            [loss_res.p_two_sided, win_res.p_two_sided],
+            alpha=0.05,
+            effect_signs=[loss_res.positive_direction, win_res.positive_direction],
+        )
+        self.assertLess(adj_bool[0], 0.01)
+        self.assertLess(adj_bool[1], 0.01)
+        self.assertEqual(rej_bool, [False, True])
+
+        _, rej_numeric = mdm.holm_bonferroni_adjust(
+            [loss_res.p_two_sided, loss_res.p_two_sided, win_res.p_two_sided],
+            alpha=0.05,
+            effect_signs=[-10.0, 0.0, 10.0],
+        )
+        self.assertEqual(rej_numeric, [False, False, True])
+
+        for bad_alpha in (True, False, 0.0, 1.0, -0.1, float("nan")):
+            with self.assertRaises(ValueError):
+                mdm.paired_mcnemar_test(
+                    arm_superior,
+                    base_inferior,
+                    alpha=bad_alpha,  # type: ignore[arg-type]
+                )
+        with self.assertRaises(ValueError):
+            mdm.holm_bonferroni_adjust([0.01, 0.02], effect_signs=[True])
+        with self.assertRaises(ValueError):
+            mdm.holm_bonferroni_adjust([0.01, 0.02], effect_signs=[True, float("nan")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,7 +31,17 @@ const (
 	MaxExtendedOptionsPerSlot     = 256
 	MaxSlotsPerPass               = 8
 	DefaultCosinePriorTemperature = 0.07
+	MinTemperature                = 1e-3
+	MaxTemperature                = 100.0
 )
+
+// ValidateTemperature checks that an explicit temperature scale lies in [MinTemperature, MaxTemperature].
+func ValidateTemperature(tempScale float64) error {
+	if math.IsNaN(tempScale) || math.IsInf(tempScale, 0) || tempScale < MinTemperature || tempScale > MaxTemperature {
+		return fmt.Errorf("mdm: Temperature must lie in [%v, %v], got %v", MinTemperature, MaxTemperature, tempScale)
+	}
+	return nil
+}
 
 // Universal256DecisionCodes lists 256 uppercase 1-letter and 2-letter decision codes (A..Z, AA..PT)
 // verified to tokenize as a single BPE token (both bare and space-prefixed) across Qwen3, DeepSeek-V3,
@@ -126,23 +136,48 @@ func PackedBracketPassCount(numOptions, bracketSize, maxSlotsPerPass int) int {
 	return 1 + (round1+maxSlotsPerPass-1)/maxSlotsPerPass
 }
 
-// NormalizeAndScale normalizes raw option probabilities with temperature scaling T > 0,
+// NormalizeAndScale normalizes raw option probabilities with temperature scaling T in [MinTemperature, MaxTemperature],
 // returning (scaledProbs, argmaxWinner, shannonEntropy, normalizedEntropy).
 func NormalizeAndScale(raw map[string]float64, optKeys []string, tempScale float64) (map[string]float64, string, float64, float64) {
-	if tempScale <= 0 {
+	if math.IsNaN(tempScale) || math.IsInf(tempScale, 0) || tempScale <= 0 {
 		tempScale = 1.0
+	}
+	if tempScale < MinTemperature {
+		tempScale = MinTemperature
+	} else if tempScale > MaxTemperature {
+		tempScale = MaxTemperature
 	}
 	if len(optKeys) == 0 {
 		return map[string]float64{}, "", 0, 0
 	}
+	cleanRaw := make(map[string]float64, len(optKeys))
+	rawSum := 0.0
+	for _, k := range optKeys {
+		p := raw[k]
+		if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 {
+			p = 0.0
+		}
+		cleanRaw[k] = p
+		rawSum += p
+	}
+	rawLogits := make(map[string]float64, len(optKeys))
+	maxRawLogit := math.Inf(-1)
+	uniformFallback := 1.0 / float64(len(optKeys))
+	for _, k := range optKeys {
+		normP := uniformFallback
+		if rawSum > 0 {
+			normP = cleanRaw[k] / rawSum
+		}
+		rl := math.Log(math.Max(1e-12, normP))
+		rawLogits[k] = rl
+		if rl > maxRawLogit {
+			maxRawLogit = rl
+		}
+	}
 	scaled := make(map[string]float64, len(optKeys))
 	sum := 0.0
 	for _, k := range optKeys {
-		p := raw[k]
-		if math.IsNaN(p) || math.IsInf(p, 0) || p <= 1e-9 {
-			p = 1e-6
-		}
-		sp := math.Pow(p, 1.0/tempScale)
+		sp := math.Exp((rawLogits[k] - maxRawLogit) / tempScale)
 		scaled[k] = sp
 		sum += sp
 	}
@@ -162,13 +197,14 @@ func NormalizeAndScale(raw map[string]float64, optKeys []string, tempScale float
 	}
 	normH := 0.0
 	if len(optKeys) > 1 {
-		normH = h / math.Log(float64(len(optKeys)))
+		normH = math.Min(1.0, math.Max(0.0, h/math.Log(float64(len(optKeys)))))
 	}
 	return scaled, winner, h, normH
 }
 
-// FusePriorWithGate computes raw normalized hesitation before applying log-linear prior fusion
-// according to gateMode ("always", "confident", "hesitant", "proportional", "never", or "off").
+// FusePriorWithGate computes pre-sharpening raw normalized hesitation before applying temperature
+// scaling and log-linear prior fusion according to gateMode ("always", "confident", "hesitant",
+// "proportional", "never", or "off").
 func FusePriorWithGate(
 	rawProbs map[string]float64,
 	priorLogits map[string]float64,
@@ -178,8 +214,8 @@ func FusePriorWithGate(
 	hesitationGate float64,
 	gateMode string,
 ) (probs map[string]float64, winner string, normH, rawNormH float64, fused bool) {
+	unscaledProbs, _, _, rawNormH := NormalizeAndScale(rawProbs, optKeys, 1.0)
 	baseProbs, baseWinner, _, baseNormH := NormalizeAndScale(rawProbs, optKeys, tempScale)
-	rawNormH = baseNormH
 	if gateMode == "off" || gateMode == "never" || len(priorLogits) == 0 || priorWeight <= 0 || len(optKeys) <= 1 {
 		return baseProbs, baseWinner, baseNormH, rawNormH, false
 	}
@@ -187,7 +223,7 @@ func FusePriorWithGate(
 	effWeight := priorWeight
 	switch gateMode {
 	case "always":
-		// Always fuse priorLogits while preserving pre-fusion rawNormH for cascade gating.
+		// Always fuse priorLogits while preserving pre-sharpening rawNormH for cascade gating.
 	case "", "confident":
 		if hesitationGate > 0 && rawNormH >= hesitationGate {
 			return baseProbs, baseWinner, baseNormH, rawNormH, false
@@ -205,21 +241,58 @@ func FusePriorWithGate(
 		return baseProbs, baseWinner, baseNormH, rawNormH, false
 	}
 
+	effTemp := tempScale
+	if math.IsNaN(effTemp) || math.IsInf(effTemp, 0) || effTemp <= 0 {
+		effTemp = 1.0
+	}
+	if effTemp < MinTemperature {
+		effTemp = MinTemperature
+	} else if effTemp > MaxTemperature {
+		effTemp = MaxTemperature
+	}
+
+	rawLogits := make(map[string]float64, len(optKeys))
+	maxRawLogit := math.Inf(-1)
+	for _, k := range optKeys {
+		rl := math.Log(math.Max(1e-12, unscaledProbs[k]))
+		rawLogits[k] = rl
+		if rl > maxRawLogit {
+			maxRawLogit = rl
+		}
+	}
+
 	logits := make(map[string]float64, len(optKeys))
 	maxLogit := math.Inf(-1)
 	for _, k := range optKeys {
-		p := math.Max(1e-9, baseProbs[k])
-		l := math.Log(p) + effWeight*priorLogits[k]
+		l := ((rawLogits[k] - maxRawLogit) / effTemp) + effWeight*priorLogits[k]
 		logits[k] = l
 		if l > maxLogit {
 			maxLogit = l
 		}
 	}
 	unnorm := make(map[string]float64, len(optKeys))
+	sumExp := 0.0
 	for _, k := range optKeys {
-		unnorm[k] = math.Exp(logits[k] - maxLogit)
+		ev := math.Exp(logits[k] - maxLogit)
+		unnorm[k] = ev
+		sumExp += ev
 	}
-	fusedProbs, fusedWinner, _, fusedNormH := NormalizeAndScale(unnorm, optKeys, 1.0)
+	fusedProbs := make(map[string]float64, len(optKeys))
+	fusedWinner := optKeys[0]
+	bestFused := -1.0
+	hFused := 0.0
+	for _, k := range optKeys {
+		fp := unnorm[k] / sumExp
+		fusedProbs[k] = fp
+		if fp > bestFused {
+			bestFused = fp
+			fusedWinner = k
+		}
+		if fp > 0 {
+			hFused -= fp * math.Log(fp)
+		}
+	}
+	fusedNormH := math.Min(1.0, math.Max(0.0, hFused/math.Log(float64(len(optKeys)))))
 	return fusedProbs, fusedWinner, fusedNormH, rawNormH, true
 }
 

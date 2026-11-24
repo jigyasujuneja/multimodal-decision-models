@@ -34,7 +34,8 @@ import {
 export const DEFAULT_COSINE_PRIOR_TEMPERATURE = 0.07;
 export const DEFAULT_CONFORMAL_SEED_KEY = "dgem-conformal-v1";
 export const CONFORMAL_SCORE_TOLERANCE = 1e-12;
-export const MAX_TEMPERATURE = 20.0;
+export const MIN_TEMPERATURE = 1e-3;
+export const MAX_TEMPERATURE = 100.0;
 
 export const STANDARD_ABSTAIN_LABELS: readonly string[] = [
   "0",
@@ -138,11 +139,11 @@ export function applyTemperature(
   if (
     typeof temperature !== "number" ||
     !Number.isFinite(temperature) ||
-    temperature <= 0.0 ||
+    temperature < MIN_TEMPERATURE ||
     temperature > MAX_TEMPERATURE
   ) {
     throw new MDMValidationError(
-      `temperature must lie in (0, ${MAX_TEMPERATURE}] (got ${String(temperature)})`,
+      `temperature must lie in [${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}] (got ${String(temperature)})`,
     );
   }
   const ordered = normalizeProbabilities(probabilities);
@@ -154,19 +155,20 @@ export function applyTemperature(
     return { ...cloned };
   }
 
-  let maxLogit = -Infinity;
-  const scaled: Array<{ name: string; logit: number }> = [];
+  let maxRawLogit = -Infinity;
+  const rawLogits: Array<{ name: string; rawLogit: number }> = [];
   for (const item of ordered) {
-    const logit = item.prob <= 0.0 ? -1e9 : Math.log(item.prob) / temperature;
-    scaled.push({ name: item.name, logit });
-    if (logit > maxLogit) {
-      maxLogit = logit;
+    const rawLogit = Math.log(Math.max(1e-12, item.prob));
+    rawLogits.push({ name: item.name, rawLogit });
+    if (rawLogit > maxRawLogit) {
+      maxRawLogit = rawLogit;
     }
   }
   let normalizer = 0.0;
   const expScores: Array<{ name: string; score: number }> = [];
-  for (const item of scaled) {
-    const score = Math.exp(item.logit - maxLogit);
+  for (const item of rawLogits) {
+    const scaledLogit = (item.rawLogit - maxRawLogit) / temperature;
+    const score = Math.exp(scaledLogit);
     expScores.push({ name: item.name, score });
     normalizer += score;
   }
@@ -221,10 +223,22 @@ export function fusePriorProbabilities(
   options: {
     readonly priorLogits?: Record<string, number>;
     readonly priorWeight?: number;
+    readonly temperature?: number;
     readonly hesitationThreshold?: number;
     readonly gateMode?: PriorGateMode;
   } = {},
 ): BayesianPoEResult {
+  const temperature = options.temperature ?? 1.0;
+  if (
+    typeof temperature !== "number" ||
+    !Number.isFinite(temperature) ||
+    temperature < MIN_TEMPERATURE ||
+    temperature > MAX_TEMPERATURE
+  ) {
+    throw new MDMValidationError(
+      `temperature must lie in [${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}] (got ${String(temperature)})`,
+    );
+  }
   const ordered = normalizeProbabilities(rawProbabilities);
   const baseMap = nullProtoRecord<number>();
   for (const item of ordered) {
@@ -236,6 +250,10 @@ export function fusePriorProbabilities(
   const priorLogits = options.priorLogits;
   const priorWeight = options.priorWeight ?? 0.0;
   const gateMode: PriorGateMode = options.gateMode ?? "hesitant";
+  const scaledBase = (): Record<string, number> =>
+    Math.abs(temperature - 1.0) <= 1e-12
+      ? { ...baseMap }
+      : applyTemperature(baseMap, temperature);
 
   if (
     gateMode === "off" ||
@@ -246,27 +264,36 @@ export function fusePriorProbabilities(
     priorWeight <= 0.0 ||
     ordered.length <= 1
   ) {
-    return { probabilities: { ...baseMap }, hRaw, escalated };
+    return { probabilities: scaledBase(), hRaw, escalated };
   }
 
   let effectiveWeight = priorWeight;
   if (gateMode === "confident" && threshold > 0.0 && hRaw >= threshold) {
-    return { probabilities: { ...baseMap }, hRaw, escalated };
+    return { probabilities: scaledBase(), hRaw, escalated };
   }
   if (gateMode === "hesitant" && threshold > 0.0 && hRaw < threshold) {
-    return { probabilities: { ...baseMap }, hRaw, escalated };
+    return { probabilities: scaledBase(), hRaw, escalated };
   }
   if (gateMode === "proportional") {
     effectiveWeight = priorWeight * hRaw;
     if (effectiveWeight <= 1e-9) {
-      return { probabilities: { ...baseMap }, hRaw, escalated };
+      return { probabilities: scaledBase(), hRaw, escalated };
+    }
+  }
+
+  let maxRawLogit = -Infinity;
+  const rawLogits = nullProtoRecord<number>();
+  for (const item of ordered) {
+    const rawLogit = Math.log(Math.max(1e-12, item.prob));
+    rawLogits[item.name] = rawLogit;
+    if (rawLogit > maxRawLogit) {
+      maxRawLogit = rawLogit;
     }
   }
 
   let maxLogit = -Infinity;
   const logits = nullProtoRecord<number>();
   for (const item of ordered) {
-    const baseProb = Math.max(1e-9, item.prob);
     let priorVal = 0.0;
     if (hasOwn(priorLogits, item.name)) {
       const candidatePrior = priorLogits[item.name];
@@ -277,7 +304,9 @@ export function fusePriorProbabilities(
       }
       priorVal = candidatePrior;
     }
-    const combined = Math.log(baseProb) + effectiveWeight * priorVal;
+    const itemRawLogit = rawLogits[item.name] ?? -Infinity;
+    const combined =
+      (itemRawLogit - maxRawLogit) / temperature + effectiveWeight * priorVal;
     logits[item.name] = combined;
     if (combined > maxLogit) {
       maxLogit = combined;
