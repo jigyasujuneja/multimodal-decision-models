@@ -1242,13 +1242,16 @@ func (p DomainCompetenceProfile) DefaultNegativeTransferCheck() bool {
 }
 
 // IsNegativeTransfer returns true when escalating to Stage 2 degrades held-out accuracy or Brier calibration.
-// Invalid thresholds (margin < 0, non-finite values, or brierDegradationRatio <= 1.0) or an invalid profile
+// Invalid thresholds (margin < 0, non-finite values, minDeltaHurt > 0, or brierDegradationRatio <= 1.0) or an invalid profile
 // fail closed by returning true so unsafe Stage-2 overrides are blocked.
 func (p DomainCompetenceProfile) IsNegativeTransfer(margin float64, minDeltaHurt int, brierDegradationRatio float64) bool {
 	if p.Validate() != nil {
 		return true
 	}
 	if math.IsNaN(margin) || math.IsInf(margin, 0) || margin < 0 {
+		return true
+	}
+	if minDeltaHurt > 0 {
 		return true
 	}
 	if math.IsNaN(brierDegradationRatio) || math.IsInf(brierDegradationRatio, 0) || brierDegradationRatio <= 1.0 {

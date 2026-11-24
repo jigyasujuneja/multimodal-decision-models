@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .calibration import DomainCompetenceProfile
 
 MAX_OPTIONS_PER_SLOT = 26
 MAX_EXTENDED_OPTIONS_PER_SLOT = 256
@@ -109,13 +112,25 @@ class DecisionQuestion:
     prior_logits: dict[str, float] = field(default_factory=dict)
     evidence_prompt: str = ""
     evidence_criteria: dict[str, str] = field(default_factory=dict)
+    option_descriptions: dict[str, str] = field(default_factory=dict)
+    domain_competence: DomainCompetenceProfile | None = None
 
     def option_keys(self) -> list[str]:
         if self.type == "score":
             return list(self.levels)
         if self.order:
-            return [k for k in self.order if k in self.criteria]
-        return list(self.criteria.keys())
+            allowed_keys = set(self.criteria.keys()) | set(self.option_descriptions.keys())
+            return [k for k in self.order if k in allowed_keys]
+        if self.criteria:
+            return list(self.criteria.keys())
+        return list(self.option_descriptions.keys())
+
+    def option_description(self, option_key: str) -> str:
+        """Return explicit option description, falling back to criteria or option key."""
+        explicit_desc = self.option_descriptions.get(option_key)
+        if explicit_desc:
+            return explicit_desc
+        return self.criteria.get(option_key, option_key)
 
 
 @dataclass

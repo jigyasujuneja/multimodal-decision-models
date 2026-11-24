@@ -17,10 +17,14 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import concurrent.futures as cf
 import math
+import threading
+import time
 import unittest
 
 import multimodal_decision_models as mdm
+from multimodal_decision_models import cascade as mdm_cascade
 
 CANONICAL_PARITY_TOLERANCE = 1e-12
 
@@ -334,9 +338,25 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         for bad_margin in (True, False, -1e-6, float("nan"), float("inf"), float("-inf")):
             with self.assertRaises(ValueError):
                 base_profile.is_negative_transfer(margin=bad_margin)  # type: ignore[arg-type]
-        for bad_min_hurt in (True, False, -2.5):
+        for bad_min_hurt in (True, False, -2.5, 1, 2, 5):
             with self.assertRaises(ValueError):
                 base_profile.is_negative_transfer(min_delta_hurt=bad_min_hurt)  # type: ignore[arg-type]
+        high_delta_profile = mdm.DomainCompetenceProfile(
+            stage1_accuracy=0.80,
+            stage2_accuracy=0.95,
+            num_options=2,
+            paired_escalation_delta=5,
+        )
+        with self.assertRaisesRegex(ValueError, "min_delta_hurt must be <= 0"):
+            high_delta_profile.is_negative_transfer(min_delta_hurt=1)
+        self.assertFalse(high_delta_profile.is_negative_transfer(min_delta_hurt=0))
+        zero_delta_higher_s2 = mdm.DomainCompetenceProfile(
+            stage1_accuracy=0.80,
+            stage2_accuracy=0.95,
+            num_options=2,
+            paired_escalation_delta=0,
+        )
+        self.assertTrue(zero_delta_higher_s2.is_negative_transfer(min_delta_hurt=0))
         for bad_ratio in (True, False, 1.0, 0.99, -1.0, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 base_profile.is_negative_transfer(brier_degradation_ratio=bad_ratio)  # type: ignore[arg-type]
@@ -563,6 +583,346 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         for got_p, exp_p in zip(adj_p, expected_adj):
             self.assertLess(abs(got_p - exp_p), CANONICAL_PARITY_TOLERANCE)
         self.assertEqual(rejected, [True, False, True, True])
+
+    def test_prune_choice_top_k_retains_option_descriptions_without_aliasing(self) -> None:
+        """Verify prune_choice_top_k and shortlist_wide_question retain option_descriptions."""
+        original_descriptions = {
+            "opt_a": "Alpha description",
+            "opt_b": "Bravo description",
+            "opt_c": "Charlie description",
+            "opt_d": "Delta description",
+        }
+        question = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Select route.",
+            criteria={"opt_a": "A", "opt_b": "B", "opt_c": "C", "opt_d": "D"},
+            option_descriptions=dict(original_descriptions),
+            prior_logits={"opt_a": -1.0, "opt_b": 0.8, "opt_c": 0.4, "opt_d": -2.0},
+            domain_competence=mdm.DomainCompetenceProfile(
+                stage1_accuracy=0.90,
+                stage2_accuracy=0.92,
+                num_options=4,
+                paired_escalation_delta=2,
+            ),
+        )
+        pruned = mdm_cascade.prune_choice_top_k(
+            question,
+            {"opt_a": 0.10, "opt_b": 0.52, "opt_c": 0.31, "opt_d": 0.07},
+            top_k=2,
+        )
+        self.assertEqual(pruned.option_keys(), ["opt_b", "opt_c"])
+        self.assertEqual(
+            pruned.option_descriptions,
+            {"opt_b": "Bravo description", "opt_c": "Charlie description"},
+        )
+        self.assertNotIn("opt_a", pruned.option_descriptions)
+        self.assertNotIn("opt_d", pruned.option_descriptions)
+        pruned.option_descriptions["opt_b"] = "Mutated"
+        self.assertEqual(question.option_descriptions["opt_b"], "Bravo description")
+        self.assertEqual(pruned.domain_competence, question.domain_competence)
+
+        with self.assertRaises(mdm.SchemaContractViolationError):
+            mdm.prune_choice_top_k(question, {"opt_a": 0.5, "opt_b": 0.5}, top_k=1)
+
+        seen_stage2_descriptions: dict[str, str] = {}
+
+        def _s1_wide(_state: object, _qs: object, _imgs: object) -> dict[str, dict[str, float]]:
+            return {"slot": {"opt_a": 0.12, "opt_b": 0.46, "opt_c": 0.34, "opt_d": 0.08}}
+
+        def _s2_pruned(
+            _state: object,
+            pruned_questions: dict[str, mdm.DecisionQuestion],
+            _imgs: object,
+        ) -> dict[str, dict[str, float]]:
+            seen_stage2_descriptions.update(pruned_questions["slot"].option_descriptions)
+            return {"slot": {"opt_b": 0.20, "opt_c": 0.80}}
+
+        prune_orchestrator = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend("s1_wide", _s1_wide),
+            stage2_backend=mdm.MockCallableBackend("s2_pruned", _s2_pruned),
+            hesitation_threshold=0.20,
+            stage2_prune_top_k=2,
+        )
+        pruned_res = prune_orchestrator.evaluate({"req": 1}, {"slot": question})
+        self.assertEqual(
+            seen_stage2_descriptions,
+            {"opt_b": "Bravo description", "opt_c": "Charlie description"},
+        )
+        self.assertEqual(pruned_res.slots["slot"].predicted, "opt_c")
+        self.assertEqual(pruned_res.slots["slot"].probabilities["opt_a"], 0.0)
+        self.assertAlmostEqual(pruned_res.slots["slot"].probabilities["opt_c"], 0.80, places=9)
+
+    def test_speculative_t0_circuit_breaker_and_uniform_rescue_and_preservation(self) -> None:
+        """Verify speculative t=0 short-circuit, uniform Stage-1 rescue, and Stage-2 guard."""
+        neg_profile = mdm.DomainCompetenceProfile(
+            stage1_accuracy=0.75,
+            stage2_accuracy=0.62,
+            num_options=2,
+            paired_escalation_delta=-3,
+        )
+        pos_profile = mdm.DomainCompetenceProfile(
+            stage1_accuracy=0.90,
+            stage2_accuracy=0.88,
+            num_options=2,
+            paired_escalation_delta=2,
+        )
+        choice_q = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Choose route.",
+            criteria={"opt_a": "Route A", "opt_b": "Route B"},
+        )
+
+        # 1. All choice questions trip is_negative_transfer -> 0 speculative Stage-2 calls at t=0
+        spec_calls: list[int] = []
+        spec_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1",
+                lambda _s, _q, _i: {"q1": {"opt_a": 0.60, "opt_b": 0.40}},
+            ),
+            stage2_backend=mdm.MockCallableBackend(
+                "s2",
+                lambda _s, _q, _i: (spec_calls.append(1) or {"q1": {"opt_a": 0.1, "opt_b": 0.9}}),
+            ),
+            hesitation_threshold=0.16,
+            domain_competence=neg_profile,
+            speculative_stage2=True,
+        )
+        blocked_res = spec_orch.evaluate({"case": "all_blocked"}, {"q1": choice_q})
+        self.assertEqual(len(spec_calls), 0)
+        self.assertFalse(blocked_res.escalated)
+        self.assertEqual(blocked_res.slots["q1"].predicted, "opt_a")
+
+        # 2. Mixed request (1 negative-transfer choice + 1 score question) -> speculative launches on score slot only
+        mixed_s2_qids: list[list[str]] = []
+        mixed_questions = {
+            "blocked_choice": mdm.DecisionQuestion(
+                type="choice",
+                instructions="Blocked choice.",
+                criteria={"opt_a": "A", "opt_b": "B"},
+                domain_competence=neg_profile,
+            ),
+            "rubric_score": mdm.DecisionQuestion(
+                type="score",
+                instructions="Score 1..2.",
+                levels=["1", "2"],
+                domain_competence=neg_profile,
+            ),
+        }
+
+        def _mixed_s2(
+            _s: object,
+            qs: dict[str, mdm.DecisionQuestion],
+            _i: object,
+        ) -> dict[str, dict[str, float]]:
+            mixed_s2_qids.append(sorted(qs.keys()))
+            return {qid: {"1": 0.15, "2": 0.85} for qid in qs}
+
+        mixed_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1_mixed",
+                lambda _s, _q, _i: {
+                    "blocked_choice": {"opt_a": 0.60, "opt_b": 0.40},
+                    "rubric_score": {"1": 0.55, "2": 0.45},
+                },
+            ),
+            stage2_backend=mdm.MockCallableBackend("s2_mixed", _mixed_s2),
+            hesitation_threshold=0.16,
+            speculative_stage2=True,
+        )
+        mixed_res = mixed_orch.evaluate({"case": "mixed"}, mixed_questions)
+        self.assertEqual(mixed_s2_qids, [["rubric_score"]])
+        self.assertFalse(mixed_res.slots["blocked_choice"].escalated)
+        self.assertEqual(mixed_res.slots["blocked_choice"].predicted, "opt_a")
+        self.assertTrue(mixed_res.slots["rubric_score"].escalated)
+        self.assertEqual(mixed_res.slots["rubric_score"].predicted, "2")
+
+        # 3. Uniform Stage-1 abstention (|p_i - 1/K| <= 1e-6) rescues via two-phase (0.0, 1.0)
+        # even when is_negative_transfer is tripped and use_dawid_skene_poe_weights=True!
+        rescue_calls: list[int] = []
+        rescue_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1_uniform",
+                lambda _s, _q, _i: {"q1": {"opt_a": 0.5000004, "opt_b": 0.4999996}},
+            ),
+            stage2_backend=mdm.MockCallableBackend(
+                "s2_rescue",
+                lambda _s, _q, _i: (
+                    rescue_calls.append(1) or {"q1": {"opt_a": 0.15, "opt_b": 0.85}}
+                ),
+            ),
+            hesitation_threshold=0.16,
+            domain_competence=neg_profile,
+            use_dawid_skene_poe_weights=True,
+            speculative_stage2=True,
+        )
+        rescue_res = rescue_orch.evaluate({"case": "uniform_s1_rescue"}, {"q1": choice_q})
+        self.assertEqual(len(rescue_calls), 1)
+        self.assertTrue(rescue_res.escalated)
+        self.assertEqual(rescue_res.slots["q1"].predicted, "opt_b")
+        self.assertLess(
+            abs(rescue_res.slots["q1"].probabilities["opt_b"] - 0.85),
+            CANONICAL_PARITY_TOLERANCE,
+        )
+
+        # Boundary just outside 1e-6 (|p_i - 0.5| = 2e-6 > 1e-6) stays blocked on neg_profile
+        non_uniform_calls: list[int] = []
+        near_uniform_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1_near_uniform",
+                lambda _s, _q, _i: {"q1": {"opt_a": 0.500002, "opt_b": 0.499998}},
+            ),
+            stage2_backend=mdm.MockCallableBackend(
+                "s2_unused",
+                lambda _s, _q, _i: (
+                    non_uniform_calls.append(1) or {"q1": {"opt_a": 0.1, "opt_b": 0.9}}
+                ),
+            ),
+            hesitation_threshold=0.16,
+            domain_competence=neg_profile,
+            speculative_stage2=True,
+        )
+        near_res = near_uniform_orch.evaluate({"case": "near_uniform"}, {"q1": choice_q})
+        self.assertEqual(len(non_uniform_calls), 0)
+        self.assertFalse(near_res.escalated)
+
+        # 4. Uniform Stage-2 fallback while Stage 1 is non-uniform preserves Stage 1 (1.0, 0.0)
+        for use_poe in (False, True):
+            preserve_orch = mdm.CascadeDecisionOrchestrator(
+                stage1_backend=mdm.MockCallableBackend(
+                    "s1_calibrated",
+                    lambda _s, _q, _i: {"q1": {"opt_a": 0.62, "opt_b": 0.38}},
+                ),
+                stage2_backend=mdm.MockCallableBackend(
+                    "s2_uniform_fallback",
+                    lambda _s, _q, _i: {"q1": {"opt_a": 0.50, "opt_b": 0.50}},
+                ),
+                hesitation_threshold=0.16,
+                domain_competence=pos_profile,
+                use_dawid_skene_poe_weights=use_poe,
+            )
+            preserve_res = preserve_orch.evaluate({"case": f"preserve_{use_poe}"}, {"q1": choice_q})
+            self.assertTrue(preserve_res.escalated)
+            self.assertEqual(preserve_res.slots["q1"].predicted, "opt_a")
+            self.assertLess(
+                abs(preserve_res.slots["q1"].probabilities["opt_a"] - 0.62),
+                CANONICAL_PARITY_TOLERANCE,
+            )
+            self.assertLess(
+                abs(preserve_res.slots["q1"].probabilities["opt_b"] - 0.38),
+                CANONICAL_PARITY_TOLERANCE,
+            )
+
+    def test_cancel_event_propagation_fast_exit_non_mutation_and_voi_bounds(self) -> None:
+        """Verify cancel_event propagation without caller mutation and VoI [0, 1] bounds."""
+        choice_q = mdm.DecisionQuestion(
+            type="choice",
+            instructions="Select action.",
+            criteria={"allow": "Allow", "deny": "Deny"},
+        )
+        stage2_saw_local_abort = threading.Event()
+        stage2_started = threading.Event()
+
+        def _slow_spec_s2(
+            _s: object,
+            _q: object,
+            _i: object,
+            *,
+            cancel_event: object = None,
+        ) -> dict[str, dict[str, float]]:
+            stage2_started.set()
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                if cancel_event is not None and getattr(cancel_event, "is_set")():
+                    stage2_saw_local_abort.set()
+                    return {"act": {"allow": 0.2, "deny": 0.8}}
+                time.sleep(0.005)
+            return {"act": {"allow": 0.2, "deny": 0.8}}
+
+        def _confident_s1(_s: object, _q: object, _i: object) -> dict[str, dict[str, float]]:
+            stage2_started.wait(timeout=0.5)
+            return {"act": {"allow": 0.99, "deny": 0.01}}
+
+        fast_exit_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend("s1_fast", _confident_s1),
+            stage2_backend=mdm.MockCallableBackend("s2_slow", _slow_spec_s2),
+            hesitation_threshold=0.25,
+            speculative_stage2=True,
+        )
+        caller_event = threading.Event()
+        fast_res = fast_exit_orch.evaluate(
+            {"req": "fast_exit"},
+            {"act": choice_q},
+            cancel_event=caller_event,
+        )
+        self.assertFalse(fast_res.escalated)
+        self.assertEqual(fast_res.slots["act"].predicted, "allow")
+        # Caller's event MUST NOT be mutated on Stage-1 fast-exit!
+        self.assertFalse(caller_event.is_set())
+        self.assertTrue(stage2_saw_local_abort.wait(timeout=0.5))
+
+        # Pre-set cancel_event raises CancelledError before calling Stage 1
+        s1_invocations: list[int] = []
+        cancel_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend(
+                "s1_never",
+                lambda _s, _q, _i: (s1_invocations.append(1) or {"act": {"allow": 0.6, "deny": 0.4}}),
+            ),
+            stage2_backend=mdm.MockCallableBackend(
+                "s2_never",
+                lambda _s, _q, _i: {"act": {"allow": 0.2, "deny": 0.8}},
+            ),
+        )
+        preset_event = threading.Event()
+        preset_event.set()
+        with self.assertRaises(cf.CancelledError):
+            cancel_orch.evaluate({"req": "pre_cancelled"}, {"act": choice_q}, cancel_event=preset_event)
+        self.assertEqual(len(s1_invocations), 0)
+
+        # Mid-flight cancellation while speculative Stage 2 is running raises CancelledError promptly
+        mid_event = threading.Event()
+
+        def _hesitant_s1(_s: object, _q: object, _i: object) -> dict[str, dict[str, float]]:
+            return {"act": {"allow": 0.58, "deny": 0.42}}
+
+        def _blocking_s2(_s: object, _q: object, _i: object) -> dict[str, dict[str, float]]:
+            time.sleep(0.5)
+            return {"act": {"allow": 0.1, "deny": 0.9}}
+
+        mid_orch = mdm.CascadeDecisionOrchestrator(
+            stage1_backend=mdm.MockCallableBackend("s1_hes", _hesitant_s1),
+            stage2_backend=mdm.MockCallableBackend("s2_block", _blocking_s2),
+            hesitation_threshold=0.16,
+            speculative_stage2=True,
+        )
+        timer = threading.Timer(0.03, mid_event.set)
+        timer.start()
+        try:
+            with self.assertRaises(cf.CancelledError):
+                mid_orch.evaluate({"req": "mid_cancel"}, {"act": choice_q}, cancel_event=mid_event)
+        finally:
+            timer.cancel()
+
+        # voi_stage2_expected_accuracy relaxed to full [0.0, 1.0] (including < 0.50)
+        for valid_voi_acc in (0.0, 0.25, 0.49, 0.50, 0.95, 1.0):
+            voi_orch = mdm.CascadeDecisionOrchestrator(
+                stage1_backend=mdm.MockCallableBackend(
+                    "s1_voi",
+                    lambda _s, _q, _i: {"act": {"allow": 0.85, "deny": 0.15}},
+                ),
+                voi_error_cost=1.0,
+                voi_stage2_expected_accuracy=valid_voi_acc,
+            )
+            self.assertEqual(voi_orch.voi_stage2_expected_accuracy, valid_voi_acc)
+
+        for invalid_voi_acc in (True, False, -0.01, 1.01, float("nan"), float("inf")):
+            with self.assertRaises(mdm.SchemaContractViolationError):
+                mdm.CascadeDecisionOrchestrator(
+                    stage1_backend=mdm.MockCallableBackend(
+                        "s1_voi",
+                        lambda _s, _q, _i: {"act": {"allow": 0.85, "deny": 0.15}},
+                    ),
+                    voi_stage2_expected_accuracy=invalid_voi_acc,  # type: ignore[arg-type]
+                )
 
 
 if __name__ == "__main__":

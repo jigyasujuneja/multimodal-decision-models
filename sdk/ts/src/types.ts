@@ -72,9 +72,11 @@ export interface DecisionQuestion {
   readonly type: QuestionType;
   readonly instructions: string;
   readonly criteria?: Record<string, string>;
+  readonly optionDescriptions?: Record<string, string>;
   readonly levels?: readonly string[];
   readonly order?: readonly string[];
   readonly priorLogits?: Record<string, number>;
+  readonly domainCompetence?: DomainCompetenceProfile;
 }
 
 export interface SlotReadout {
@@ -98,6 +100,7 @@ export interface SystemOneDecideRequest {
   readonly images?: readonly string[];
   readonly priorLogits?: Record<string, Record<string, number>>;
   readonly temperature?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface ChatLogprobDecideRequest {
@@ -106,6 +109,7 @@ export interface ChatLogprobDecideRequest {
   readonly questions: Record<string, DecisionQuestion>;
   readonly topLogprobs?: number;
   readonly temperature?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface ConformalConfig {
