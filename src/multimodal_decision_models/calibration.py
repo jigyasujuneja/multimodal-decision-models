@@ -1821,7 +1821,8 @@ class DomainCompetenceProfile:
 
         Args:
           margin: Non-negative finite accuracy tolerance before tripping when ``paired_escalation_delta <= 0``.
-          min_delta_hurt: Paired escalation net-hurt threshold at or below which Stage 2 trips immediately.
+          min_delta_hurt: Non-positive paired escalation net-hurt threshold (``<= 0``) at or below
+            which Stage 2 trips immediately.
           brier_degradation_ratio: Multiplicative Brier degradation ratio ``> 1.0`` relative to
             ``max(0.02, stage1_brier)``.
 
@@ -1830,7 +1831,7 @@ class DomainCompetenceProfile:
 
         Raises:
           ValueError: If ``margin``, ``min_delta_hurt``, or ``brier_degradation_ratio`` is boolean,
-            non-finite, or out of valid bounds.
+            non-finite, or out of valid bounds (including ``min_delta_hurt > 0``).
         """
         if (
             isinstance(margin, bool)
@@ -1841,6 +1842,8 @@ class DomainCompetenceProfile:
             raise ValueError("margin must be a finite non-boolean float >= 0")
         if isinstance(min_delta_hurt, bool) or not isinstance(min_delta_hurt, int):
             raise ValueError("min_delta_hurt must be a non-boolean integer")
+        if min_delta_hurt > 0:
+            raise ValueError("min_delta_hurt must be <= 0")
         if (
             isinstance(brier_degradation_ratio, bool)
             or not isinstance(brier_degradation_ratio, (int, float))
@@ -1911,6 +1914,54 @@ def compute_dawid_skene_poe_weights(
     stage1_weight = max(0.01, math.log(clamped_stage1 / (1.0 - clamped_stage1)) - chance_log_odds)
     stage2_weight = max(0.0, math.log(clamped_stage2 / (1.0 - clamped_stage2)) - chance_log_odds)
     return stage1_weight, stage2_weight
+
+
+def is_uniform_distribution(
+    probs: Mapping[str, float],
+    tolerance: float = 1e-6,
+) -> bool:
+    """Return True when K >= 2 option probabilities lie within tolerance of 1/K.
+
+    Args:
+      probs: Candidate option probability mapping with ``K >= 2`` entries.
+      tolerance: Maximum absolute per-option deviation from ``1.0 / K``.
+
+    Returns:
+      ``True`` when normalized option probabilities are flat uniform within ``tolerance``.
+
+    Raises:
+      ValueError: If ``tolerance`` is boolean, non-finite, or negative.
+    """
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(float(tolerance))
+        or float(tolerance) < 0.0
+    ):
+        raise ValueError("tolerance must be a finite non-boolean float >= 0")
+    if not isinstance(probs, Mapping) or len(probs) < 2:
+        return False
+    numeric_values: list[float] = []
+    total_mass = 0.0
+    for raw_value in probs.values():
+        if (
+            isinstance(raw_value, bool)
+            or not isinstance(raw_value, (int, float))
+            or not math.isfinite(float(raw_value))
+            or float(raw_value) < 0.0
+        ):
+            return False
+        probability_value = float(raw_value)
+        numeric_values.append(probability_value)
+        total_mass += probability_value
+    if total_mass <= 0.0 or not math.isfinite(total_mass):
+        return False
+    uniform_target = 1.0 / float(len(numeric_values))
+    tolerance_float = float(tolerance)
+    return all(
+        abs((probability_value / total_mass) - uniform_target) <= tolerance_float
+        for probability_value in numeric_values
+    )
 
 
 

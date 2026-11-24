@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import {
+  CascadeOrchestrator,
   DEFAULT_ABSTAIN_LABELS,
   DEFAULT_CONFORMAL_SEED_KEY,
   MDMClient,
@@ -31,16 +32,19 @@ import {
   createGenkitDecisionStep,
   createGenkitToolGuard,
   detectComparativeUnderminingAttack,
+  evaluateCascade,
   evaluateNevcGate,
   fusePriorProbabilities,
   hmacUint64,
   hmacUniformFloat64,
   isNegativeTransfer,
+  isUniformDistribution,
   multiSlotJointConformalSets,
   neutralizeUntrustedDelimiters,
   normalizeAndStripInvisibleSmuggling,
   normalizeCosinePriorLogits,
   polynomialAlphaAtStep,
+  pruneChoiceTopK,
   wrapCanaryUntrustedEnvelope,
 } from "../dist/index.js";
 
@@ -920,6 +924,8 @@ async function runTests() {
     () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8, stage2Brier: Number.NaN }),
     () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, { margin: -0.01 }),
     () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, { minDeltaHurt: -1.5 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.95, pairedEscalationDelta: 5 }, { minDeltaHurt: 1 }),
+    () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.95, pairedEscalationDelta: 5 }, { minDeltaHurt: 2 }),
     () => isNegativeTransfer({ stage1Accuracy: 0.8, stage2Accuracy: 0.8 }, { brierDegradationRatio: 1.0 }),
     () => computeDawidSkenePoeWeights(-0.01, 0.8),
     () => computeDawidSkenePoeWeights(0.8, 1.01),
@@ -931,6 +937,364 @@ async function runTests() {
     () => computeDawidSkenePoeWeights(true, 0.8),
   ]) {
     assert.throws(badFn, MDMValidationError);
+  }
+  assert.equal(
+    isNegativeTransfer(
+      { stage1Accuracy: 0.8, stage2Accuracy: 0.95, pairedEscalationDelta: 5 },
+      { minDeltaHurt: 0 },
+    ),
+    false,
+  );
+  assert.equal(
+    isNegativeTransfer(
+      { stage1Accuracy: 0.8, stage2Accuracy: 0.95, pairedEscalationDelta: 0 },
+      { minDeltaHurt: 0 },
+    ),
+    true,
+  );
+
+  // 14. v1.3.1 optionDescriptions pruning, speculative t=0 circuit-breaker skip,
+  // uniform Stage-1 rescue / Stage-2 preservation, AbortSignal non-mutation, and VoI [0, 1] bounds.
+  const fullChoiceQuestion = {
+    type: "choice",
+    instructions: "Select queue",
+    criteria: { opt_a: "A", opt_b: "B", opt_c: "C", opt_d: "D" },
+    optionDescriptions: {
+      opt_a: "Alpha queue",
+      opt_b: "Bravo queue",
+      opt_c: "Charlie queue",
+      opt_d: "Delta queue",
+    },
+    priorLogits: { opt_a: -1.0, opt_b: 0.9, opt_c: 0.3, opt_d: -2.0 },
+  };
+  const prunedChoice = pruneChoiceTopK(
+    fullChoiceQuestion,
+    { opt_a: 0.1, opt_b: 0.52, opt_c: 0.3, opt_d: 0.08 },
+    2,
+  );
+  assert.deepEqual(prunedChoice.order, ["opt_b", "opt_c"]);
+  assert.deepEqual({ ...prunedChoice.optionDescriptions }, {
+    opt_b: "Bravo queue",
+    opt_c: "Charlie queue",
+  });
+  assert.equal(Object.hasOwn(prunedChoice.optionDescriptions, "opt_a"), false);
+  prunedChoice.optionDescriptions.opt_b = "Mutated";
+  assert.equal(fullChoiceQuestion.optionDescriptions.opt_b, "Bravo queue");
+  assert.equal(isUniformDistribution({ a: 0.5000004, b: 0.4999996 }), true);
+  assert.equal(isUniformDistribution({ a: 0.500002, b: 0.499998 }), false);
+
+  const negProfile = {
+    stage1Accuracy: 0.75,
+    stage2Accuracy: 0.62,
+    numOptions: 2,
+    pairedEscalationDelta: -3,
+  };
+  const posProfile = {
+    stage1Accuracy: 0.9,
+    stage2Accuracy: 0.88,
+    numOptions: 2,
+    pairedEscalationDelta: 2,
+  };
+  const twoOptChoice = {
+    type: "choice",
+    instructions: "Select route",
+    criteria: { opt_a: "Route A", opt_b: "Route B" },
+  };
+
+  // All choice questions trip isNegativeTransfer -> 0 speculative Stage-2 calls at t=0
+  let specStage2Calls = 0;
+  const specBlockedResp = await evaluateCascade(
+    async () => ({
+      slots: {
+        q1: {
+          slotId: "q1",
+          predicted: "opt_a",
+          probabilities: { opt_a: 0.6, opt_b: 0.4 },
+          rawProbabilities: { opt_a: 0.6, opt_b: 0.4 },
+          hRaw: 0.97,
+          confidence: 0.6,
+        },
+      },
+      latencyMs: 1,
+      backendName: "mock_s1",
+    }),
+    async () => {
+      specStage2Calls += 1;
+      return {
+        slots: {
+          q1: {
+            slotId: "q1",
+            predicted: "opt_b",
+            probabilities: { opt_a: 0.1, opt_b: 0.9 },
+            rawProbabilities: { opt_a: 0.1, opt_b: 0.9 },
+            hRaw: 0.47,
+            confidence: 0.9,
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s2",
+      };
+    },
+    { state: { id: 1 }, questions: { q1: twoOptChoice } },
+    { speculativeStage2: true, domainCompetence: negProfile },
+  );
+  assert.equal(specStage2Calls, 0);
+  assert.equal(specBlockedResp.speculativeSkippedByCircuitBreaker, true);
+  assert.equal(specBlockedResp.speculativeLaunched, false);
+  assert.equal(specBlockedResp.escalated, false);
+  assert.equal(specBlockedResp.slots.q1.predicted, "opt_a");
+
+  // Mixed request (1 blocked choice + 1 score) launches speculative Stage 2 only for score slot
+  const seenMixedSlots = [];
+  const mixedResp = await evaluateCascade(
+    async () => ({
+      slots: {
+        blocked: {
+          slotId: "blocked",
+          predicted: "opt_a",
+          probabilities: { opt_a: 0.6, opt_b: 0.4 },
+          rawProbabilities: { opt_a: 0.6, opt_b: 0.4 },
+          hRaw: 0.97,
+          confidence: 0.6,
+        },
+        scoreSlot: {
+          slotId: "scoreSlot",
+          predicted: "1",
+          probabilities: { "1": 0.55, "2": 0.45 },
+          rawProbabilities: { "1": 0.55, "2": 0.45 },
+          hRaw: 0.99,
+          confidence: 0.55,
+        },
+      },
+      latencyMs: 1,
+      backendName: "mock_s1",
+    }),
+    async (req) => {
+      seenMixedSlots.push(Object.keys(req.questions));
+      return {
+        slots: {
+          scoreSlot: {
+            slotId: "scoreSlot",
+            predicted: "2",
+            probabilities: { "1": 0.15, "2": 0.85 },
+            rawProbabilities: { "1": 0.15, "2": 0.85 },
+            hRaw: 0.6,
+            confidence: 0.85,
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s2",
+      };
+    },
+    {
+      state: { id: 2 },
+      questions: {
+        blocked: { ...twoOptChoice, domainCompetence: negProfile },
+        scoreSlot: {
+          type: "score",
+          instructions: "Score 1..2",
+          levels: ["1", "2"],
+          domainCompetence: negProfile,
+        },
+      },
+    },
+    { speculativeStage2: true },
+  );
+  assert.deepEqual(seenMixedSlots, [["scoreSlot"]]);
+  assert.equal(mixedResp.slots.blocked.escalated, false);
+  assert.equal(mixedResp.slots.blocked.predicted, "opt_a");
+  assert.equal(mixedResp.slots.scoreSlot.escalated, true);
+  assert.equal(mixedResp.slots.scoreSlot.predicted, "2");
+
+  // Uniform Stage-1 abstention rescues via two-phase (0.0, 1.0) even under negative transfer + PoE
+  let rescueStage2Calls = 0;
+  const rescueResp = await evaluateCascade(
+    async () => ({
+      slots: {
+        q1: {
+          slotId: "q1",
+          predicted: "opt_a",
+          probabilities: { opt_a: 0.5000004, opt_b: 0.4999996 },
+          rawProbabilities: { opt_a: 0.5000004, opt_b: 0.4999996 },
+          hRaw: 1.0,
+          confidence: 0.5,
+        },
+      },
+      latencyMs: 1,
+      backendName: "mock_s1",
+    }),
+    async () => {
+      rescueStage2Calls += 1;
+      return {
+        slots: {
+          q1: {
+            slotId: "q1",
+            predicted: "opt_b",
+            probabilities: { opt_a: 0.15, opt_b: 0.85 },
+            rawProbabilities: { opt_a: 0.15, opt_b: 0.85 },
+            hRaw: 0.61,
+            confidence: 0.85,
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s2",
+      };
+    },
+    { state: { id: 3 }, questions: { q1: twoOptChoice } },
+    {
+      speculativeStage2: true,
+      domainCompetence: negProfile,
+      useDawidSkenePoeWeights: true,
+    },
+  );
+  assert.equal(rescueStage2Calls, 1);
+  assert.equal(rescueResp.escalated, true);
+  assert.equal(rescueResp.slots.q1.predicted, "opt_b");
+  assert.ok(Math.abs(rescueResp.slots.q1.probabilities.opt_b - 0.85) < 1e-12);
+
+  // Uniform Stage-2 fallback preserves calibrated Stage 1 (1.0, 0.0)
+  for (const usePoe of [false, true]) {
+    const preserveResp = await evaluateCascade(
+      async () => ({
+        slots: {
+          q1: {
+            slotId: "q1",
+            predicted: "opt_a",
+            probabilities: { opt_a: 0.62, opt_b: 0.38 },
+            rawProbabilities: { opt_a: 0.62, opt_b: 0.38 },
+            hRaw: 0.958,
+            confidence: 0.62,
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s1",
+      }),
+      async () => ({
+        slots: {
+          q1: {
+            slotId: "q1",
+            predicted: "opt_b",
+            probabilities: { opt_a: 0.5, opt_b: 0.5 },
+            rawProbabilities: { opt_a: 0.5, opt_b: 0.5 },
+            hRaw: 1.0,
+            confidence: 0.5,
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s2",
+      }),
+      { state: { id: 4 }, questions: { q1: twoOptChoice } },
+      { domainCompetence: posProfile, useDawidSkenePoeWeights: usePoe },
+    );
+    assert.equal(preserveResp.slots.q1.predicted, "opt_a");
+    assert.ok(Math.abs(preserveResp.slots.q1.probabilities.opt_a - 0.62) < 1e-12);
+    assert.ok(Math.abs(preserveResp.slots.q1.probabilities.opt_b - 0.38) < 1e-12);
+  }
+
+  // Fast-exit aborts child speculative Stage-2 signal WITHOUT mutating caller AbortController
+  const callerController = new AbortController();
+  let childStage2Aborted = false;
+  let stage2StartedResolve;
+  const stage2StartedPromise = new Promise((resolve) => {
+    stage2StartedResolve = resolve;
+  });
+  const fastExitResp = await evaluateCascade(
+    async () => {
+      await stage2StartedPromise;
+      return {
+        slots: {
+          q1: {
+            slotId: "q1",
+            predicted: "opt_a",
+            probabilities: { opt_a: 0.99, opt_b: 0.01 },
+            rawProbabilities: { opt_a: 0.99, opt_b: 0.01 },
+            hRaw: 0.08,
+            confidence: 0.99,
+          },
+        },
+        latencyMs: 1,
+        backendName: "mock_s1",
+      };
+    },
+    async (req) =>
+      new Promise((_resolve, reject) => {
+        stage2StartedResolve();
+        req.signal?.addEventListener(
+          "abort",
+          () => {
+            childStage2Aborted = true;
+            reject(new Error("aborted"));
+          },
+          { once: true },
+        );
+      }),
+    { state: { id: 5 }, questions: { q1: twoOptChoice }, signal: callerController.signal },
+    { speculativeStage2: true, hesitationThreshold: 0.25 },
+  );
+  assert.equal(fastExitResp.escalated, false);
+  assert.equal(callerController.signal.aborted, false);
+  assert.equal(childStage2Aborted, true);
+
+  // Pre-aborted and mid-flight AbortSignal propagate cleanly
+  const preAborted = new AbortController();
+  preAborted.abort(new Error("caller_cancelled"));
+  await assert.rejects(
+    () =>
+      evaluateCascade(
+        async () => {
+          throw new Error("should not execute");
+        },
+        undefined,
+        { state: {}, questions: { q1: twoOptChoice }, signal: preAborted.signal },
+      ),
+    /caller_cancelled/,
+  );
+
+  const midAbort = new AbortController();
+  setTimeout(() => midAbort.abort(new Error("mid_flight_abort")), 20);
+  await assert.rejects(
+    () =>
+      evaluateCascade(
+        async () => ({
+          slots: {
+            q1: {
+              slotId: "q1",
+              predicted: "opt_a",
+              probabilities: { opt_a: 0.58, opt_b: 0.42 },
+              rawProbabilities: { opt_a: 0.58, opt_b: 0.42 },
+              hRaw: 0.98,
+              confidence: 0.58,
+            },
+          },
+          latencyMs: 1,
+          backendName: "mock_s1",
+        }),
+        async () => new Promise(() => undefined),
+        { state: {}, questions: { q1: twoOptChoice }, signal: midAbort.signal },
+        { speculativeStage2: true },
+      ),
+    /mid_flight_abort/,
+  );
+
+  // voiStage2ExpectedAccuracy accepts full [0.0, 1.0] (including < 0.50) and rejects out-of-range
+  for (const validAcc of [0.0, 0.25, 0.49, 0.5, 0.95, 1.0]) {
+    const orch = new CascadeOrchestrator(
+      async () => ({ slots: {}, latencyMs: 0, backendName: "s1" }),
+      undefined,
+      { voiErrorCost: 1.0, voiStage2ExpectedAccuracy: validAcc },
+    );
+    assert.ok(orch instanceof CascadeOrchestrator);
+  }
+  for (const badAcc of [-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () =>
+        new CascadeOrchestrator(
+          async () => ({ slots: {}, latencyMs: 0, backendName: "s1" }),
+          undefined,
+          { voiStage2ExpectedAccuracy: badAcc },
+        ),
+      MDMValidationError,
+    );
   }
 
   console.log("PASSED: @mdm/client TypeScript SDK tests (all assertions green).");

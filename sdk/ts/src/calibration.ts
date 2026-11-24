@@ -977,6 +977,9 @@ export function isNegativeTransfer(
   if (typeof minDeltaHurt !== "number" || !Number.isInteger(minDeltaHurt)) {
     throw new MDMValidationError("minDeltaHurt must be an integer");
   }
+  if (minDeltaHurt > 0) {
+    throw new MDMValidationError("minDeltaHurt must be <= 0");
+  }
   const brierDegradationRatio = options.brierDegradationRatio ?? 2.5;
   if (
     typeof brierDegradationRatio !== "number" ||
@@ -1055,4 +1058,37 @@ export function computeDawidSkenePoeWeights(
     Math.log(clampedStage2 / (1.0 - clampedStage2)) - chanceLogOdds,
   );
   return [stage1Weight, stage2Weight];
+}
+
+export function isUniformDistribution(
+  probs: Record<string, number>,
+  tolerance = 1e-6,
+): boolean {
+  if (typeof tolerance !== "number" || !Number.isFinite(tolerance) || tolerance < 0.0) {
+    throw new MDMValidationError("tolerance must be a finite number >= 0");
+  }
+  if (!probs || typeof probs !== "object" || Array.isArray(probs)) {
+    return false;
+  }
+  const values = Object.values(probs);
+  if (values.length < 2) {
+    return false;
+  }
+  let total = 0.0;
+  for (const val of values) {
+    if (typeof val !== "number" || !Number.isFinite(val) || val < 0.0) {
+      return false;
+    }
+    total += val;
+  }
+  if (!Number.isFinite(total) || total <= 0.0) {
+    return false;
+  }
+  const target = 1.0 / values.length;
+  for (const val of values) {
+    if (Math.abs(val / total - target) > tolerance) {
+      return false;
+    }
+  }
+  return true;
 }

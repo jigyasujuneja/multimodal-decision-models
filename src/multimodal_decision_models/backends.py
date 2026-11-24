@@ -47,16 +47,17 @@ import ssl
 import string
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Collection, Mapping, Protocol, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from .calibration import VALID_PRIOR_GATE_MODES, DomainCompetenceProfile, apply_layer5_deterministic_guards, compute_dawid_skene_poe_weights, inject_evidence_slot, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
-from .conformal import conformal_prediction_set
+from .calibration import VALID_PRIOR_GATE_MODES, DomainCompetenceProfile, apply_layer5_deterministic_guards, compute_dawid_skene_poe_weights, inject_evidence_slot, is_uniform_distribution, normalized_entropy, pre_gated_bayesian_poe_fusion, stage2a_fast_exit_gate
+from .conformal import compute_bayes_value_of_information, conformal_prediction_set
 from .contracts import UNTRUSTED_BOUNDARY_NOTICE, ContentAddressedDecisionCache, DecisionContractError, LogprobAlignmentError, SchemaContractViolationError, UpstreamTransientError, _sanitize_value, compute_decision_cache_key, wrap_untrusted_state
-from .shortlist import shortlist_wide_question, split_identifier_tokens
+from .shortlist import prune_choice_top_k, shortlist_wide_question, split_identifier_tokens
 from .types import DEFAULT_HESITATION_THRESHOLD, MAX_EXTENDED_OPTIONS_PER_SLOT, MAX_OPTIONS_PER_SLOT, UNIVERSAL_256_DECISION_CODES, DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory, SlotReadout
 
 OPENAI_MAX_TOP_LOGPROBS = 20
@@ -521,6 +522,11 @@ class MockCallableBackend:
             )
         self.name = name
         self._fn = fn
+        try:
+            fn_sig = inspect.signature(fn)
+            self._accepts_cancel_event = "cancel_event" in fn_sig.parameters
+        except (TypeError, ValueError):
+            self._accepts_cancel_event = False
         self.last_evidence: dict[str, str] = {}
 
     def score_questions(
@@ -528,7 +534,11 @@ class MockCallableBackend:
         state: Any,
         questions: Mapping[str, DecisionQuestion],
         images: list[str] | None = None,
+        *,
+        cancel_event: Any = None,
     ) -> dict[str, dict[str, float]]:
+        if self._accepts_cancel_event:
+            return self._fn(state, questions, images, cancel_event=cancel_event)  # type: ignore[call-arg]
         return self._fn(state, questions, images)
 
 
@@ -1358,7 +1368,7 @@ class OpenAILogprobBackend:
             "Options:",
         ]
         for letter, key in letter_to_key.items():
-            desc = q.criteria.get(key, key) if q.type != "score" else key
+            desc = q.option_description(key) if q.type != "score" else key
             lines.append(f"  {letter}) {key}: {desc}")
         code_kind = "option code" if len(keys) > MAX_OPTIONS_PER_SLOT else "single uppercase option letter"
         lines.append(f"\nReply with the {code_kind} only.")
@@ -1674,7 +1684,7 @@ class VertexGeminiBackend:
             letter_to_key, _ = self.slot_letter_bijection(q)
             max_opts = max(max_opts, len(letter_to_key))
             opts_desc = ", ".join(
-                f"{ltr}={k} ({q.criteria.get(k, k) if q.type != 'score' else k})"
+                f"{ltr}={k} ({q.option_description(k) if q.type != 'score' else k})"
                 for ltr, k in letter_to_key.items()
             )
             prompt_lines.append(f"- {qid}: {q.instructions} | Options: {opts_desc}")
@@ -2260,7 +2270,7 @@ class GeminiDecisionsBackend:
                                 {
                                     "score": score_val,
                                     "label": bucket_key,
-                                    "description": question.criteria.get(bucket_key, bucket_key),
+                                    "description": question.option_description(bucket_key),
                                 }
                                 for bucket_key, score_val in zip(bucket_keys, bucket_scores)
                             ],
@@ -2293,6 +2303,12 @@ class GeminiDecisionsBackend:
                             },
                             evidence_prompt=question.evidence_prompt,
                             evidence_criteria=dict(question.evidence_criteria),
+                            option_descriptions={
+                                k: v
+                                for k, v in question.option_descriptions.items()
+                                if k != abstention_key
+                            },
+                            domain_competence=question.domain_competence,
                         )
                         if abstention_key in raw_keys and len(raw_keys) > 2
                         else question
@@ -2332,7 +2348,7 @@ class GeminiDecisionsBackend:
                     "options": [
                         {
                             "key": option_key,
-                            "description": bridged_q.criteria.get(option_key, option_key),
+                            "description": bridged_q.option_description(option_key),
                         }
                         for option_key in explicit_keys
                     ],
@@ -3008,7 +3024,7 @@ class BlackBoxSampledBackend:
         for qid, q in questions.items():
             letter_to_key = bijections[qid]
             opts = ", ".join(
-                f"{ltr}={k} ({q.criteria.get(k, k) if q.type != 'score' else k})"
+                f"{ltr}={k} ({q.option_description(k) if q.type != 'score' else k})"
                 for ltr, k in letter_to_key.items()
             )
             lines.append(f"- {qid}: {q.instructions} | Options: {opts}")
@@ -3507,6 +3523,26 @@ class BlackBoxSampledBackend:
         return out_probs
 
 
+class _CancelTokenView:
+    """Read-only cancellation token combining caller event and local speculative abort."""
+
+    def __init__(
+        self,
+        caller_event: Any = None,
+        local_abort_event: threading.Event | None = None,
+    ) -> None:
+        self._caller_event = caller_event
+        self._local_abort_event = local_abort_event
+
+    def is_set(self) -> bool:
+        """Return True if either the caller event or local speculative abort is set."""
+        if self._caller_event is not None and bool(self._caller_event.is_set()):
+            return True
+        if self._local_abort_event is not None and self._local_abort_event.is_set():
+            return True
+        return False
+
+
 class CascadeDecisionOrchestrator:
     """Level-4 Total-Contract Multimodal Decision Funnel Orchestrator."""
 
@@ -3539,6 +3575,15 @@ class CascadeDecisionOrchestrator:
         conformal_rng: random.Random | None = None,
         domain_competence: DomainCompetenceProfile | None = None,
         use_dawid_skene_poe_weights: bool = False,
+        speculative_stage2: bool = False,
+        stage2_prune_top_k: int = 0,
+        voi_error_cost: float | None = None,
+        voi_stage2_expected_accuracy: float = 0.95,
+        voi_stage2_rpc_cost_usd: float = 0.005,
+        voi_latency_cost_usd: float = 0.0,
+        negative_transfer_margin: float = 0.05,
+        negative_transfer_min_delta_hurt: int = -2,
+        negative_transfer_brier_ratio: float = 2.5,
     ) -> None:
         if stage1_backend is None or not callable(getattr(stage1_backend, "score_questions", None)):
             raise SchemaContractViolationError(
@@ -3558,6 +3603,7 @@ class CascadeDecisionOrchestrator:
             ("escalate_on_conformal_ambiguous", escalate_on_conformal_ambiguous),
             ("conformal_randomized", conformal_randomized),
             ("use_dawid_skene_poe_weights", use_dawid_skene_poe_weights),
+            ("speculative_stage2", speculative_stage2),
         ):
             if not isinstance(flag_val, bool):
                 raise SchemaContractViolationError(
@@ -3571,6 +3617,34 @@ class CascadeDecisionOrchestrator:
             raise SchemaContractViolationError(
                 "use_dawid_skene_poe_weights=True requires domain_competence to be set"
             )
+        clean_stage2_prune = _require_nonneg_int(stage2_prune_top_k, "stage2_prune_top_k")
+        if clean_stage2_prune == 1:
+            raise SchemaContractViolationError("stage2_prune_top_k must be 0 or >= 2")
+        clean_voi_acc = self._validate_unit_interval_number(
+            voi_stage2_expected_accuracy, "voi_stage2_expected_accuracy"
+        )
+        clean_voi_err = (
+            _require_nonneg_finite_number(voi_error_cost, "voi_error_cost")
+            if voi_error_cost is not None
+            else None
+        )
+        clean_voi_rpc = _require_nonneg_finite_number(
+            voi_stage2_rpc_cost_usd, "voi_stage2_rpc_cost_usd"
+        )
+        clean_voi_lat = _require_nonneg_finite_number(voi_latency_cost_usd, "voi_latency_cost_usd")
+        clean_nt_margin = _require_nonneg_finite_number(
+            negative_transfer_margin, "negative_transfer_margin"
+        )
+        clean_nt_min_hurt = _require_strict_int(
+            negative_transfer_min_delta_hurt, "negative_transfer_min_delta_hurt"
+        )
+        if clean_nt_min_hurt > 0:
+            raise SchemaContractViolationError("negative_transfer_min_delta_hurt must be <= 0")
+        clean_nt_brier = _require_finite_number(
+            negative_transfer_brier_ratio, "negative_transfer_brier_ratio"
+        )
+        if clean_nt_brier <= 1.0:
+            raise SchemaContractViolationError("negative_transfer_brier_ratio must be > 1.0")
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
         self.hesitation_threshold = _require_nonneg_finite_number(
@@ -3618,6 +3692,15 @@ class CascadeDecisionOrchestrator:
         self.conformal_rng = conformal_rng
         self.domain_competence = domain_competence
         self.use_dawid_skene_poe_weights = use_dawid_skene_poe_weights
+        self.speculative_stage2 = speculative_stage2
+        self.stage2_prune_top_k = clean_stage2_prune
+        self.voi_error_cost = clean_voi_err
+        self.voi_stage2_expected_accuracy = clean_voi_acc
+        self.voi_stage2_rpc_cost_usd = clean_voi_rpc
+        self.voi_latency_cost_usd = clean_voi_lat
+        self.negative_transfer_margin = clean_nt_margin
+        self.negative_transfer_min_delta_hurt = clean_nt_min_hurt
+        self.negative_transfer_brier_ratio = clean_nt_brier
         self.layer5_slot_context: dict[str, dict[str, Any]] | Any = (
             {
                 str(qid): (dict(ctx) if isinstance(ctx, Mapping) else ctx)
@@ -3626,6 +3709,66 @@ class CascadeDecisionOrchestrator:
             if isinstance(layer5_slot_context, Mapping)
             else layer5_slot_context
         )
+
+    @staticmethod
+    def _validate_unit_interval_number(raw_value: Any, field: str) -> float:
+        value = _require_finite_number(raw_value, field)
+        if value < 0.0 or value > 1.0:
+            raise SchemaContractViolationError(
+                f"{field} must lie in [0.0, 1.0], got {raw_value!r}"
+            )
+        return 0.0 if value == 0.0 else value
+
+    def _slot_competence_profile(
+        self,
+        qid: str,
+        questions: Mapping[str, DecisionQuestion],
+    ) -> DomainCompetenceProfile | None:
+        if qid in questions and questions[qid].domain_competence is not None:
+            slot_comp = questions[qid].domain_competence
+            if not isinstance(slot_comp, DomainCompetenceProfile):
+                raise SchemaContractViolationError(
+                    f"questions[{qid!r}].domain_competence must be a DomainCompetenceProfile or None"
+                )
+            return slot_comp
+        return self.domain_competence
+
+    def _is_slot_negative_transfer(self, profile: DomainCompetenceProfile | None) -> bool:
+        if profile is None:
+            return False
+        try:
+            return profile.is_negative_transfer(
+                margin=self.negative_transfer_margin,
+                min_delta_hurt=self.negative_transfer_min_delta_hurt,
+                brier_degradation_ratio=self.negative_transfer_brier_ratio,
+            )
+        except ValueError as exc:
+            raise SchemaContractViolationError(str(exc)) from exc
+
+    @staticmethod
+    def _invoke_backend_score_questions(
+        backend: DecisionBackend,
+        state: Any,
+        questions: Mapping[str, DecisionQuestion],
+        images: list[str] | None,
+        cancel_token: _CancelTokenView | None,
+    ) -> Mapping[str, Mapping[str, float]]:
+        if cancel_token is not None and cancel_token.is_set():
+            raise cf.CancelledError("Decision evaluation cancelled via cancel_event")
+        score_fn = backend.score_questions
+        accepts_cancel = False
+        try:
+            score_sig = inspect.signature(score_fn)
+            accepts_cancel = "cancel_event" in score_sig.parameters
+        except (TypeError, ValueError):
+            accepts_cancel = False
+        if accepts_cancel:
+            result = score_fn(state, questions, images, cancel_event=cancel_token)  # type: ignore[call-arg]
+        else:
+            result = score_fn(state, questions, images)
+        if cancel_token is not None and cancel_token.is_set():
+            raise cf.CancelledError("Decision evaluation cancelled via cancel_event")
+        return result
 
     @staticmethod
     def _validate_conformal_q_hat_value(raw_q: Any, field: str) -> float:
@@ -3871,10 +4014,17 @@ class CascadeDecisionOrchestrator:
         sister_pack_collision: bool = False,
         layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
         tenant_id: str = "default",
+        cancel_event: threading.Event | None = None,
     ) -> DecisionResult:
         t0 = time.perf_counter()
         cache_key = ""
         try:
+            if cancel_event is not None and not callable(getattr(cancel_event, "is_set", None)):
+                raise SchemaContractViolationError(
+                    "cancel_event must provide a callable is_set() method when provided"
+                )
+            if cancel_event is not None and bool(cancel_event.is_set()):
+                raise cf.CancelledError("Decision evaluation cancelled before Stage 1")
             clean_hes = _require_finite_number(self.hesitation_threshold, "hesitation_threshold")
             clean_pw = _require_nonneg_finite_number(self.prior_weight, "prior_weight")
             clean_temp = _require_finite_number(self.temperature, "temperature")
@@ -3962,9 +4112,56 @@ class CascadeDecisionOrchestrator:
                     f"domain_competence must be a DomainCompetenceProfile or None, got {self.domain_competence!r}"
                 )
             if self.use_dawid_skene_poe_weights and self.domain_competence is None:
+                if not isinstance(questions, Mapping) or not questions or not all(
+                    isinstance(q_obj, DecisionQuestion) and isinstance(q_obj.domain_competence, DomainCompetenceProfile)
+                    for q_obj in questions.values()
+                ):
+                    raise SchemaContractViolationError(
+                        "use_dawid_skene_poe_weights=True requires domain_competence to be set"
+                    )
+            if not isinstance(self.speculative_stage2, bool):
                 raise SchemaContractViolationError(
-                    "use_dawid_skene_poe_weights=True requires domain_competence to be set"
+                    f"speculative_stage2 must be bool, got {self.speculative_stage2!r}"
                 )
+            clean_stage2_prune = _require_nonneg_int(
+                self.stage2_prune_top_k, "stage2_prune_top_k"
+            )
+            if clean_stage2_prune == 1:
+                raise SchemaContractViolationError("stage2_prune_top_k must be 0 or >= 2")
+            clean_voi_acc = self._validate_unit_interval_number(
+                self.voi_stage2_expected_accuracy, "voi_stage2_expected_accuracy"
+            )
+            clean_voi_err = (
+                _require_nonneg_finite_number(self.voi_error_cost, "voi_error_cost")
+                if self.voi_error_cost is not None
+                else None
+            )
+            clean_voi_rpc = _require_nonneg_finite_number(
+                self.voi_stage2_rpc_cost_usd, "voi_stage2_rpc_cost_usd"
+            )
+            clean_voi_lat = _require_nonneg_finite_number(
+                self.voi_latency_cost_usd, "voi_latency_cost_usd"
+            )
+            clean_nt_margin = _require_nonneg_finite_number(
+                self.negative_transfer_margin, "negative_transfer_margin"
+            )
+            clean_nt_min_hurt = _require_strict_int(
+                self.negative_transfer_min_delta_hurt, "negative_transfer_min_delta_hurt"
+            )
+            if clean_nt_min_hurt > 0:
+                raise SchemaContractViolationError("negative_transfer_min_delta_hurt must be <= 0")
+            clean_nt_brier = _require_finite_number(
+                self.negative_transfer_brier_ratio, "negative_transfer_brier_ratio"
+            )
+            if clean_nt_brier <= 1.0:
+                raise SchemaContractViolationError("negative_transfer_brier_ratio must be > 1.0")
+            if isinstance(questions, Mapping):
+                for q_slot_id, q_slot_obj in questions.items():
+                    if isinstance(q_slot_obj, DecisionQuestion) and q_slot_obj.domain_competence is not None:
+                        if not isinstance(q_slot_obj.domain_competence, DomainCompetenceProfile):
+                            raise SchemaContractViolationError(
+                                f"questions[{q_slot_id!r}].domain_competence must be a DomainCompetenceProfile or None"
+                            )
 
             s1_name = getattr(self.stage1_backend, "name", None)
             if not isinstance(s1_name, str) or not s1_name.strip():
@@ -4035,6 +4232,25 @@ class CascadeDecisionOrchestrator:
                 }
             if self.use_dawid_skene_poe_weights:
                 extra_cfg["use_dawid_skene_poe_weights"] = True
+            if self.speculative_stage2:
+                extra_cfg["speculative_stage2"] = True
+            if clean_stage2_prune > 0:
+                extra_cfg["stage2_prune_top_k"] = clean_stage2_prune
+            if clean_voi_err is not None:
+                extra_cfg["voi_error_cost"] = clean_voi_err
+                extra_cfg["voi_stage2_expected_accuracy"] = clean_voi_acc
+                extra_cfg["voi_stage2_rpc_cost_usd"] = clean_voi_rpc
+                extra_cfg["voi_latency_cost_usd"] = clean_voi_lat
+            if (
+                clean_nt_margin != 0.05
+                or clean_nt_min_hurt != -2
+                or clean_nt_brier != 2.5
+            ):
+                extra_cfg["negative_transfer_thresholds"] = {
+                    "margin": clean_nt_margin,
+                    "min_delta_hurt": clean_nt_min_hurt,
+                    "brier_degradation_ratio": clean_nt_brier,
+                }
 
             if clean_q_hat is not None:
                 if not isinstance(self.conformal_method, str) or self.conformal_method not in (
@@ -4100,6 +4316,7 @@ class CascadeDecisionOrchestrator:
                 rank1_visual_similarity=clean_r1_sim,
                 sister_pack_collision=sister_pack_collision,
                 layer5_slot_context=clean_call_slot_ctx,
+                cancel_event=cancel_event,
             )
         except DecisionContractError as exc:
             if not self.total_contract_mode:
@@ -4125,6 +4342,7 @@ class CascadeDecisionOrchestrator:
         rank1_visual_similarity: float | None,
         sister_pack_collision: bool,
         layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> DecisionResult:
         # 1. Stage 2A Adaptive Fast-Exit check for single-slot retrieval verification
         if self.enable_stage2a_fast_exit and len(questions) == 1 and prior_logits:
@@ -4236,211 +4454,130 @@ class CascadeDecisionOrchestrator:
                 raise SchemaContractViolationError(str(exc)) from exc
             evidence_slot_id = "evidence_feature"
 
-        # 4. Run Stage-1 Fast Backend with SLA check
-        raw_stage1 = self.stage1_backend.score_questions(state, active_questions, images)
-        if (time.perf_counter() - t0) > self.sla_timeout_sec:
-            raise UpstreamTransientError(
-                f"Stage-1 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
-            )
-        if not isinstance(raw_stage1, Mapping):
-            raise SchemaContractViolationError("Stage-1 backend returned non-mapping response")
-        backend_evidence: Mapping[str, str] = getattr(self.stage1_backend, "last_evidence", {}) or {}
-        stage1_epistemic: Mapping[str, float] = getattr(self.stage1_backend, "last_epistemic_variance", {}) or {}
+        local_stage2_abort = threading.Event()
+        stage1_cancel_token = _CancelTokenView(cancel_event)
+        stage2_cancel_token = _CancelTokenView(cancel_event, local_stage2_abort)
+        speculative_executor: cf.ThreadPoolExecutor | None = None
+        speculative_future: cf.Future[Mapping[str, Mapping[str, float]]] | None = None
+        speculative_qids: frozenset[str] = frozenset()
 
-        injected_ev_choice = ""
-        if evidence_slot_id and evidence_slot_id in raw_stage1 and raw_stage1[evidence_slot_id]:
-            ev_dist = _validate_slot_distribution(
-                raw_stage1[evidence_slot_id], f"Stage-1 slot {evidence_slot_id!r}"
-            )
-            injected_ev_choice = max(ev_dist.items(), key=lambda kv: kv[1])[0]
-
-        slots_out: dict[str, SlotReadout] = {}
-        escalated_qids: list[str] = []
-        escalation_reasons: list[str] = []
-
-        for qid, q in active_questions.items():
-            raw_dist = _validate_slot_distribution(raw_stage1.get(qid), f"Stage-1 slot {qid!r}")
-
-            # Evaluate Split Conformal / RAPS set strictly on raw_dist BEFORE Stage-1 prior fusion.
-            slot_conformal_set: list[str] = []
-            conformal_esc = False
-            slot_q_hat = self._resolve_slot_q_hat(qid) if qid != evidence_slot_id else None
-            if slot_q_hat is not None:
-                try:
-                    conf_res = conformal_prediction_set(
-                        raw_dist,
-                        slot_q_hat,
-                        method=self.conformal_method,
-                        lam_reg=self.conformal_lam_reg,
-                        k_reg=self.conformal_k_reg,
-                        abstain_keys=self.oos_keys,
-                        randomized=self.conformal_randomized,
-                        seed=self.conformal_seed,
-                        rng=self.conformal_rng,
-                    )
-                except DecisionContractError:
-                    raise
-                except (ValueError, TypeError) as exc:
-                    raise SchemaContractViolationError(str(exc)) from exc
-                slot_conformal_set = conf_res.prediction_set
-                if self.escalate_on_conformal_ambiguous:
-                    conformal_esc = conf_res.should_escalate
-
-            slot_prior = (
-                ((prior_logits or {}).get(qid) or q.prior_logits or None)
-                if qid != evidence_slot_id
-                else None
-            )
-            try:
-                fused_dist, h_raw, should_esc = pre_gated_bayesian_poe_fusion(
-                    raw_dist,
-                    prior_logits=slot_prior,
-                    prior_weight=self.prior_weight if slot_prior else 0.0,
-                    temperature=self.temperature,
-                    hesitation_threshold=self.hesitation_threshold,
-                    gate_mode=self.prior_gate_mode,
+        try:
+            # 3.5. Optional t=0 Speculative Stage-2 Launch (skipped when all questions are
+            # choice questions whose DomainCompetenceProfile trips is_negative_transfer)
+            if self.speculative_stage2 and self.stage2_backend is not None:
+                non_ev_qids = [qid for qid in active_questions if qid != evidence_slot_id]
+                all_choice_negative_transfer = bool(non_ev_qids) and all(
+                    active_questions[qid].type == "choice"
+                    and self._is_slot_negative_transfer(self._slot_competence_profile(qid, questions))
+                    for qid in non_ev_qids
                 )
-            except DecisionContractError:
-                raise
-            except (ValueError, TypeError) as exc:
-                raise SchemaContractViolationError(str(exc)) from exc
-            predicted = max(fused_dist.items(), key=lambda kv: kv[1])[0]
-            guard_name = "none"
-            if qid != evidence_slot_id:
-                s1_packs, s1_dec_pack, s1_ven, s1_r1_id, s1_r1_sim = self._resolve_slot_layer5_args(
-                    qid,
-                    slot_context_override=layer5_slot_context,
-                    candidate_pack_sizes=candidate_pack_sizes,
-                    decoded_pack_size=decoded_pack_size,
-                    visual_energies=visual_energies,
-                    rank1_id=rank1_id,
-                    rank1_visual_similarity=rank1_visual_similarity,
+                if not all_choice_negative_transfer:
+                    spec_questions = {
+                        qid: active_questions[qid]
+                        for qid in non_ev_qids
+                        if not (
+                            active_questions[qid].type == "choice"
+                            and self._is_slot_negative_transfer(
+                                self._slot_competence_profile(qid, questions)
+                            )
+                        )
+                    }
+                    if spec_questions:
+                        speculative_qids = frozenset(spec_questions.keys())
+                        speculative_executor = cf.ThreadPoolExecutor(max_workers=1)
+                        speculative_future = speculative_executor.submit(
+                            self._invoke_backend_score_questions,
+                            self.stage2_backend,
+                            state,
+                            spec_questions,
+                            images,
+                            stage2_cancel_token,
+                        )
+
+            # 4. Run Stage-1 Fast Backend with SLA and cancellation checks
+            raw_stage1 = self._invoke_backend_score_questions(
+                self.stage1_backend,
+                state,
+                active_questions,
+                images,
+                stage1_cancel_token,
+            )
+            if (time.perf_counter() - t0) > self.sla_timeout_sec:
+                raise UpstreamTransientError(
+                    f"Stage-1 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
                 )
-                slot_allowed_s1 = set(q.option_keys())
-                if s1_packs:
-                    s1_packs = {k: v for k, v in s1_packs.items() if k in slot_allowed_s1} or None
-                if s1_r1_id is not None and s1_r1_id not in slot_allowed_s1:
-                    s1_r1_id = None
-                if s1_packs or s1_ven or s1_r1_sim is not None:
+            if not isinstance(raw_stage1, Mapping):
+                raise SchemaContractViolationError("Stage-1 backend returned non-mapping response")
+            backend_evidence: Mapping[str, str] = (
+                getattr(self.stage1_backend, "last_evidence", {}) or {}
+            )
+            stage1_epistemic: Mapping[str, float] = (
+                getattr(self.stage1_backend, "last_epistemic_variance", {}) or {}
+            )
+
+            injected_ev_choice = ""
+            if evidence_slot_id and evidence_slot_id in raw_stage1 and raw_stage1[evidence_slot_id]:
+                ev_dist = _validate_slot_distribution(
+                    raw_stage1[evidence_slot_id], f"Stage-1 slot {evidence_slot_id!r}"
+                )
+                injected_ev_choice = max(ev_dist.items(), key=lambda kv: kv[1])[0]
+
+            slots_out: dict[str, SlotReadout] = {}
+            escalated_qids: list[str] = []
+            escalation_reasons: list[str] = []
+            slot_stage1_uniform: dict[str, bool] = {}
+
+            for qid, q in active_questions.items():
+                raw_dist = _validate_slot_distribution(raw_stage1.get(qid), f"Stage-1 slot {qid!r}")
+                slot_stage1_uniform[qid] = is_uniform_distribution(raw_dist)
+
+                # Evaluate Split Conformal / RAPS set strictly on raw_dist BEFORE Stage-1 prior fusion.
+                slot_conformal_set: list[str] = []
+                conformal_esc = False
+                slot_q_hat = self._resolve_slot_q_hat(qid) if qid != evidence_slot_id else None
+                if slot_q_hat is not None:
                     try:
-                        predicted, guard_name = apply_layer5_deterministic_guards(
-                            chosen_id=predicted,
-                            raw_probs=raw_dist,
-                            candidate_pack_sizes=s1_packs,
-                            decoded_pack_size=s1_dec_pack,
-                            visual_energies=s1_ven,
-                            rank1_id=s1_r1_id,
-                            rank1_visual_similarity=s1_r1_sim,
+                        conf_res = conformal_prediction_set(
+                            raw_dist,
+                            slot_q_hat,
+                            method=self.conformal_method,
+                            lam_reg=self.conformal_lam_reg,
+                            k_reg=self.conformal_k_reg,
+                            abstain_keys=self.oos_keys,
+                            randomized=self.conformal_randomized,
+                            seed=self.conformal_seed,
+                            rng=self.conformal_rng,
                         )
                     except DecisionContractError:
                         raise
                     except (ValueError, TypeError) as exc:
                         raise SchemaContractViolationError(str(exc)) from exc
+                    slot_conformal_set = conf_res.prediction_set
+                    if self.escalate_on_conformal_ambiguous:
+                        conformal_esc = conf_res.should_escalate
 
-            slot_ev = backend_evidence.get(qid, injected_ev_choice if qid != evidence_slot_id else "")
-            inferred_flag = (
-                self.escalate_on_inferred_evidence
-                and qid != evidence_slot_id
-                and slot_ev in _INFERRED_EVIDENCE_LABELS
-            )
-
-            if qid != evidence_slot_id and (should_esc or inferred_flag or conformal_esc):
-                escalated_qids.append(qid)
-                if should_esc:
-                    escalation_reasons.append(f"{qid}:h_raw={h_raw:.4f}>={self.hesitation_threshold}")
-                if inferred_flag:
-                    escalation_reasons.append(f"{qid}:evidence={slot_ev}")
-                if conformal_esc:
-                    escalation_reasons.append(f"{qid}:conformal_set_size={len(slot_conformal_set)}")
-
-            if predicted in self.oos_keys:
-                slot_state = DecisionTerminalState.ABSTAIN_OOS
-                f_cat = FailureCategory.ABSTAINED_OOS
-            elif guard_name != "none":
-                slot_state = DecisionTerminalState.GUARD_OVERRIDDEN
-                f_cat = FailureCategory.NONE
-            else:
-                slot_state = DecisionTerminalState.STAGE1_RESOLVED
-                f_cat = FailureCategory.NONE
-
-            slots_out[qid] = SlotReadout(
-                slot_id=qid,
-                predicted=predicted,
-                probabilities=fused_dist,
-                raw_probabilities=raw_dist,
-                h_raw=h_raw,
-                confidence=1.0 - h_raw,
-                escalated=False,
-                guard_applied=guard_name,
-                backend_name=self.stage1_backend.name,
-                evidence=slot_ev,
-                terminal_state=slot_state,
-                failure_category=f_cat,
-                conformal_set=slot_conformal_set,
-                epistemic_variance=float(stage1_epistemic.get(qid, 0.0)),
-            )
-
-        # 5. Optional Stage-2 Frontier Escalation on Hesitant, Conformal-Ambiguous, or Inferred-Evidence Slots
-        did_escalate = False
-        competence_blocked = (
-            self.domain_competence is not None and self.domain_competence.is_negative_transfer()
-        )
-        if escalated_qids and self.stage2_backend is not None and competence_blocked:
-            escalation_reasons.append("domain_competence:negative_transfer_short_circuit")
-        elif escalated_qids and self.stage2_backend is not None:
-            if (time.perf_counter() - t0) >= self.sla_timeout_sec:
-                raise UpstreamTransientError(
-                    f"SLA budget ({self.sla_timeout_sec:.1f}s) exhausted prior to Stage-2 escalation"
+                slot_prior = (
+                    ((prior_logits or {}).get(qid) or q.prior_logits or None)
+                    if qid != evidence_slot_id
+                    else None
                 )
-            did_escalate = True
-            esc_questions = {qid: active_questions[qid] for qid in escalated_qids}
-            stage2_dists = self.stage2_backend.score_questions(state, esc_questions, images)
-            if (time.perf_counter() - t0) > self.sla_timeout_sec:
-                raise UpstreamTransientError(
-                    f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
-                )
-            if not isinstance(stage2_dists, Mapping):
-                raise SchemaContractViolationError("Stage-2 backend returned non-mapping response")
-            s2_evidence: Mapping[str, str] = getattr(self.stage2_backend, "last_evidence", {}) or {}
-            s2_epistemic: Mapping[str, float] = getattr(self.stage2_backend, "last_epistemic_variance", {}) or {}
-            for qid in escalated_qids:
-                raw_s2_dist = _validate_slot_distribution(stage2_dists.get(qid), f"Stage-2 slot {qid!r}")
-                if self.use_dawid_skene_poe_weights and self.domain_competence is not None:
-                    slot_num_options = max(
-                        self.domain_competence.num_options,
-                        len(questions[qid].option_keys()) if qid in questions else 2,
+                try:
+                    fused_dist, h_raw, should_esc = pre_gated_bayesian_poe_fusion(
+                        raw_dist,
+                        prior_logits=slot_prior,
+                        prior_weight=self.prior_weight if slot_prior else 0.0,
+                        temperature=self.temperature,
+                        hesitation_threshold=self.hesitation_threshold,
+                        gate_mode=self.prior_gate_mode,
                     )
-                    ds_w1, ds_w2 = compute_dawid_skene_poe_weights(
-                        stage1_accuracy=self.domain_competence.stage1_accuracy,
-                        stage2_accuracy=self.domain_competence.stage2_accuracy,
-                        num_options=slot_num_options,
-                    )
-                    ds_total = ds_w1 + ds_w2
-                    convex_w1 = ds_w1 / ds_total
-                    convex_w2 = ds_w2 / ds_total
-                    s1_probs_for_slot = slots_out[qid].probabilities
-                    eps_poe = 1e-12
-                    fused_s2_logits = {
-                        opt_key: (
-                            convex_w1 * math.log(max(eps_poe, float(s1_probs_for_slot.get(opt_key, eps_poe))))
-                            + convex_w2 * math.log(max(eps_poe, float(s2_prob)))
-                        )
-                        for opt_key, s2_prob in raw_s2_dist.items()
-                    }
-                    max_s2_logit = max(fused_s2_logits.values())
-                    s2_exps = {
-                        opt_key: math.exp(val - max_s2_logit)
-                        for opt_key, val in fused_s2_logits.items()
-                    }
-                    s2_denom = sum(s2_exps.values())
-                    s2_dist = {opt_key: val / s2_denom for opt_key, val in s2_exps.items()}
-                else:
-                    s2_dist = raw_s2_dist
-                s2_h = normalized_entropy(s2_dist)
-                s2_pred = max(s2_dist.items(), key=lambda kv: kv[1])[0]
-                s2_guard_name = "none"
+                except DecisionContractError:
+                    raise
+                except (ValueError, TypeError) as exc:
+                    raise SchemaContractViolationError(str(exc)) from exc
+                predicted = max(fused_dist.items(), key=lambda kv: kv[1])[0]
+                guard_name = "none"
                 if qid != evidence_slot_id:
-                    s2_packs, s2_dec_pack, s2_ven, s2_r1_id, s2_r1_sim = self._resolve_slot_layer5_args(
+                    s1_packs, s1_dec_pack, s1_ven, s1_r1_id, s1_r1_sim = self._resolve_slot_layer5_args(
                         qid,
                         slot_context_override=layer5_slot_context,
                         candidate_pack_sizes=candidate_pack_sizes,
@@ -4449,53 +4586,357 @@ class CascadeDecisionOrchestrator:
                         rank1_id=rank1_id,
                         rank1_visual_similarity=rank1_visual_similarity,
                     )
-                    slot_allowed_s2 = set(active_questions[qid].option_keys())
-                    if s2_packs:
-                        s2_packs = {k: v for k, v in s2_packs.items() if k in slot_allowed_s2} or None
-                    if s2_r1_id is not None and s2_r1_id not in slot_allowed_s2:
-                        s2_r1_id = None
-                    if s2_packs or s2_ven or s2_r1_sim is not None:
+                    slot_allowed_s1 = set(q.option_keys())
+                    if s1_packs:
+                        s1_packs = {k: v for k, v in s1_packs.items() if k in slot_allowed_s1} or None
+                    if s1_r1_id is not None and s1_r1_id not in slot_allowed_s1:
+                        s1_r1_id = None
+                    if s1_packs or s1_ven or s1_r1_sim is not None:
                         try:
-                            s2_pred, s2_guard_name = apply_layer5_deterministic_guards(
-                                chosen_id=s2_pred,
-                                raw_probs=s2_dist,
-                                candidate_pack_sizes=s2_packs,
-                                decoded_pack_size=s2_dec_pack,
-                                visual_energies=s2_ven,
-                                rank1_id=s2_r1_id,
-                                rank1_visual_similarity=s2_r1_sim,
+                            predicted, guard_name = apply_layer5_deterministic_guards(
+                                chosen_id=predicted,
+                                raw_probs=raw_dist,
+                                candidate_pack_sizes=s1_packs,
+                                decoded_pack_size=s1_dec_pack,
+                                visual_energies=s1_ven,
+                                rank1_id=s1_r1_id,
+                                rank1_visual_similarity=s1_r1_sim,
                             )
                         except DecisionContractError:
                             raise
                         except (ValueError, TypeError) as exc:
                             raise SchemaContractViolationError(str(exc)) from exc
-                if s2_pred in self.oos_keys:
-                    s2_term = DecisionTerminalState.ABSTAIN_OOS
-                elif s2_guard_name != "none":
-                    s2_term = DecisionTerminalState.GUARD_OVERRIDDEN
+
+                slot_ev = backend_evidence.get(
+                    qid, injected_ev_choice if qid != evidence_slot_id else ""
+                )
+                inferred_flag = (
+                    self.escalate_on_inferred_evidence
+                    and qid != evidence_slot_id
+                    and slot_ev in _INFERRED_EVIDENCE_LABELS
+                )
+                voi_esc = False
+                if qid != evidence_slot_id and self.voi_error_cost is not None:
+                    try:
+                        voi_result = compute_bayes_value_of_information(
+                            fused_dist,
+                            error_cost=self.voi_error_cost,
+                            expected_stage2_accuracy=self.voi_stage2_expected_accuracy,
+                            stage2_rpc_cost_usd=self.voi_stage2_rpc_cost_usd,
+                            latency_cost_usd=self.voi_latency_cost_usd,
+                        )
+                    except DecisionContractError:
+                        raise
+                    except (ValueError, TypeError) as exc:
+                        raise SchemaContractViolationError(str(exc)) from exc
+                    voi_esc = voi_result.should_escalate
+
+                uniform_rescue_candidate = (
+                    qid != evidence_slot_id
+                    and slot_stage1_uniform[qid]
+                    and self.stage2_backend is not None
+                )
+                if qid != evidence_slot_id and (
+                    should_esc
+                    or inferred_flag
+                    or conformal_esc
+                    or voi_esc
+                    or uniform_rescue_candidate
+                ):
+                    escalated_qids.append(qid)
+                    if should_esc:
+                        escalation_reasons.append(
+                            f"{qid}:h_raw={h_raw:.4f}>={self.hesitation_threshold}"
+                        )
+                    if inferred_flag:
+                        escalation_reasons.append(f"{qid}:evidence={slot_ev}")
+                    if conformal_esc:
+                        escalation_reasons.append(
+                            f"{qid}:conformal_set_size={len(slot_conformal_set)}"
+                        )
+                    if voi_esc:
+                        escalation_reasons.append(f"{qid}:voi_positive")
+
+                if predicted in self.oos_keys:
+                    slot_state = DecisionTerminalState.ABSTAIN_OOS
+                    f_cat = FailureCategory.ABSTAINED_OOS
+                elif guard_name != "none":
+                    slot_state = DecisionTerminalState.GUARD_OVERRIDDEN
+                    f_cat = FailureCategory.NONE
                 else:
-                    s2_term = DecisionTerminalState.STAGE2_VERIFIED
+                    slot_state = DecisionTerminalState.STAGE1_RESOLVED
+                    f_cat = FailureCategory.NONE
+
                 slots_out[qid] = SlotReadout(
                     slot_id=qid,
-                    predicted=s2_pred,
-                    probabilities=s2_dist,
-                    raw_probabilities=raw_s2_dist,
-                    h_raw=s2_h,
-                    confidence=1.0 - s2_h,
-                    escalated=True,
-                    guard_applied=s2_guard_name,
-                    backend_name=self.stage2_backend.name,
-                    evidence=s2_evidence.get(qid, slots_out[qid].evidence),
-                    passes_used=2,
-                    terminal_state=s2_term,
-                    failure_category=(
-                        FailureCategory.ABSTAINED_OOS
-                        if s2_term == DecisionTerminalState.ABSTAIN_OOS
-                        else FailureCategory.NONE
-                    ),
-                    conformal_set=list(slots_out[qid].conformal_set),
-                    epistemic_variance=float(s2_epistemic.get(qid, slots_out[qid].epistemic_variance)),
+                    predicted=predicted,
+                    probabilities=fused_dist,
+                    raw_probabilities=raw_dist,
+                    h_raw=h_raw,
+                    confidence=1.0 - h_raw,
+                    escalated=False,
+                    guard_applied=guard_name,
+                    backend_name=self.stage1_backend.name,
+                    evidence=slot_ev,
+                    terminal_state=slot_state,
+                    failure_category=f_cat,
+                    conformal_set=slot_conformal_set,
+                    epistemic_variance=float(stage1_epistemic.get(qid, 0.0)),
                 )
+
+            # 5. Optional Stage-2 Frontier Escalation on Hesitant, Conformal-Ambiguous,
+            # VoI-Positive, Inferred-Evidence, or Uniform-Blocked Stage-1 Slots
+            did_escalate = False
+            if escalated_qids and self.stage2_backend is not None:
+                executable_escalated_qids: list[str] = []
+                had_negative_transfer_block = False
+                for qid in escalated_qids:
+                    slot_profile = self._slot_competence_profile(qid, questions)
+                    slot_blocked = (
+                        active_questions[qid].type == "choice"
+                        and self._is_slot_negative_transfer(slot_profile)
+                    )
+                    if slot_blocked and not slot_stage1_uniform.get(qid, False):
+                        had_negative_transfer_block = True
+                    else:
+                        if slot_blocked and slot_stage1_uniform.get(qid, False):
+                            escalation_reasons.append(f"{qid}:stage1_uniform_abstention_rescue")
+                        executable_escalated_qids.append(qid)
+                if had_negative_transfer_block:
+                    escalation_reasons.append("domain_competence:negative_transfer_short_circuit")
+
+                if not executable_escalated_qids:
+                    local_stage2_abort.set()
+                else:
+                    if (time.perf_counter() - t0) >= self.sla_timeout_sec:
+                        raise UpstreamTransientError(
+                            f"SLA budget ({self.sla_timeout_sec:.1f}s) exhausted prior to Stage-2 escalation"
+                        )
+                    did_escalate = True
+                    stage2_dists: dict[str, Mapping[str, float]] = {}
+                    pruned_qids: set[str] = set()
+
+                    covered_by_speculative = [
+                        qid for qid in executable_escalated_qids if qid in speculative_qids
+                    ]
+                    if speculative_future is not None and covered_by_speculative:
+                        while True:
+                            if stage1_cancel_token.is_set():
+                                local_stage2_abort.set()
+                                raise cf.CancelledError(
+                                    "Decision evaluation cancelled during speculative Stage 2"
+                                )
+                            remaining_sla = self.sla_timeout_sec - (time.perf_counter() - t0)
+                            if remaining_sla <= 0.0:
+                                local_stage2_abort.set()
+                                raise UpstreamTransientError(
+                                    f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
+                                )
+                            try:
+                                spec_result = speculative_future.result(
+                                    timeout=min(0.01, remaining_sla)
+                                )
+                                break
+                            except cf.TimeoutError:
+                                continue
+                        if not isinstance(spec_result, Mapping):
+                            raise SchemaContractViolationError(
+                                "Stage-2 backend returned non-mapping response"
+                            )
+                        for qid in covered_by_speculative:
+                            if qid in spec_result:
+                                stage2_dists[qid] = spec_result[qid]
+                    else:
+                        local_stage2_abort.set()
+
+                    two_phase_qids = [
+                        qid for qid in executable_escalated_qids if qid not in stage2_dists
+                    ]
+                    if two_phase_qids:
+                        esc_questions: dict[str, DecisionQuestion] = {}
+                        for qid in two_phase_qids:
+                            base_question = active_questions[qid]
+                            if (
+                                self.stage2_prune_top_k >= 2
+                                and base_question.type == "choice"
+                                and len(base_question.option_keys()) > self.stage2_prune_top_k
+                            ):
+                                esc_questions[qid] = prune_choice_top_k(
+                                    base_question,
+                                    slots_out[qid].probabilities,
+                                    self.stage2_prune_top_k,
+                                )
+                                pruned_qids.add(qid)
+                            else:
+                                esc_questions[qid] = base_question
+                        two_phase_result = self._invoke_backend_score_questions(
+                            self.stage2_backend,
+                            state,
+                            esc_questions,
+                            images,
+                            stage1_cancel_token,
+                        )
+                        if (time.perf_counter() - t0) > self.sla_timeout_sec:
+                            raise UpstreamTransientError(
+                                f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
+                            )
+                        if not isinstance(two_phase_result, Mapping):
+                            raise SchemaContractViolationError(
+                                "Stage-2 backend returned non-mapping response"
+                            )
+                        for qid in two_phase_qids:
+                            if qid in two_phase_result:
+                                stage2_dists[qid] = two_phase_result[qid]
+
+                    s2_evidence: Mapping[str, str] = (
+                        getattr(self.stage2_backend, "last_evidence", {}) or {}
+                    )
+                    s2_epistemic: Mapping[str, float] = (
+                        getattr(self.stage2_backend, "last_epistemic_variance", {}) or {}
+                    )
+                    for qid in executable_escalated_qids:
+                        raw_s2_sub = _validate_slot_distribution(
+                            stage2_dists.get(qid), f"Stage-2 slot {qid!r}"
+                        )
+                        stage2_is_uniform = is_uniform_distribution(raw_s2_sub)
+                        full_slot_keys = active_questions[qid].option_keys()
+                        was_pruned = qid in pruned_qids
+                        if was_pruned:
+                            raw_s2_dist = {
+                                opt_key: float(raw_s2_sub.get(opt_key, 0.0))
+                                for opt_key in full_slot_keys
+                            }
+                        else:
+                            raw_s2_dist = raw_s2_sub
+                        raw_s2_sum = sum(raw_s2_dist.values())
+                        norm_s2_dist = (
+                            raw_s2_dist
+                            if abs(raw_s2_sum - 1.0) <= 1e-12 and not was_pruned
+                            else {
+                                opt_key: val / raw_s2_sum
+                                for opt_key, val in raw_s2_dist.items()
+                            }
+                        )
+                        slot_profile = self._slot_competence_profile(qid, questions)
+                        s1_is_uniform = slot_stage1_uniform.get(qid, False)
+
+                        if s1_is_uniform and not stage2_is_uniform:
+                            s2_dist = norm_s2_dist
+                        elif not s1_is_uniform and stage2_is_uniform:
+                            s2_dist = dict(slots_out[qid].probabilities)
+                            escalation_reasons.append(
+                                f"{qid}:stage2_uniform_fallback_preserved_stage1"
+                            )
+                        elif s1_is_uniform and stage2_is_uniform:
+                            s2_dist = norm_s2_dist
+                        elif self.use_dawid_skene_poe_weights and slot_profile is not None:
+                            slot_num_options = max(
+                                slot_profile.num_options,
+                                len(questions[qid].option_keys()) if qid in questions else 2,
+                            )
+                            ds_w1, ds_w2 = compute_dawid_skene_poe_weights(
+                                stage1_accuracy=slot_profile.stage1_accuracy,
+                                stage2_accuracy=slot_profile.stage2_accuracy,
+                                num_options=slot_num_options,
+                            )
+                            ds_total = ds_w1 + ds_w2
+                            convex_w1 = ds_w1 / ds_total
+                            convex_w2 = ds_w2 / ds_total
+                            s1_probs_for_slot = slots_out[qid].probabilities
+                            eps_poe = 1e-12
+                            fused_s2_logits = {
+                                opt_key: (
+                                    convex_w1
+                                    * math.log(
+                                        max(eps_poe, float(s1_probs_for_slot.get(opt_key, eps_poe)))
+                                    )
+                                    + convex_w2 * math.log(max(eps_poe, float(s2_prob)))
+                                )
+                                for opt_key, s2_prob in norm_s2_dist.items()
+                            }
+                            max_s2_logit = max(fused_s2_logits.values())
+                            s2_exps = {
+                                opt_key: math.exp(val - max_s2_logit)
+                                for opt_key, val in fused_s2_logits.items()
+                            }
+                            s2_denom = sum(s2_exps.values())
+                            s2_dist = {opt_key: val / s2_denom for opt_key, val in s2_exps.items()}
+                        else:
+                            s2_dist = norm_s2_dist
+
+                        s2_h = normalized_entropy(s2_dist)
+                        s2_pred = max(s2_dist.items(), key=lambda kv: kv[1])[0]
+                        s2_guard_name = "none"
+                        if qid != evidence_slot_id:
+                            s2_packs, s2_dec_pack, s2_ven, s2_r1_id, s2_r1_sim = (
+                                self._resolve_slot_layer5_args(
+                                    qid,
+                                    slot_context_override=layer5_slot_context,
+                                    candidate_pack_sizes=candidate_pack_sizes,
+                                    decoded_pack_size=decoded_pack_size,
+                                    visual_energies=visual_energies,
+                                    rank1_id=rank1_id,
+                                    rank1_visual_similarity=rank1_visual_similarity,
+                                )
+                            )
+                            slot_allowed_s2 = set(active_questions[qid].option_keys())
+                            if s2_packs:
+                                s2_packs = (
+                                    {k: v for k, v in s2_packs.items() if k in slot_allowed_s2}
+                                    or None
+                                )
+                            if s2_r1_id is not None and s2_r1_id not in slot_allowed_s2:
+                                s2_r1_id = None
+                            if s2_packs or s2_ven or s2_r1_sim is not None:
+                                try:
+                                    s2_pred, s2_guard_name = apply_layer5_deterministic_guards(
+                                        chosen_id=s2_pred,
+                                        raw_probs=s2_dist,
+                                        candidate_pack_sizes=s2_packs,
+                                        decoded_pack_size=s2_dec_pack,
+                                        visual_energies=s2_ven,
+                                        rank1_id=s2_r1_id,
+                                        rank1_visual_similarity=s2_r1_sim,
+                                    )
+                                except DecisionContractError:
+                                    raise
+                                except (ValueError, TypeError) as exc:
+                                    raise SchemaContractViolationError(str(exc)) from exc
+                        if s2_pred in self.oos_keys:
+                            s2_term = DecisionTerminalState.ABSTAIN_OOS
+                        elif s2_guard_name != "none":
+                            s2_term = DecisionTerminalState.GUARD_OVERRIDDEN
+                        else:
+                            s2_term = DecisionTerminalState.STAGE2_VERIFIED
+                        slots_out[qid] = SlotReadout(
+                            slot_id=qid,
+                            predicted=s2_pred,
+                            probabilities=s2_dist,
+                            raw_probabilities=raw_s2_dist,
+                            h_raw=s2_h,
+                            confidence=1.0 - s2_h,
+                            escalated=True,
+                            guard_applied=s2_guard_name,
+                            backend_name=self.stage2_backend.name,
+                            evidence=s2_evidence.get(qid, slots_out[qid].evidence),
+                            passes_used=2,
+                            terminal_state=s2_term,
+                            failure_category=(
+                                FailureCategory.ABSTAINED_OOS
+                                if s2_term == DecisionTerminalState.ABSTAIN_OOS
+                                else FailureCategory.NONE
+                            ),
+                            conformal_set=list(slots_out[qid].conformal_set),
+                            epistemic_variance=float(
+                                s2_epistemic.get(qid, slots_out[qid].epistemic_variance)
+                            ),
+                        )
+            else:
+                local_stage2_abort.set()
+        finally:
+            local_stage2_abort.set()
+            if speculative_executor is not None:
+                speculative_executor.shutdown(wait=False, cancel_futures=True)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         non_ev_states = [

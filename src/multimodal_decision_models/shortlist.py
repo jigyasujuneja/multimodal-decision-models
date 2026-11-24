@@ -305,4 +305,95 @@ def shortlist_wide_question(
         prior_logits={k: question.prior_logits[k] for k in selected if k in question.prior_logits},
         evidence_prompt=question.evidence_prompt,
         evidence_criteria=dict(question.evidence_criteria),
+        option_descriptions={
+            k: question.option_descriptions[k]
+            for k in selected
+            if k in question.option_descriptions
+        },
+        domain_competence=question.domain_competence,
+    )
+
+
+def prune_choice_top_k(
+    question: DecisionQuestion,
+    stage1_probs: Mapping[str, float],
+    top_k: int,
+) -> DecisionQuestion:
+    """Prune a choice question to its top-k Stage-1 options while retaining descriptions.
+
+    Args:
+      question: Choice question with at least two candidate options.
+      stage1_probs: Stage-1 posterior or score mapping keyed by option identifier.
+      top_k: Maximum number of candidate options to keep (``>= 2``).
+
+    Returns:
+      Pruned ``DecisionQuestion`` retaining ``option_descriptions``, ``criteria``, and
+      ``prior_logits`` strictly for the kept top-``k`` options.
+
+    Raises:
+      SchemaContractViolationError: If ``question`` is not a choice slot with ``>= 2``
+        options, ``top_k < 2``, or ``stage1_probs`` contains invalid/non-positive mass.
+    """
+    if not isinstance(question, DecisionQuestion) or question.type != "choice":
+        raise SchemaContractViolationError("prune_choice_top_k requires a choice DecisionQuestion")
+    option_keys = question.option_keys()
+    if len(option_keys) < 2:
+        raise SchemaContractViolationError(
+            f"choice question requires >= 2 options, got {len(option_keys)}"
+        )
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 2:
+        raise SchemaContractViolationError(f"top_k must be an integer >= 2, got {top_k!r}")
+    if not isinstance(stage1_probs, Mapping) or not stage1_probs:
+        raise SchemaContractViolationError("stage1_probs must be a non-empty mapping")
+
+    validated_scores: dict[str, float] = {}
+    total_mass = 0.0
+    for option_key in option_keys:
+        raw_score = stage1_probs.get(option_key, 0.0)
+        if (
+            isinstance(raw_score, bool)
+            or not isinstance(raw_score, (int, float))
+            or not math.isfinite(float(raw_score))
+            or float(raw_score) < 0.0
+        ):
+            raise SchemaContractViolationError(
+                f"stage1_probs[{option_key!r}] must be a finite non-boolean float >= 0"
+            )
+        numeric_score = float(raw_score)
+        validated_scores[option_key] = numeric_score
+        total_mass += numeric_score
+    if total_mass <= 0.0 or not math.isfinite(total_mass):
+        raise SchemaContractViolationError(
+            "stage1_probs must have positive total mass over question options"
+        )
+
+    position_by_key = {option_key: index for index, option_key in enumerate(option_keys)}
+    ranked_keys = sorted(
+        option_keys,
+        key=lambda option_key: (validated_scores[option_key], -position_by_key[option_key]),
+        reverse=True,
+    )
+    kept_keys = list(ranked_keys[: min(top_k, len(ranked_keys))])
+    return DecisionQuestion(
+        type=question.type,
+        instructions=question.instructions,
+        criteria={
+            option_key: question.criteria[option_key]
+            for option_key in kept_keys
+            if option_key in question.criteria
+        },
+        order=list(kept_keys),
+        prior_logits={
+            option_key: question.prior_logits[option_key]
+            for option_key in kept_keys
+            if option_key in question.prior_logits
+        },
+        evidence_prompt=question.evidence_prompt,
+        evidence_criteria=dict(question.evidence_criteria),
+        option_descriptions={
+            option_key: question.option_descriptions[option_key]
+            for option_key in kept_keys
+            if option_key in question.option_descriptions
+        },
+        domain_competence=question.domain_competence,
     )

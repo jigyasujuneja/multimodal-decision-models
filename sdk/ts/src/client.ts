@@ -220,11 +220,26 @@ function getQuestionOptionKeys(question: DecisionQuestion): string[] {
   if (question.type === "score") {
     return question.levels ? [...question.levels] : [];
   }
-  const criteria = question.criteria ?? {};
+  const criteria = question.criteria;
+  const descriptions = question.optionDescriptions;
   if (question.order && question.order.length > 0) {
-    return question.order.filter((key) => Object.hasOwn(criteria, key));
+    return question.order.filter(
+      (key) =>
+        (criteria !== undefined && Object.hasOwn(criteria, key)) ||
+        (descriptions !== undefined && Object.hasOwn(descriptions, key)),
+    );
   }
-  return Object.keys(criteria);
+  if (criteria !== undefined && Object.keys(criteria).length > 0) {
+    return Object.keys(criteria);
+  }
+  return descriptions ? Object.keys(descriptions) : [];
+}
+
+function throwIfSignalAborted(signal?: AbortSignal): void {
+  if (!signal || !signal.aborted) {
+    return;
+  }
+  throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
 }
 
 export class MDMClient {
@@ -302,7 +317,9 @@ export class MDMClient {
     method: "GET" | "POST",
     targetUrl: string,
     body?: Record<string, unknown>,
+    externalSignal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
+    throwIfSignalAborted(externalSignal);
     const initialOrigin = parseUrlOrigin(targetUrl, this.allowInsecureHttp);
     const customApiKeyHeaderLower = this.apiKeyHeader.toLowerCase();
     let currentUrl = targetUrl;
@@ -315,8 +332,17 @@ export class MDMClient {
     let crossedOrigin = false;
 
     for (let hop = 0; hop <= this.maxRedirects; hop += 1) {
+      throwIfSignalAborted(externalSignal);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.timeoutMs);
+      const onExternalAbort = (): void => {
+        controller.abort(externalSignal?.reason);
+      };
+      externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
       let response: Response;
       let textBody = "";
       let isRedirect = false;
@@ -330,6 +356,9 @@ export class MDMClient {
             signal: controller.signal,
           });
         } catch (err) {
+          if (externalSignal?.aborted && !timedOut) {
+            throw externalSignal.reason ?? err;
+          }
           throw new MDMTransportError(`HTTP transport failed: ${String(err)}`, true);
         }
 
@@ -340,6 +369,9 @@ export class MDMClient {
           try {
             textBody = await readBoundedResponseText(response, this.maxResponseBytes);
           } catch (err) {
+            if (externalSignal?.aborted && !timedOut) {
+              throw externalSignal.reason ?? err;
+            }
             if (err instanceof MDMValidationError) {
               throw err;
             }
@@ -348,6 +380,7 @@ export class MDMClient {
         }
       } finally {
         clearTimeout(timer);
+        externalSignal?.removeEventListener("abort", onExternalAbort);
       }
 
       if (isRedirect) {
@@ -489,6 +522,9 @@ export class MDMClient {
               type: question.type,
               instructions: question.instructions,
               ...(question.criteria ? { criteria: question.criteria } : {}),
+              ...(question.optionDescriptions
+                ? { option_descriptions: { ...question.optionDescriptions } }
+                : {}),
               ...(question.order ? { order: [...question.order] } : {}),
             };
       if (hasPriorLogits) {
@@ -514,7 +550,7 @@ export class MDMClient {
       questions: wireQuestions,
       ...(request.images && request.images.length > 0 ? { images: [...request.images] } : {}),
     };
-    const responseJson = await this.requestJson("POST", endpoint, payload);
+    const responseJson = await this.requestJson("POST", endpoint, payload, request.signal);
     const unwrapped =
       Array.isArray(responseJson["predictions"]) &&
       responseJson["predictions"][0] &&
@@ -649,9 +685,11 @@ export class MDMClient {
         const key = optionKeys[idx] ?? "";
         codeMap[letter] = key;
         const desc =
-          question.criteria && Object.hasOwn(question.criteria, key)
-            ? question.criteria[key]
-            : key;
+          question.optionDescriptions && Object.hasOwn(question.optionDescriptions, key)
+            ? question.optionDescriptions[key]
+            : question.criteria && Object.hasOwn(question.criteria, key)
+              ? question.criteria[key]
+              : key;
         optionLines.push(`${letter}: ${key} - ${desc}`);
       }
       const prompt = [
@@ -662,14 +700,19 @@ export class MDMClient {
         "Reply with the single uppercase option letter only.",
       ].join("\n");
 
-      const responseJson = await this.requestJson("POST", endpoint, {
-        model: request.model,
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 1,
-        temperature: 0.0,
-        logprobs: true,
-        top_logprobs: topLogprobs,
-      });
+      const responseJson = await this.requestJson(
+        "POST",
+        endpoint,
+        {
+          model: request.model,
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 1,
+          temperature: 0.0,
+          logprobs: true,
+          top_logprobs: topLogprobs,
+        },
+        request.signal,
+      );
 
       const choices = responseJson["choices"];
       const firstChoice =

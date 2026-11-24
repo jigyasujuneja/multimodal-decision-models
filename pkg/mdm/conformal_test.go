@@ -817,6 +817,28 @@ func TestDomainCompetenceAndDawidSkeneGuardBranchesAndValidation(t *testing.T) {
 			t.Fatalf("expected invalid margin %v to fail closed", badMargin)
 		}
 	}
+	highDelta := DomainCompetenceProfile{
+		Stage1Accuracy:        0.80,
+		Stage2Accuracy:        0.95,
+		NumOptions:            2,
+		PairedEscalationDelta: 5,
+	}
+	for _, positiveMinHurt := range []int{1, 2, 10} {
+		if !highDelta.IsNegativeTransfer(0.05, positiveMinHurt, 2.5) {
+			t.Fatalf("expected positive minDeltaHurt=%d to fail closed (true) even when delta=5", positiveMinHurt)
+		}
+	}
+	if highDelta.IsNegativeTransfer(0.05, 0, 2.5) {
+		t.Fatal("expected minDeltaHurt=0 with delta=5 and Stage2 > Stage1 to return false")
+	}
+	if !(DomainCompetenceProfile{
+		Stage1Accuracy:        0.80,
+		Stage2Accuracy:        0.95,
+		NumOptions:            2,
+		PairedEscalationDelta: 0,
+	}).IsNegativeTransfer(0.05, 0, 2.5) {
+		t.Fatal("expected minDeltaHurt=0 with delta=0 to return true")
+	}
 	for _, badRatio := range []float64{1.0, 0.95, -1.0, math.NaN(), math.Inf(1)} {
 		if !validEdge.IsNegativeTransfer(0.05, -2, badRatio) {
 			t.Fatalf("expected invalid brierDegradationRatio %v to fail closed", badRatio)
