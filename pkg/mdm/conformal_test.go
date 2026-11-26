@@ -613,7 +613,7 @@ func TestDomainCompetenceProfileAndDawidSkeneParityVectors(t *testing.T) {
 		t.Fatal("expected Vector 2 TypedDecisions DefaultNegativeTransferCheck() == true")
 	}
 
-	// Vector 3: Aegis v2 (K=2)
+	// Vector 3: Safety v2 (K=2)
 	v3W1, v3W2, err := ComputeDawidSkenePoEWeights(0.88, 0.84, 2, 1e-4)
 	if err != nil {
 		t.Fatalf("Vector 3 ComputeDawidSkenePoEWeights failed: %v", err)
@@ -629,7 +629,7 @@ func TestDomainCompetenceProfileAndDawidSkeneParityVectors(t *testing.T) {
 		SampleCount:           40,
 	}
 	if safetyProfile.DefaultNegativeTransferCheck() {
-		t.Fatal("expected Vector 3 Aegis v2 DefaultNegativeTransferCheck() == false")
+		t.Fatal("expected Vector 3 Safety v2 DefaultNegativeTransferCheck() == false")
 	}
 
 	// Vector 4: Chance-level Stage 2 (K=4)

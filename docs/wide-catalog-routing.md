@@ -72,4 +72,4 @@ Note that `pairwise_diff=True` extracts sibling-unique discriminative tokens (su
 
 ## Debias option order with `PriDe` cyclic permutations
 
-Autoregressive and diffusion models can exhibit mild positional preference toward early letters (`A`, `B`). For offline evaluation, teacher distillation, or high-stakes ties, `debiased_cyclic_permutation_probs` runs $C$ cyclic shifts of the option order, estimates the prior positional bias vector, and factors it out in log-space—cutting option-order flip rates on `MDM-Bench` from `10.25%` to `6.50%`.
+Autoregressive and diffusion models can exhibit mild positional preference toward early letters (`A`, `B`). For offline evaluation, teacher distillation, or high-stakes ties, `debiased_cyclic_permutation_probs` runs $C$ cyclic shifts of the option order, estimates the prior positional bias vector, and factors it out in log-space, cutting option-order flip rates on `MDM-Bench` from `10.25%` to `6.50%`.

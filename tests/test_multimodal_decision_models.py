@@ -368,9 +368,9 @@ class MultimodalDecisionModelsTest(unittest.TestCase):
 
     def test_real_systemone_http_contract_vertex_gemini_and_inferred_escalation(self) -> None:
         # Reject file:// URLs to prevent SSRF / local file reads
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"endpoint URL must use http:// or https:// with a"):
             DgemSystemOneBackend("file:///etc/passwd")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"invalid project identifier: '\.\./bad_project'"):
             VertexGeminiBackend(project="../bad_project")
 
         q = DecisionQuestion(

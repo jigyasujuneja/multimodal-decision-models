@@ -16,23 +16,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import inspect
 import math
-import re
-from typing import Callable, Mapping
-import unicodedata
 
 from .backends import CascadeDecisionOrchestrator, DecisionBackend
 from .conformal import DEFAULT_CONFORMAL_SEED_KEY, conformal_prediction_set
 from .contracts import DecisionContractError, SchemaContractViolationError, sanitize_untrusted_text, wrap_untrusted_state
 from .trajectory_control import NetExpectedValueController, PolynomialAlphaSpendingTracker
 from .types import DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory
-
-_UNTRUSTED_TAG_VARIANT_RE = re.compile(
-    r"<[ \t\r\n]*(?:/[ \t\r\n]*)?untrusted_[^<>]*>",
-    re.IGNORECASE,
-)
 
 _GUARD_ABSTAIN_OR_BLOCK_KEYS: frozenset[str] = frozenset(
     {
@@ -61,9 +54,7 @@ def neutralize_untrusted_delimiters(raw_text: str, max_chars: int = 16384) -> st
         raise SchemaContractViolationError(
             f"raw_text must be a string, got {type(raw_text).__qualname__}"
         )
-    normalized_text = unicodedata.normalize("NFKC", raw_text)
-    escaped_tags = _UNTRUSTED_TAG_VARIANT_RE.sub("[escaped_untrusted_tag]", normalized_text)
-    sanitized = sanitize_untrusted_text(escaped_tags, max_chars=max_chars)
+    sanitized = sanitize_untrusted_text(raw_text, max_chars=max_chars)
     return f"<untrusted_data>\n{sanitized}\n</untrusted_data>"
 
 
@@ -328,7 +319,8 @@ def evaluate_adk_tool_guard(
             origin_pred = origin_slot.predicted
             orchestrator_escalated = bool(decision_result.escalated)
         else:
-            assert backend is not None
+            if backend is None:
+                raise SchemaContractViolationError("runner must provide either orchestrator or backend")
             scored = backend.score_questions(guard_state, questions)
             if inspect.iscoroutine(scored):
                 scored.close()

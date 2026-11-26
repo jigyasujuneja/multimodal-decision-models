@@ -311,9 +311,9 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
             raw_server.shutdown()
             raw_server.server_close()
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"endpoint URL must not contain CR, LF, or NUL"):
             parse_url_origin("https://api.example.com/v1\r\nX-Injected: 1")
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"HTTP header 'Authorization' must not contain CR, LF, or NUL"):
             DgemSystemOneBackend("https://api.example.com", api_key="bad\r\ntoken")
 
         async def async_stub(
@@ -324,7 +324,7 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
             del state, questions, images
             return {}
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"MockCallableBackend fn must be a synchronous"):
             MockCallableBackend("bad_async", async_stub)  # type: ignore[arg-type]
 
     def test_wide_option_routing_ladder_recommendations(self) -> None:
@@ -405,7 +405,7 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
                         self.assertIsInstance(expected_val, bool)
 
         sample_raw = (TEMPLATES_DIR / "tool_safety_gate.json.tmpl").read_text(encoding="utf-8")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, r"Undeclared template example variables"):
             render_go_json_template(sample_raw, {"undeclared_variable_name": "override"})
 
     def test_redirect_handler_blocks_https_downgrade_and_non_loopback_http(self) -> None:
@@ -416,7 +416,7 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
             headers={"Authorization": "Bearer secret"},
             method="POST",
         )
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"cleartext http:// is restricted to loopback hosts"):
             handler.redirect_request(
                 https_req,
                 fp=object(),
@@ -426,7 +426,7 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
                 newurl="http://cleartext.example.com/v1/systemone",
             )
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"refusing HTTPS-to-HTTP downgrade redirect from"):
             handler.redirect_request(
                 https_req,
                 fp=object(),
@@ -442,7 +442,7 @@ class StatelessConformalAndHttpHardeningTest(unittest.TestCase):
             headers={"Authorization": "Bearer secret"},
             method="POST",
         )
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"cleartext http:// is restricted to loopback hosts"):
             handler.redirect_request(
                 loopback_req,
                 fp=object(),

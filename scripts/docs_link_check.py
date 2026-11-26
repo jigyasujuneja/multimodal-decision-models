@@ -73,12 +73,17 @@ def strip_inline_code_spans(line: str) -> str:
 
 def check_markdown_links(repo_root: pathlib.Path = REPO_ROOT) -> list[str]:
     """Return human-readable error strings for broken relative paths or missing #fragment anchors."""
-    markdown_files = [repo_root / "README.md"]
-    if (repo_root / "CHANGELOG.md").exists():
-        markdown_files.append(repo_root / "CHANGELOG.md")
-    docs_dir = repo_root / "docs"
-    if docs_dir.is_dir():
-        markdown_files.extend(sorted(docs_dir.rglob("*.md")))
+    markdown_files: list[pathlib.Path] = []
+    for top_md in ("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "deploy/terraform/README.md"):
+        candidate = repo_root / top_md
+        if candidate.exists():
+            markdown_files.append(candidate)
+    for subdir in ("docs", "sdk", "benchmarks/results"):
+        sub_path = repo_root / subdir
+        if sub_path.is_dir():
+            for md_path in sorted(sub_path.rglob("*.md")):
+                if "node_modules" not in md_path.parts:
+                    markdown_files.append(md_path)
 
     anchor_cache: dict[pathlib.Path, set[str]] = {}
     errors: list[str] = []

@@ -25,9 +25,9 @@ rubrics, combined with:
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+import math
 
 
 @dataclass(frozen=True)
@@ -192,7 +192,9 @@ def calibrate_prm_conformal_residual_quantile(
 
     residuals.sort()
     num_samples = len(residuals)
-    rank = min(num_samples, max(1, math.ceil((num_samples + 1) * (1.0 - float(alpha)))))
+    rank = max(1, math.ceil((num_samples + 1) * (1.0 - float(alpha)) - 1e-12))
+    if rank > num_samples:
+        return float("inf")
     return float(residuals[rank - 1])
 
 
@@ -218,8 +220,17 @@ def run_calibrated_prm_puct_search(
     if isinstance(conformal_z, bool) or not isinstance(conformal_z, (int, float)) or not math.isfinite(float(conformal_z)) or float(conformal_z) < 0.0:
         raise ValueError(f"conformal_z must be finite and >= 0, got {conformal_z!r}")
     if conformal_q_hat is not None:
-        if isinstance(conformal_q_hat, bool) or not isinstance(conformal_q_hat, (int, float)) or not math.isfinite(float(conformal_q_hat)) or not (0.0 <= float(conformal_q_hat) <= 1.0):
-            raise ValueError(f"conformal_q_hat must lie in [0, 1], got {conformal_q_hat!r}")
+        if (
+            isinstance(conformal_q_hat, bool)
+            or not isinstance(conformal_q_hat, (int, float))
+            or math.isnan(float(conformal_q_hat))
+            or (
+                math.isfinite(float(conformal_q_hat))
+                and not (0.0 <= float(conformal_q_hat) <= 1.0)
+            )
+            or (math.isinf(float(conformal_q_hat)) and float(conformal_q_hat) < 0.0)
+        ):
+            raise ValueError(f"conformal_q_hat must lie in [0, 1] or be +inf, got {conformal_q_hat!r}")
     if isinstance(c_puct, bool) or not isinstance(c_puct, (int, float)) or not math.isfinite(float(c_puct)) or float(c_puct) < 0.0:
         raise ValueError(f"c_puct must be finite and >= 0, got {c_puct!r}")
 
@@ -231,6 +242,25 @@ def run_calibrated_prm_puct_search(
         node_map[n.node_id] = n
         children_map.setdefault(n.parent_id, []).append(n)
 
+    # Reject cyclic parent_id chains before traversal.
+    visit_state: dict[str, int] = {}
+    for nid in node_map:
+        if visit_state.get(nid, 0) != 0:
+            continue
+        chain: list[str] = []
+        cur: str | None = nid
+        while cur is not None and cur in node_map:
+            st = visit_state.get(cur, 0)
+            if st == 1:
+                raise ValueError(f"cycle detected in reasoning tree involving node {cur!r}")
+            if st == 2:
+                break
+            visit_state[cur] = 1
+            chain.append(cur)
+            cur = node_map[cur].parent_id
+        for visited_id in chain:
+            visit_state[visited_id] = 2
+
     for child_list in children_map.values():
         child_list.sort(key=lambda item: (-item.prior_prob, item.node_id))
 
@@ -241,6 +271,95 @@ def run_calibrated_prm_puct_search(
     z_val = float(conformal_z)
     q_hat_val = None if conformal_q_hat is None else float(conformal_q_hat)
     puct_c = float(c_puct)
+
+    def _effective_step_discount(depth: int) -> float:
+        raw_disc = 1.0 if horizon_discounts is None else float(horizon_discounts.get(depth, 1.0))
+        return min(1.5, max(0.05, raw_disc))
+
+    # Precompute bottom-up remaining-depth discount bounds on the validated acyclic tree
+    # so branch-and-bound pruning is mathematically admissible for arbitrary tree depths.
+    bfs_order: list[PRMBranchNode] = list(roots)
+    bfs_head = 0
+    while bfs_head < len(bfs_order):
+        cur_node = bfs_order[bfs_head]
+        bfs_head += 1
+        bfs_order.extend(children_map.get(cur_node.node_id, []))
+
+    rem_bounds: dict[str, dict[int, tuple[float, float]]] = {}
+    for cur_node in reversed(bfs_order):
+        ch_nodes = children_map.get(cur_node.node_id, [])
+        if cur_node.is_terminal or not ch_nodes:
+            rem_bounds[cur_node.node_id] = {0: (0.0, 0.0)}
+            continue
+        node_bounds: dict[int, tuple[float, float]] = {}
+        for ch_node in ch_nodes:
+            d_raw = _effective_step_discount(ch_node.depth)
+            d_eff = min(1.0, d_raw)
+            for r_child, (child_sum, child_max) in rem_bounds[ch_node.node_id].items():
+                r_total = r_child + 1
+                cand_sum = d_eff + child_sum
+                cand_max = max(d_raw, child_max)
+                if r_total in node_bounds:
+                    prev_sum, prev_max = node_bounds[r_total]
+                    node_bounds[r_total] = (max(prev_sum, cand_sum), max(prev_max, cand_max))
+                else:
+                    node_bounds[r_total] = (cand_sum, cand_max)
+        rem_bounds[cur_node.node_id] = node_bounds
+
+    def _bhatia_davis_leaf_ucb(
+        val_sum: float,
+        var_sum: float,
+        steps_f: float,
+        rem_steps: int,
+        d_eff_sum: float,
+        d_max: float,
+    ) -> float:
+        tot_steps = steps_f + float(rem_steps)
+        if rem_steps <= 0 or d_max <= 0.0 or d_eff_sum <= 0.0:
+            z_bound = (val_sum + z_val * math.sqrt(max(0.0, var_sum))) / tot_steps
+        else:
+            rf = float(rem_steps)
+            mu_cap = min(1.0, d_eff_sum / (d_max * rf))
+            mu_hi = max(0.5, mu_cap)
+            cand_hi = d_eff_sum + z_val * math.sqrt(max(0.0, var_sum + rf * mu_hi * (1.0 - mu_hi)))
+            denom = (z_val * z_val) + rf * (d_max * d_max)
+            t_star = min(1.0, d_max * math.sqrt((4.0 * var_sum + rf) / denom)) if denom > 0.0 else 1.0
+            mu_star = 0.5 * (1.0 + t_star)
+            mu_lo = min(mu_cap, max(0.5, mu_star))
+            cand_lo = d_max * rf * mu_lo + z_val * math.sqrt(max(0.0, var_sum + rf * mu_lo * (1.0 - mu_lo)))
+            z_bound = (val_sum + max(cand_lo, cand_hi)) / tot_steps
+        cand_ucb = min(1.0, z_bound)
+        if q_hat_val is not None:
+            mean_ub = (val_sum + d_eff_sum) / tot_steps
+            cand_ucb = min(1.0, max(cand_ucb, mean_ub + q_hat_val / math.sqrt(tot_steps)))
+        return cand_ucb
+
+    def _subtree_max_ucb(node_id: str, val_sum: float, var_sum: float, steps_f: float) -> float:
+        best_u = -1.0
+        for r_steps, (d_eff_sum, d_max) in rem_bounds[node_id].items():
+            if r_steps <= 0:
+                continue
+            cand_u = _bhatia_davis_leaf_ucb(val_sum, var_sum, steps_f, r_steps, d_eff_sum, d_max)
+            if cand_u > best_u:
+                best_u = cand_u
+        return best_u
+
+    def _child_subtree_max_ucb(ch_node: PRMBranchNode, val_sum: float, var_sum: float, steps_f: float) -> float:
+        d_raw = _effective_step_discount(ch_node.depth)
+        d_eff = min(1.0, d_raw)
+        best_u = -1.0
+        for r_child, (child_sum, child_max) in rem_bounds[ch_node.node_id].items():
+            cand_u = _bhatia_davis_leaf_ucb(
+                val_sum,
+                var_sum,
+                steps_f,
+                r_child + 1,
+                d_eff + child_sum,
+                max(d_raw, child_max),
+            )
+            if cand_u > best_u:
+                best_u = cand_u
+        return best_u
 
     # Track evaluated vs pruned nodes via best-first PUCT + Conformal Branch-and-Bound traversal
     evaluated_ids: set[str] = set()
@@ -255,12 +374,15 @@ def run_calibrated_prm_puct_search(
 
     def _count_descendants(nid: str) -> list[str]:
         desc: list[str] = [nid]
+        seen_desc: set[str] = {nid}
         stack = [nid]
         while stack:
             cur = stack.pop()
             for ch in children_map.get(cur, []):
-                desc.append(ch.node_id)
-                stack.append(ch.node_id)
+                if ch.node_id not in seen_desc:
+                    seen_desc.add(ch.node_id)
+                    desc.append(ch.node_id)
+                    stack.append(ch.node_id)
         return desc
 
     def _explore(
@@ -293,11 +415,11 @@ def run_calibrated_prm_puct_search(
         node_ucb = min(1.0, path_mean + half_width)
         puct_bonus = puct_c * float(node.prior_prob) * (math.sqrt(float(sibling_count + 1)) / float(1 + sibling_rank))
 
-        # Conformal Branch-and-Bound pruning condition: UCB_alpha(s, a) < best_incumbent_LCB
+        # Conformal Branch-and-Bound pruning condition: UCB_alpha(subtree) < best_incumbent_LCB
         ch_list = children_map.get(node.node_id, [])
         is_leaf = node.is_terminal or not ch_list
         if enable_conformal_pruning and (not is_leaf) and best_leaf is not None:
-            if node_ucb + 0.02 * puct_bonus < best_leaf_lcb:
+            if _subtree_max_ucb(node.node_id, new_val_sum, new_var_sum, float(steps)) < best_leaf_lcb:
                 for ch in ch_list:
                     for d_id in _count_descendants(ch.node_id):
                         if d_id not in evaluated_ids:
@@ -316,12 +438,10 @@ def run_calibrated_prm_puct_search(
                 best_leaf_ucb = node_ucb
             return
 
-        # Order children by prior_prob + optimistic parent value
+        # Order children by prior_prob + optimistic subtree UCB
         for rank_idx, ch in enumerate(ch_list):
             if enable_conformal_pruning and best_leaf is not None:
-                # Pre-screen child prior upper bound before expanding deep low-prior branches
-                optimistic_child_ucb = (new_val_sum + min(1.0, 0.65 + 0.35 * ch.prior_prob)) / float(steps + 1) + half_width
-                if optimistic_child_ucb < best_leaf_lcb:
+                if _child_subtree_max_ucb(ch, new_val_sum, new_var_sum, float(steps)) < best_leaf_lcb:
                     for d_id in _count_descendants(ch.node_id):
                         if d_id not in evaluated_ids:
                             pruned_ids.add(d_id)

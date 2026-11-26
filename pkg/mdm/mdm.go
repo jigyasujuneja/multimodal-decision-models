@@ -38,7 +38,7 @@ const (
 // ValidateTemperature checks that an explicit temperature scale lies in [MinTemperature, MaxTemperature].
 func ValidateTemperature(tempScale float64) error {
 	if math.IsNaN(tempScale) || math.IsInf(tempScale, 0) || tempScale < MinTemperature || tempScale > MaxTemperature {
-		return fmt.Errorf("mdm: Temperature must lie in [%v, %v], got %v", MinTemperature, MaxTemperature, tempScale)
+		return fmt.Errorf("mdm: temperature must lie in [%v, %v], got %v", MinTemperature, MaxTemperature, tempScale)
 	}
 	return nil
 }
@@ -68,16 +68,16 @@ var Universal256DecisionCodes = [256]string{
 // BuildExtended255CodeBijection maps up to 256 option keys to universal single-token uppercase codes.
 func BuildExtended255CodeBijection(optionKeys []string) (map[string]string, error) {
 	if len(optionKeys) < 2 {
-		return nil, fmt.Errorf("question requires >= 2 options, got %d", len(optionKeys))
+		return nil, fmt.Errorf("mdm: question requires >= 2 options, got %d", len(optionKeys))
 	}
 	if len(optionKeys) > MaxExtendedOptionsPerSlot {
-		return nil, fmt.Errorf("question has %d options, exceeding extended ceiling %d", len(optionKeys), MaxExtendedOptionsPerSlot)
+		return nil, fmt.Errorf("mdm: question has %d options, exceeding extended ceiling %d", len(optionKeys), MaxExtendedOptionsPerSlot)
 	}
 	seen := make(map[string]struct{}, len(optionKeys))
 	out := make(map[string]string, len(optionKeys))
 	for i, k := range optionKeys {
 		if _, dup := seen[k]; dup {
-			return nil, fmt.Errorf("duplicate option key %q", k)
+			return nil, fmt.Errorf("mdm: duplicate option key %q", k)
 		}
 		seen[k] = struct{}{}
 		out[Universal256DecisionCodes[i]] = k
@@ -336,7 +336,7 @@ func TopKFromPriorLogits(criteria map[string]string, priorLogits map[string]floa
 var (
 	reCamelSplit = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 	reNonAlnum   = regexp.MustCompile(`[^a-zA-Z0-9]+`)
-	mdmStopwords = map[string]bool{
+	stopwords    = map[string]bool{
 		"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
 		"be": true, "by": true, "for": true, "from": true, "in": true, "into": true,
 		"is": true, "it": true, "of": true, "on": true, "or": true, "that": true,
@@ -350,7 +350,7 @@ func splitIdentifierTokens(s string) []string {
 	seen := make(map[string]bool, len(parts))
 	var out []string
 	for _, p := range parts {
-		if len(p) < 2 || mdmStopwords[p] || seen[p] {
+		if len(p) < 2 || stopwords[p] || seen[p] {
 			continue
 		}
 		seen[p] = true
@@ -1006,19 +1006,19 @@ func ReasoningToReadoutDistillationLoss(
 	anchorTemp float64,
 ) (ReasoningToReadoutDistillationResult, error) {
 	if len(teacherProbs) == 0 || len(studentProbs) == 0 {
-		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("teacherProbs and studentProbs must be non-empty")
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("mdm: teacherProbs and studentProbs must be non-empty")
 	}
 	if len(teacherProbs) != len(studentProbs) {
-		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("teacherProbs and studentProbs key count mismatch")
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("mdm: teacherProbs and studentProbs key count mismatch")
 	}
 	if taskWeight <= 0 || math.IsNaN(taskWeight) || math.IsInf(taskWeight, 0) {
-		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("taskWeight must be finite and > 0")
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("mdm: taskWeight must be finite and > 0")
 	}
 	if ordinalLambda < 0 || math.IsNaN(ordinalLambda) || math.IsInf(ordinalLambda, 0) {
-		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("ordinalLambda must be finite and >= 0")
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("mdm: ordinalLambda must be finite and >= 0")
 	}
 	if klAnchorKappa < 0 || math.IsNaN(klAnchorKappa) || math.IsInf(klAnchorKappa, 0) {
-		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("klAnchorKappa must be finite and >= 0")
+		return ReasoningToReadoutDistillationResult{}, fmt.Errorf("mdm: klAnchorKappa must be finite and >= 0")
 	}
 	if teacherTemp <= 0 || math.IsNaN(teacherTemp) || math.IsInf(teacherTemp, 0) {
 		teacherTemp = 1.0
@@ -1030,7 +1030,7 @@ func ReasoningToReadoutDistillationLoss(
 	keys := make([]string, 0, len(teacherProbs))
 	for k := range teacherProbs {
 		if _, ok := studentProbs[k]; !ok {
-			return ReasoningToReadoutDistillationResult{}, fmt.Errorf("option key %q missing from studentProbs", k)
+			return ReasoningToReadoutDistillationResult{}, fmt.Errorf("mdm: option key %q missing from studentProbs", k)
 		}
 		keys = append(keys, k)
 	}
@@ -1042,13 +1042,13 @@ func ReasoningToReadoutDistillationLoss(
 		for _, k := range keys {
 			v, ok := m[k]
 			if !ok || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-				return nil, fmt.Errorf("invalid probability for %q in %s", k, label)
+				return nil, fmt.Errorf("mdm: invalid probability for %q in %s", k, label)
 			}
 			clean[k] = v
 			sum += v
 		}
 		if sum <= 0 {
-			return nil, fmt.Errorf("%s sums to zero", label)
+			return nil, fmt.Errorf("mdm: %s sums to zero", label)
 		}
 		for _, k := range keys {
 			p := clean[k] / sum
@@ -1101,12 +1101,11 @@ func ReasoningToReadoutDistillationLoss(
 		ordLoss = diff * diff
 	}
 
-	total := taskWeight*(ceLoss+(func() float64 {
-		if isScore {
-			return ordinalLambda * ordLoss
-		}
-		return 0.0
-	})()) + klAnchorKappa*klAnchor
+	weightedOrdinalLoss := 0.0
+	if isScore {
+		weightedOrdinalLoss = ordinalLambda * ordLoss
+	}
+	total := taskWeight*(ceLoss+weightedOrdinalLoss) + klAnchorKappa*klAnchor
 
 	denomW := taskWeight + klAnchorKappa
 	alphaAnchor := 0.0
@@ -1156,6 +1155,16 @@ type TrajectoryDelegationCalibrationResult struct {
 	DelegatedCoverage     float64
 }
 
+// allFinite reports whether every value in vals is finite (neither NaN nor +/-Inf).
+func allFinite(vals ...float64) bool {
+	for _, v := range vals {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // FitTrajectoryDelegationThreshold fits trajectory-level confidence deferral thresholds (arXiv:2610.21412v1 Prop. 1).
 func FitTrajectoryDelegationThreshold(
 	calibConfidences []float64,
@@ -1170,16 +1179,16 @@ func FitTrajectoryDelegationThreshold(
 ) (TrajectoryDelegationCalibrationResult, error) {
 	n := len(calibConfidences)
 	if n == 0 || len(calibSystem1Correct) != n {
-		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("calibConfidences and calibSystem1Correct must be non-empty of equal length")
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("mdm: calibConfidences and calibSystem1Correct must be non-empty of equal length")
 	}
 	if len(calibLLMCorrect) > 0 && len(calibLLMCorrect) != n {
-		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("calibLLMCorrect length mismatch")
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("mdm: calibLLMCorrect length mismatch")
 	}
 	if deltaCostUSD < 0 || math.IsNaN(deltaCostUSD) || math.IsInf(deltaCostUSD, 0) {
-		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("deltaCostUSD must be finite and >= 0")
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("mdm: deltaCostUSD must be finite and >= 0")
 	}
-	if errorStakesV <= 0 || irreversibleStakesV <= 0 || reversibleStakesV <= 0 {
-		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("stakes V must be > 0")
+	if !allFinite(errorStakesV, irreversibleStakesV, reversibleStakesV) || errorStakesV <= 0 || irreversibleStakesV <= 0 || reversibleStakesV <= 0 {
+		return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("mdm: stakes V must be finite and > 0")
 	}
 
 	type item struct {
@@ -1193,11 +1202,9 @@ func FitTrajectoryDelegationThreshold(
 	for i := 0; i < n; i++ {
 		c := calibConfidences[i]
 		if math.IsNaN(c) || math.IsInf(c, 0) || c < 0 || c > 1.0+1e-6 {
-			return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("invalid confidence at %d: %v", i, c)
+			return TrajectoryDelegationCalibrationResult{}, fmt.Errorf("mdm: invalid confidence at %d: %v", i, c)
 		}
-		if c < 0 {
-			c = 0
-		} else if c > 1 {
+		if c > 1 {
 			c = 1
 		}
 		s1 := 0
@@ -1237,7 +1244,7 @@ func FitTrajectoryDelegationThreshold(
 		}
 		bins = append(bins, paired[i:end])
 	}
-	if len(bins) >= 2 && len(bins[len(bins)-1]) < maxInt(1, minBinSize/2) {
+	if len(bins) >= 2 && len(bins[len(bins)-1]) < max(1, minBinSize/2) {
 		bins[len(bins)-2] = append(bins[len(bins)-2], bins[len(bins)-1]...)
 		bins = bins[:len(bins)-1]
 	}
@@ -1288,13 +1295,6 @@ func FitTrajectoryDelegationThreshold(
 	}, nil
 }
 
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // TriggerGuardUtilityResult holds Proposition 2 Trigger/Guard Youden-J resolution and utility metrics (arXiv:2610.21412v1 Eq. 5).
 type TriggerGuardUtilityResult struct {
 	PrevalencePi               float64
@@ -1319,10 +1319,13 @@ func EvaluateTriggerGuardUtility(
 ) (TriggerGuardUtilityResult, error) {
 	n := len(needLabels)
 	if n == 0 || len(gateDecisions) != n {
-		return TriggerGuardUtilityResult{}, fmt.Errorf("needLabels and gateDecisions must be non-empty of equal length")
+		return TriggerGuardUtilityResult{}, fmt.Errorf("mdm: needLabels and gateDecisions must be non-empty of equal length")
+	}
+	if !allFinite(benefitWhenNeeded, harmWhenUnneeded, moduleCost, queryCostKappa) {
+		return TriggerGuardUtilityResult{}, fmt.Errorf("mdm: utility and cost parameters must be finite")
 	}
 	if (benefitWhenNeeded + harmWhenUnneeded) <= 0 {
-		return TriggerGuardUtilityResult{}, fmt.Errorf("benefitWhenNeeded + harmWhenUnneeded must be > 0")
+		return TriggerGuardUtilityResult{}, fmt.Errorf("mdm: benefitWhenNeeded + harmWhenUnneeded must be > 0")
 	}
 	tp, fp, tn, fn := 0, 0, 0, 0
 	for i := 0; i < n; i++ {
@@ -1336,8 +1339,8 @@ func EvaluateTriggerGuardUtility(
 			tn++
 		}
 	}
-	tpr := float64(tp) / float64(maxInt(1, tp+fn))
-	fpr := float64(fp) / float64(maxInt(1, fp+tn))
+	tpr := float64(tp) / float64(max(1, tp+fn))
+	fpr := float64(fp) / float64(max(1, fp+tn))
 	youdenJ := tpr - fpr
 	pi := float64(tp+fn) / float64(n)
 	acc := float64(tp+tn) / float64(n)
@@ -1377,18 +1380,18 @@ func SelectiveTeacherBrierSFTLoss(
 	brierWeightMu float64,
 ) (SelectiveBrierSFTResult, error) {
 	if len(teacherProbs) == 0 || len(studentProbs) == 0 || len(teacherProbs) != len(studentProbs) {
-		return SelectiveBrierSFTResult{}, fmt.Errorf("teacherProbs and studentProbs must be non-empty with identical keys")
+		return SelectiveBrierSFTResult{}, fmt.Errorf("mdm: teacherProbs and studentProbs must be non-empty with identical keys")
 	}
 	if _, ok := teacherProbs[goldKey]; !ok {
-		return SelectiveBrierSFTResult{}, fmt.Errorf("goldKey %q not in teacherProbs", goldKey)
+		return SelectiveBrierSFTResult{}, fmt.Errorf("mdm: goldKey %q not in teacherProbs", goldKey)
 	}
-	if goldWeightAlpha < 0 || goldWeightAlpha > 1 || brierWeightMu < 0 {
-		return SelectiveBrierSFTResult{}, fmt.Errorf("invalid alpha or mu")
+	if !allFinite(goldWeightAlpha, brierWeightMu) || goldWeightAlpha < 0 || goldWeightAlpha > 1 || brierWeightMu < 0 {
+		return SelectiveBrierSFTResult{}, fmt.Errorf("mdm: invalid alpha or mu")
 	}
 	keys := make([]string, 0, len(teacherProbs))
 	for k := range teacherProbs {
 		if _, ok := studentProbs[k]; !ok {
-			return SelectiveBrierSFTResult{}, fmt.Errorf("missing key %q in studentProbs", k)
+			return SelectiveBrierSFTResult{}, fmt.Errorf("mdm: missing key %q in studentProbs", k)
 		}
 		keys = append(keys, k)
 	}
@@ -1400,13 +1403,13 @@ func SelectiveTeacherBrierSFTLoss(
 		for _, k := range keys {
 			v := m[k]
 			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-				return nil, fmt.Errorf("invalid prob for %q", k)
+				return nil, fmt.Errorf("mdm: invalid prob for %q", k)
 			}
 			out[k] = v
 			sum += v
 		}
 		if sum <= 0 {
-			return nil, fmt.Errorf("distribution sums to zero")
+			return nil, fmt.Errorf("mdm: distribution sums to zero")
 		}
 		for _, k := range keys {
 			p := out[k] / sum
@@ -1479,13 +1482,27 @@ type NonInferiorityTestResult struct {
 	NonInferior           bool
 }
 
+// normalTwoSidedZ returns z > 0 satisfying P(|Z| >= z) = alpha for Z ~ N(0, 1).
+func normalTwoSidedZ(alpha float64) float64 {
+	lo, hi := 0.0, 12.0
+	for i := 0; i < 80; i++ {
+		mid := 0.5 * (lo + hi)
+		if math.Erfc(mid/math.Sqrt2) > alpha {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return 0.5 * (lo + hi)
+}
+
 // TangoPairedNonInferiorityTest evaluates Tango's (1998) one-sided score test with Berger-Boos bound (arXiv:2610.21412v1 App. E).
 func TangoPairedNonInferiorityTest(wins, losses, nTotal int, margin, alpha, gamma float64) (NonInferiorityTestResult, error) {
 	if nTotal <= 0 || wins < 0 || losses < 0 || (wins+losses) > nTotal {
-		return NonInferiorityTestResult{}, fmt.Errorf("invalid paired counts")
+		return NonInferiorityTestResult{}, fmt.Errorf("mdm: invalid paired counts")
 	}
-	if margin <= 0 || margin >= 1 || alpha <= 0 || alpha >= 1 || gamma <= 0 || gamma >= 0.1 {
-		return NonInferiorityTestResult{}, fmt.Errorf("invalid margin, alpha, or gamma")
+	if !allFinite(margin, alpha, gamma) || margin <= 0 || margin >= 1 || alpha <= 0 || alpha >= 1 || gamma <= 0 || gamma >= 0.1 {
+		return NonInferiorityTestResult{}, fmt.Errorf("mdm: invalid margin, alpha, or gamma")
 	}
 	d := wins + losses
 	deltaHat := float64(wins-losses) / float64(nTotal)
@@ -1528,7 +1545,7 @@ func TangoPairedNonInferiorityTest(wins, losses, nTotal int, margin, alpha, gamm
 	zStat := (float64(wins-losses) + float64(nTotal)*margin) / math.Sqrt(varH0)
 	pAsym := 0.5 * math.Erfc(zStat/math.Sqrt2)
 
-	zGamma := 3.890592
+	zGamma := normalTwoSidedZ(gamma)
 	phatD := float64(d) / float64(nTotal)
 	rad := zGamma*math.Sqrt(math.Max(phatD*(1.0-phatD)/float64(nTotal), 1e-9)) + 1.0/(2.0*float64(nTotal))
 	qLo := math.Max(margin, phatD-rad)
@@ -1562,7 +1579,7 @@ func TangoPairedNonInferiorityTest(wins, losses, nTotal int, margin, alpha, gamm
 // EffectiveTopMEntropy computes Top-M truncated normalized Shannon entropy H(p_topM) / ln(min(K, M)) in [0, 1] (Lemma 1).
 func EffectiveTopMEntropy(probs map[string]float64, topM int) (float64, error) {
 	if topM < 2 {
-		return 0.0, fmt.Errorf("topM must be >= 2, got %d", topM)
+		return 0.0, fmt.Errorf("mdm: topM must be >= 2, got %d", topM)
 	}
 	k := len(probs)
 	if k <= 1 {
@@ -1622,7 +1639,7 @@ func EvaluateTwoStageCascadeRiskBound(
 	}
 	for _, v := range args {
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0.0 || v > 1.0 {
-			return TwoStageCascadeRiskBound{}, fmt.Errorf("probability argument must lie in [0, 1], got %v", v)
+			return TwoStageCascadeRiskBound{}, fmt.Errorf("mdm: probability argument must lie in [0, 1], got %v", v)
 		}
 	}
 	stage1Risk := (1.0-escalationRate)*fastExitSelectiveRisk + escalationRate*escalatedStage1ErrorRate
@@ -1655,7 +1672,7 @@ type CutPolytopeTriangleCertificate struct {
 func CutPolytopeTriangleConsistencyScore(pAB, pBC, pAC float64) (CutPolytopeTriangleCertificate, error) {
 	for _, v := range []float64{pAB, pBC, pAC} {
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0.0 || v > 1.0 {
-			return CutPolytopeTriangleCertificate{}, fmt.Errorf("edge probability must lie in [0, 1], got %v", v)
+			return CutPolytopeTriangleCertificate{}, fmt.Errorf("mdm: edge probability must lie in [0, 1], got %v", v)
 		}
 	}
 	xA := 2.0*pAB - 1.0

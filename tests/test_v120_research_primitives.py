@@ -478,7 +478,7 @@ class TestV120ResearchPrimitives(unittest.TestCase):
             {"a": True, "b": 0.5},  # type: ignore[dict-item]
             {"": 0.5, "b": 0.5},
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"source_priors keys must be non-empty strings|source_priors must be a non-empty mapping|source_priors sum must be > 0|source_priors\['a'\] must be a finite non-boolean|source_priors\['a'\] must be finite and >= 0"):
                 adapt_sld_label_shift_posteriors(bad_priors, [valid_pair])
 
         for bad_batch in (
@@ -491,26 +491,26 @@ class TestV120ResearchPrimitives(unittest.TestCase):
             [{"a": float("-inf"), "b": 0.5}],
             [{"a": 0.0, "b": 0.0}],
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"unlabeled_posteriors must be a non-empty sequence|unlabeled_posteriors\[0\] keys \['a', 'c'\] do not|unlabeled_posteriors\[0\] must be a non-empty mapping|unlabeled_posteriors\[0\] sum must be > 0|unlabeled_posteriors\[0\]\['a'\] must be finite and >= 0"):
                 adapt_sld_label_shift_posteriors(valid_pair, bad_batch)  # type: ignore[arg-type]
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"max_iters must be an integer >= 1"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], max_iters=0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"max_iters must be an integer >= 1"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], max_iters=True)  # type: ignore[arg-type]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"tol must be finite and >= 0"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], tol=-1e-5)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"tol must be finite and >= 0"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], tol=True)  # type: ignore[arg-type]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"min_prior_floor must be finite and >= 0"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], min_prior_floor=-0.01)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"min_prior_floor \* K must be < 1\.0 \(got floor=0\.5"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], min_prior_floor=0.5)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"min_prior_floor must be <= 1\.0"):
             adapt_sld_label_shift_posteriors({"only": 1.0}, [{"only": 1.0}], min_prior_floor=1.2)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"smoothing_alpha must be finite and >= 0"):
             adapt_sld_label_shift_posteriors(valid_pair, [valid_pair], smoothing_alpha=-0.1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"source_priors entries must be strictly > 0 when"):
             adapt_sld_label_shift_posteriors({"a": 0.0, "b": 1.0}, [valid_pair], min_prior_floor=0.0)
 
         # 2. PriDe null-prior debiasing guard branches
@@ -527,64 +527,64 @@ class TestV120ResearchPrimitives(unittest.TestCase):
             (valid_pair, valid_pair, float("inf")),
             (valid_pair, valid_pair, True),  # type: ignore[list-item]
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"alpha must be finite and >=|null_prior_probs must be a n|null_prior_probs sum must be|null_prior_probs\['a'\] must b|raw_probs keys \['a', 'b'\] do|raw_probs must be a non-empt|raw_probs\['a'\] must be finit"):
                 debias_null_prior_probabilities(bad_raw, bad_null, alpha=bad_alpha)  # type: ignore[arg-type]
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"eps must be finite and strictly in \(0, 1\)"):
             debias_null_prior_probabilities(valid_pair, valid_pair, alpha=1.0, eps=0.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"eps must be finite and strictly in \(0, 1\)"):
             debias_null_prior_probabilities(valid_pair, valid_pair, alpha=1.0, eps=1.0)
 
         # 3. Omniscience & CRC guard branches
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"probability mapping must be non-empty"):
             select_omniscience_action({}, penalty_wrong=1.0, reward_correct=1.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"option keys must be non-empty strings"):
             select_omniscience_action({"": 0.5, "b": 0.5}, penalty_wrong=1.0, reward_correct=1.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"abstain_action must be a non-empty string"):
             select_omniscience_action(valid_pair, abstain_action="")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"penalty_wrong must be finite and >= 0"):
             select_omniscience_action(valid_pair, penalty_wrong=-1.0, reward_correct=1.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"reward_correct must be finite and > 0"):
             select_omniscience_action(valid_pair, penalty_wrong=1.0, reward_correct=0.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"penalty_wrong must be finite and >= 0"):
             select_omniscience_action(valid_pair, penalty_wrong=float("nan"), reward_correct=1.0)
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"gold_label 'missing_key' not present in option"):
             omniscience_abstention_loss(valid_pair, "missing_key", 0.5)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"threshold_lambda must lie in \[0, 1\]"):
             omniscience_abstention_loss(valid_pair, "a", 1.2)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"hallucination_penalty must be finite and > 0"):
             omniscience_abstention_loss(valid_pair, "a", 0.5, hallucination_penalty=0.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"allow_key 'missing_safe' not present in option"):
             asymmetric_false_allow_loss(valid_pair, "a", 0.5, allow_key="missing_safe")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"gold_label 'missing_gold' not present in option"):
             asymmetric_false_allow_loss(valid_pair, "missing_gold", 0.5, allow_key="a")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"calib_probs and calib_labels must be non-empty"):
             calibrate_conformal_risk_control([], [], alpha=0.1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"calib_probs and calib_labels must be non-empty"):
             calibrate_conformal_risk_control([valid_pair], ["a", "b"], alpha=0.1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"calibration label 'unknown' at index 0 not present"):
             calibrate_conformal_risk_control([valid_pair], ["unknown"], alpha=0.1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"alpha must be finite and > 0"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"alpha must be finite and > 0"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=-0.1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_bound_b must be finite and > 0"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, loss_bound_b=0.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"allow_key must be a non-empty string"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, allow_key="")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"lambda_grid must be non-empty when provided"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, lambda_grid=[])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"lambda_grid must lie in \[0, 1\]"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, lambda_grid=[1.5])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"num_grid_points must be an integer >= 2"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, num_grid_points=1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_fn must be callable when provided"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, loss_fn="bad")  # type: ignore[arg-type]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"unsupported loss_mode 'invalid_mode'; expected one"):
             calibrate_conformal_risk_control([valid_pair], ["a"], alpha=0.1, loss_mode="invalid_mode")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"allow_key 'safe' missing from calibration"):
             calibrate_conformal_risk_control(
                 [valid_pair], ["a"], alpha=0.1, loss_mode="asymmetric_false_allow", allow_key="safe"
             )
@@ -599,66 +599,66 @@ class TestV120ResearchPrimitives(unittest.TestCase):
         def _nan_loss(_p: Mapping[str, float], _g: str, _lam: float) -> float:
             return float("nan")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_fn is not monotone non-increasing at item 0"):
             calibrate_conformal_risk_control(
                 [valid_pair], ["a"], alpha=0.2, loss_bound_b=1.0, loss_fn=_non_monotone_loss
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_fn value 2\.5 outside \[0, 1\.0\] at item 0"):
             calibrate_conformal_risk_control(
                 [valid_pair], ["a"], alpha=0.2, loss_bound_b=1.0, loss_fn=_out_of_bounds_loss
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_fn returned non-finite value nan at item 0"):
             calibrate_conformal_risk_control(
                 [valid_pair], ["a"], alpha=0.2, loss_bound_b=1.0, loss_fn=_nan_loss
             )
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"calibration must lie in \[0, 1\]"):
             evaluate_conformal_risk_decision(valid_pair, -0.1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"abstain_action must be a non-empty string"):
             evaluate_conformal_risk_decision(valid_pair, 0.5, abstain_action="")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_mode must be a string"):
             evaluate_conformal_risk_decision(valid_pair, 0.5, loss_mode=123)  # type: ignore[arg-type]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"unsupported loss_mode 'bad_mode'"):
             evaluate_conformal_risk_decision(valid_pair, 0.5, loss_mode="bad_mode")
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"allow_key 'missing' not present in option"):
             evaluate_conformal_risk_decision(
                 valid_pair, 0.5, loss_mode="asymmetric_false_allow", allow_key="missing"
             )
 
         # 4. VoI guard branches
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"probability mapping must be non-empty"):
             compute_bayes_value_of_information({})
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"probability for 'a' must be finite and >= 0"):
             compute_bayes_value_of_information({"a": float("nan"), "b": 0.5})
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"error_cost must be finite and >= 0"):
             compute_bayes_value_of_information(valid_pair, error_cost=-1.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"error_cost mapping must be non-empty"):
             compute_bayes_value_of_information(valid_pair, error_cost={})
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"class_error_costs keys must match stage1_probs"):
             compute_bayes_value_of_information(valid_pair, error_cost={"a": 1.0, "c": 1.0})
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_matrix outer keys must match stage1_probs"):
             compute_bayes_value_of_information(
                 valid_pair,
                 loss_matrix={"a": {"a": 0.0, "b": 1.0}},
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"loss_matrix\['b'\] keys must match stage1_probs"):
             compute_bayes_value_of_information(
                 valid_pair,
                 loss_matrix={"a": {"a": 0.0, "b": 1.0}, "b": {"a": 1.0}},
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"expected_stage2_accuracy must lie in \[0, 1\]"):
             compute_bayes_value_of_information(valid_pair, expected_stage2_accuracy=1.05)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"stage2_rpc_cost_usd must be finite and >= 0"):
             compute_bayes_value_of_information(valid_pair, stage2_rpc_cost_usd=-0.01)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"latency_cost_usd must be finite and >= 0"):
             compute_bayes_value_of_information(valid_pair, latency_cost_usd=float("inf"))
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"cannot specify mapping error_cost alongside"):
             compute_bayes_value_of_information(
                 valid_pair,
                 error_cost={"a": 1.0, "b": 1.0},
                 class_error_costs={"a": 1.0, "b": 1.0},
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"cannot specify both class_error_costs and"):
             compute_bayes_value_of_information(
                 valid_pair,
                 error_cost=1.0,

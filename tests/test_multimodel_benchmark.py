@@ -133,11 +133,11 @@ class TestMultiModelBenchmarkSuite(unittest.TestCase):
         mod = _load_benchmark_module()
         with tempfile.TemporaryDirectory() as td:
             missing = Path(td) / "missing.jsonl"
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaisesRegex(FileNotFoundError, r"Missing benchmark receipt file"):
                 mod.load_jsonl_rows(missing)
             empty = Path(td) / "empty.jsonl"
             empty.write_text("\n  \n", encoding="utf-8")
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"Receipt file is empty"):
                 mod.load_jsonl_rows(empty)
 
     def test_pareto_frontier_and_artifact_self_audit_guards_boundary_cases(self) -> None:
@@ -151,11 +151,11 @@ class TestMultiModelBenchmarkSuite(unittest.TestCase):
         self.assertEqual(set(frontier), {"fast_accurate", "ultra_fast"})
         self.assertFalse(arms[1]["pareto_optimal"])
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, r"JSON summary contains non-finite float tokens"):
             mod.verify_artifact_hygiene_and_antislop('{"x": NaN}', "# Clean\n")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, r"Markdown report contains forbidden em/en dash"):
             mod.verify_artifact_hygiene_and_antislop('{"x": 1}', "# Bad \u2014 dash\n")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, r"Markdown report contains standalone horizontal rule"):
             mod.verify_artifact_hygiene_and_antislop('{"x": 1}', "# Title\n---\nBody\n")
 
 

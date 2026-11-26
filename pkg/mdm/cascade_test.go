@@ -112,7 +112,7 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 	}
 
 	// 1. All choice questions trip IsNegativeTransfer -> 0 speculative Stage-2 calls at t=0
-	var specCalls int32
+	var specCalls atomic.Int32
 	cfgBlocked := DefaultCascadeConfig()
 	cfgBlocked.SpeculativeStage2 = true
 	cfgBlocked.DomainCompetence = &negProf
@@ -121,7 +121,7 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 			return map[string]map[string]float64{"q1": {"opt_a": 0.60, "opt_b": 0.40}}, nil
 		}),
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
-			atomic.AddInt32(&specCalls, 1)
+			specCalls.Add(1)
 			return map[string]map[string]float64{"q1": {"opt_a": 0.10, "opt_b": 0.90}}, nil
 		}),
 		cfgBlocked,
@@ -133,8 +133,8 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Evaluate failed: %v", err)
 	}
-	if atomic.LoadInt32(&specCalls) != 0 {
-		t.Fatalf("expected 0 Stage-2 calls when all choice questions trip negative transfer, got %d", specCalls)
+	if specCalls.Load() != 0 {
+		t.Fatalf("expected 0 Stage-2 calls when all choice questions trip negative transfer, got %d", specCalls.Load())
 	}
 	if !resBlocked.SpeculativeSkippedByCircuitBreaker || resBlocked.SpeculativeLaunched || resBlocked.Escalated {
 		t.Fatalf("unexpected speculative flags: %+v", resBlocked)
@@ -199,7 +199,7 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 
 	// 3. Uniform Stage-1 distribution (|p_i - 1/K| <= 1e-6) rescues via two-phase (0.0, 1.0)
 	// even when IsNegativeTransfer is tripped and UseDawidSkenePoEWeights is enabled
-	var rescueCalls int32
+	var rescueCalls atomic.Int32
 	cfgRescue := DefaultCascadeConfig()
 	cfgRescue.SpeculativeStage2 = true
 	cfgRescue.DomainCompetence = &negProf
@@ -209,7 +209,7 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 			return map[string]map[string]float64{"q1": {"opt_a": 0.5000004, "opt_b": 0.4999996}}, nil
 		}),
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
-			atomic.AddInt32(&rescueCalls, 1)
+			rescueCalls.Add(1)
 			return map[string]map[string]float64{"q1": {"opt_a": 0.15, "opt_b": 0.85}}, nil
 		}),
 		cfgRescue,
@@ -221,21 +221,21 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Evaluate rescue failed: %v", err)
 	}
-	if atomic.LoadInt32(&rescueCalls) != 1 || !resRescue.Escalated {
-		t.Fatalf("expected 1 two-phase rescue Stage-2 call, got calls=%d escalated=%v", rescueCalls, resRescue.Escalated)
+	if rescueCalls.Load() != 1 || !resRescue.Escalated {
+		t.Fatalf("expected 1 two-phase rescue Stage-2 call, got calls=%d escalated=%v", rescueCalls.Load(), resRescue.Escalated)
 	}
 	if math.Abs(resRescue.Slots["q1"].Probabilities["opt_b"]-0.85) > 1e-12 {
 		t.Fatalf("expected exact (0.0, 1.0) Stage-2 rescue prob 0.85, got %v", resRescue.Slots["q1"].Probabilities["opt_b"])
 	}
 
 	// Just outside 1e-6 (0.500002 / 0.499998) does NOT trigger uniform rescue under negative transfer
-	var nearCalls int32
+	var nearCalls atomic.Int32
 	orchNear, err := NewCascadeOrchestrator(
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
 			return map[string]map[string]float64{"q1": {"opt_a": 0.500002, "opt_b": 0.499998}}, nil
 		}),
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
-			atomic.AddInt32(&nearCalls, 1)
+			nearCalls.Add(1)
 			return map[string]map[string]float64{"q1": {"opt_a": 0.10, "opt_b": 0.90}}, nil
 		}),
 		cfgBlocked,
@@ -244,8 +244,8 @@ func TestSpeculativeCircuitBreakerAndUniformRescueAndPreservation(t *testing.T) 
 		t.Fatalf("NewCascadeOrchestrator near failed: %v", err)
 	}
 	resNear, err := orchNear.Evaluate(context.Background(), "req_near", []ChoiceQuestion{baseQ})
-	if err != nil || atomic.LoadInt32(&nearCalls) != 0 || resNear.Escalated {
-		t.Fatalf("expected 0 calls outside 1e-6 tolerance, got calls=%d escalated=%v err=%v", nearCalls, resNear.Escalated, err)
+	if err != nil || nearCalls.Load() != 0 || resNear.Escalated {
+		t.Fatalf("expected 0 calls outside 1e-6 tolerance, got calls=%d escalated=%v err=%v", nearCalls.Load(), resNear.Escalated, err)
 	}
 
 	// 4. Uniform Stage-2 fallback while Stage 1 is non-uniform preserves Stage 1 (1.0, 0.0)
@@ -327,10 +327,10 @@ func TestCascadeContextCancellationAndVoIConfigBounds(t *testing.T) {
 	// 2. Pre-canceled and mid-flight canceled ctx propagate ctx.Err() in both two-phase and speculative modes
 	preCtx, preCancel := context.WithCancel(context.Background())
 	preCancel()
-	var s1Count int32
+	var s1Count atomic.Int32
 	orchCancel, err := NewCascadeOrchestrator(
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
-			atomic.AddInt32(&s1Count, 1)
+			s1Count.Add(1)
 			return map[string]map[string]float64{"act": {"allow": 0.6, "deny": 0.4}}, nil
 		}),
 		CascadeBackendFunc(func(c context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
@@ -345,8 +345,8 @@ func TestCascadeContextCancellationAndVoIConfigBounds(t *testing.T) {
 	if _, cErr := orchCancel.Evaluate(preCtx, "pre", []ChoiceQuestion{baseQ}); !errors.Is(cErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled on pre-canceled ctx, got %v", cErr)
 	}
-	if atomic.LoadInt32(&s1Count) != 0 {
-		t.Fatalf("expected 0 Stage-1 calls on pre-canceled ctx, got %d", s1Count)
+	if s1Count.Load() != 0 {
+		t.Fatalf("expected 0 Stage-1 calls on pre-canceled ctx, got %d", s1Count.Load())
 	}
 
 	for _, speculative := range []bool{false, true} {
@@ -400,7 +400,6 @@ func TestTemperatureBoundsLogSpaceStabilityAndPreSharpeningEntropy(t *testing.T)
 	keys := []string{"opt_a", "opt_b", "opt_c"}
 	rawThree := map[string]float64{"opt_a": 0.35, "opt_b": 0.33, "opt_c": 0.32}
 
-	_, _, _, expectedUnscaledH := NormalizeAndScale(rawThree, keys, 1.0)
 	sharpProbs, sharpWin, _, _ := NormalizeAndScale(rawThree, keys, MinTemperature)
 	if sharpWin != "opt_a" {
 		t.Fatalf("expected winner opt_a at T=%v, got %q", MinTemperature, sharpWin)
@@ -460,19 +459,18 @@ func TestTemperatureBoundsLogSpaceStabilityAndPreSharpeningEntropy(t *testing.T)
 	if math.Abs(hesRawH-unscaledTwoH) > 1e-12 {
 		t.Fatalf("expected pre-sharpening rawNormH=%v, got %v", unscaledTwoH, hesRawH)
 	}
-	_ = expectedUnscaledH
 
 	// CascadeOrchestrator at T=0.1 still escalates hesitant unscaled Stage-1 slot and reports Confidence = 1 - HRaw.
 	cfgSharp := DefaultCascadeConfig()
 	cfgSharp.Temperature = 0.1
 	cfgSharp.HesitationThreshold = 0.50
-	var s2Calls int32
+	var s2Calls atomic.Int32
 	orchSharp, err := NewCascadeOrchestrator(
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
 			return map[string]map[string]float64{"q1": {"opt_a": 0.6, "opt_b": 0.4}}, nil
 		}),
 		CascadeBackendFunc(func(_ context.Context, _ any, _ []ChoiceQuestion) (map[string]map[string]float64, error) {
-			atomic.AddInt32(&s2Calls, 1)
+			s2Calls.Add(1)
 			return map[string]map[string]float64{"q1": {"opt_a": 0.15, "opt_b": 0.85}}, nil
 		}),
 		cfgSharp,
@@ -484,8 +482,8 @@ func TestTemperatureBoundsLogSpaceStabilityAndPreSharpeningEntropy(t *testing.T)
 	if err != nil {
 		t.Fatalf("Evaluate sharp failed: %v", err)
 	}
-	if !sharpRes.Escalated || atomic.LoadInt32(&s2Calls) != 1 {
-		t.Fatalf("expected T=0.1 hesitant slot to escalate via pre-sharpening rawNormH, escalated=%v s2Calls=%d", sharpRes.Escalated, s2Calls)
+	if !sharpRes.Escalated || s2Calls.Load() != 1 {
+		t.Fatalf("expected T=0.1 hesitant slot to escalate via pre-sharpening rawNormH, escalated=%v s2Calls=%d", sharpRes.Escalated, s2Calls.Load())
 	}
 	if math.Abs(sharpRes.Slots["q1"].Confidence-(1.0-sharpRes.Slots["q1"].HRaw)) > 1e-12 {
 		t.Fatalf("expected Confidence == 1 - HRaw, got %v vs %v", sharpRes.Slots["q1"].Confidence, 1.0-sharpRes.Slots["q1"].HRaw)

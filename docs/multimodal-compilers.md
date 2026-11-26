@@ -1,4 +1,4 @@
-# Multimodal compilers for vision, UI, and audio/video
+# Multimodal compilers for vision, UI grounding, plus audio/video
 
 Raw multimodal prompting wastes tokens and loses fine-grained signal: downsampling a retail shelf crop destroys `330ml` vs. `500ml` pack typography, regressing raw UI pixel coordinates hits only `11.6%` of targets on `ScreenSpot`, and sending full 10-chunk video streams burns `2.4x` more inference compute than necessary. `multimodal-decision-models` ships pure-stdlib compilers in Python and Go that transform raw pixels, UI bounding boxes, and 16-bit PCM audio into compact, information-dense decision inputs.
 
@@ -54,7 +54,7 @@ Instead of asking a VLM to regress continuous `[x, y]` coordinates, annotate int
 
 On `ScreenSpot` and `RefCOCO` grounding benchmarks, discrete Set-of-Marks readout reaches `78.1%` GUI center-hit accuracy compared to `11.6%` for 21-bin coordinate regression.
 
-## Process streaming audio, video, and full-duplex speech (`audio_video_decision.py`)
+## Process streaming audio/video and full-duplex speech (`audio_video_decision.py`)
 
 `audio_video_decision.py` (mirrored in `pkg/mdm/audio_video_v080.go`) processes 16kHz 16-bit PCM `WAV` streams and video frame sequences with zero external C/FFmpeg dependencies:
 

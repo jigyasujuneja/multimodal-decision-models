@@ -161,6 +161,7 @@ def _safe_unit_scale(vals: Sequence[float]) -> list[float] | None:
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    """Compute overflow-safe cosine similarity in `[-1.0, 1.0]` between two finite numeric vectors."""
     if not _is_non_str_sequence(a) or not _is_non_str_sequence(b):
         raise SchemaContractViolationError("vectors must be non-string numeric sequences")
     if len(a) != len(b) or not a:

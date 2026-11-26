@@ -331,7 +331,7 @@ class RAGContextFilterResult:
 
 
 def _normal_quantile_z(confidence_delta: float) -> float:
-    """Approximate standard normal upper quantile z_{1 - delta/2} via Beasley-Springer-Moro."""
+    """Approximate standard normal upper quantile z_{1 - delta/2} via Abramowitz & Stegun 26.2.23."""
     clamped = min(0.499999, max(1e-6, 0.5 * float(confidence_delta)))
     # Rational approximation accurate to < 4.5e-4 across (1e-6, 0.5)
     t_val = math.sqrt(-2.0 * math.log(clamped))

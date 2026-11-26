@@ -521,8 +521,8 @@ func (o *CascadeOrchestrator) Evaluate(
 	}
 
 	slotsOut := make(map[string]CascadeSlotResult, len(orderedIDs))
-	candidateEscalated := make([]string, 0)
-	escalationReasons := make([]string, 0)
+	var candidateEscalated []string
+	var escalationReasons []string
 	stage1UniformByID := make(map[string]bool, len(orderedIDs))
 
 	for _, qid := range orderedIDs {
@@ -650,7 +650,7 @@ func (o *CascadeOrchestrator) Evaluate(
 				cancelStage2()
 			}
 
-			twoPhaseQuestions := make([]ChoiceQuestion, 0)
+			var twoPhaseQuestions []ChoiceQuestion
 			for _, qid := range executableQIDs {
 				if _, already := stage2RawByID[qid]; already {
 					continue

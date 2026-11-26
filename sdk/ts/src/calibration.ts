@@ -15,6 +15,7 @@
  */
 
 import { createHmac } from "node:crypto";
+import { isPlainRecord, nullProtoRecord } from "./internal.js";
 import {
   type BayesianPoEResult,
   type ConformalCalibrationResult,
@@ -31,12 +32,22 @@ import {
   type PriorGateMode,
 } from "./types.js";
 
+/** Default temperature applied when converting cosine similarities into log-prior logits. */
 export const DEFAULT_COSINE_PRIOR_TEMPERATURE = 0.07;
+
+/** Default HMAC seed key shared across Python, Go, and TypeScript conformal tie-breaking. */
 export const DEFAULT_CONFORMAL_SEED_KEY = "dgem-conformal-v1";
+
+/** Floating-point tolerance used when grouping tied conformal probabilities and scores. */
 export const CONFORMAL_SCORE_TOLERANCE = 1e-12;
+
+/** Minimum supported temperature scaling factor. */
 export const MIN_TEMPERATURE = 1e-3;
+
+/** Maximum supported temperature scaling factor. */
 export const MAX_TEMPERATURE = 100.0;
 
+/** Canonical opt-in abstention labels that trigger escalation when present in a conformal set. */
 export const STANDARD_ABSTAIN_LABELS: readonly string[] = [
   "0",
   "abstain",
@@ -49,6 +60,7 @@ export const STANDARD_ABSTAIN_LABELS: readonly string[] = [
   "unknown",
 ];
 
+/** Default empty abstention label list for closed-world conformal prediction sets. */
 export const DEFAULT_ABSTAIN_LABELS: readonly string[] = [];
 
 interface OptionProbability {
@@ -56,18 +68,14 @@ interface OptionProbability {
   readonly prob: number;
 }
 
-function nullProtoRecord<T = number>(): Record<string, T> {
-  return Object.create(null) as Record<string, T>;
-}
-
 function hasOwn(target: object, key: string): boolean {
   return Object.hasOwn(target, key);
 }
 
 function normalizeProbabilities(
-  probabilities: Record<string, number>,
+  probabilities: Readonly<Record<string, number>>,
 ): OptionProbability[] {
-  if (!probabilities || typeof probabilities !== "object") {
+  if (!isPlainRecord(probabilities)) {
     throw new MDMValidationError("probability map must be an object");
   }
   const keys = Object.keys(probabilities).sort();
@@ -105,7 +113,8 @@ function normalizeProbabilities(
   return normalized;
 }
 
-export function shannonEntropy(probabilities: Record<string, number>): number {
+/** Computes Shannon entropy in nats for a discrete probability map. */
+export function shannonEntropy(probabilities: Readonly<Record<string, number>>): number {
   const ordered = normalizeProbabilities(probabilities);
   let entropyNats = 0.0;
   for (const item of ordered) {
@@ -116,8 +125,9 @@ export function shannonEntropy(probabilities: Record<string, number>): number {
   return Math.max(0.0, entropyNats);
 }
 
+/** Computes normalized Shannon entropy in `[0, 1]` by dividing by `ln(K)`. */
 export function normalizedEntropy(
-  probabilities: Record<string, number>,
+  probabilities: Readonly<Record<string, number>>,
 ): number {
   const ordered = normalizeProbabilities(probabilities);
   if (ordered.length <= 1) {
@@ -132,8 +142,9 @@ export function normalizedEntropy(
   return Math.max(0.0, Math.min(1.0, entropyNats / Math.log(ordered.length)));
 }
 
+/** Applies log-space temperature scaling within `[MIN_TEMPERATURE, MAX_TEMPERATURE]`. */
 export function applyTemperature(
-  probabilities: Record<string, number>,
+  probabilities: Readonly<Record<string, number>>,
   temperature: number,
 ): Record<string, number> {
   if (
@@ -179,10 +190,14 @@ export function applyTemperature(
   return { ...out };
 }
 
+/** Converts cosine similarities into log-softmax prior logits scaled by `temperature`. */
 export function normalizeCosinePriorLogits(
-  cosineScores: Record<string, number>,
+  cosineScores: Readonly<Record<string, number>>,
   temperature = DEFAULT_COSINE_PRIOR_TEMPERATURE,
 ): Record<string, number> {
+  if (!isPlainRecord(cosineScores)) {
+    throw new MDMValidationError("cosineScores must be an object");
+  }
   const keys = Object.keys(cosineScores);
   if (keys.length === 0) {
     return {};
@@ -218,10 +233,11 @@ export function normalizeCosinePriorLogits(
   return { ...out };
 }
 
+/** Fuses raw model probabilities with prior log-odds under a pre-sharpening hesitation gate. */
 export function fusePriorProbabilities(
-  rawProbabilities: Record<string, number>,
+  rawProbabilities: Readonly<Record<string, number>>,
   options: {
-    readonly priorLogits?: Record<string, number>;
+    readonly priorLogits?: Readonly<Record<string, number>>;
     readonly priorWeight?: number;
     readonly temperature?: number;
     readonly hesitationThreshold?: number;
@@ -329,6 +345,7 @@ export function fusePriorProbabilities(
   return { probabilities: { ...fused }, hRaw, escalated };
 }
 
+/** Computes the big-endian uint64 prefix of `HMAC-SHA256(seedKey, itemKey + "\0" + tag)`. */
 export function hmacUint64(
   seedKey: string,
   itemKey: string,
@@ -350,6 +367,7 @@ export function hmacUint64(
   return digest.readBigUInt64BE(0);
 }
 
+/** Draws a stateless 53-bit Uniform `[0, 1)` float64 matching Python and Go bit-for-bit. */
 export function hmacUniformFloat64(
   seedKey: string,
   itemKey: string,
@@ -387,6 +405,11 @@ function validateConformalConfig(config: ConformalConfig = {}): {
   seedKey: string;
   itemKey: string;
 } {
+  if (config.method !== undefined && typeof config.method !== "string") {
+    throw new MDMValidationError(
+      `unsupported conformal method ${JSON.stringify(config.method)}`,
+    );
+  }
   const rawMethod = (config.method ?? "raps").toLowerCase();
   if (rawMethod !== "lac" && rawMethod !== "aps" && rawMethod !== "raps") {
     throw new MDMValidationError(
@@ -500,8 +523,9 @@ function computeNonconformityScores(
   return scores;
 }
 
+/** Calibrates the finite-sample split conformal quantile `qHat` at miscoverage level `alpha`. */
 export function calibrateConformalQuantile(
-  calibProbabilities: readonly Record<string, number>[],
+  calibProbabilities: readonly Readonly<Record<string, number>>[],
   calibLabels: readonly string[],
   alpha = 0.1,
   config: ConformalConfig & { readonly itemKeys?: readonly string[] } = {},
@@ -586,8 +610,9 @@ export function calibrateConformalQuantile(
   };
 }
 
+/** Constructs a split conformal prediction set and abstention escalation flag from `qHat`. */
 export function conformalPredictionSet(
-  probabilities: Record<string, number>,
+  probabilities: Readonly<Record<string, number>>,
   qHat: number,
   config: ConformalConfig = {},
 ): ConformalSetResult {
@@ -647,9 +672,10 @@ export function conformalPredictionSet(
   };
 }
 
+/** Calibrates simultaneous family-wise conformal thresholds across multiple decision slots. */
 export function calibrateMultiSlotJointConformal(
-  calibSlotProbabilities: readonly Record<string, Record<string, number>>[],
-  calibSlotLabels: readonly Record<string, string>[],
+  calibSlotProbabilities: readonly Readonly<Record<string, Readonly<Record<string, number>>>>[],
+  calibSlotLabels: readonly Readonly<Record<string, string>>[],
   alpha = 0.1,
   config: ConformalConfig = {},
 ): MultiSlotJointConformalResult {
@@ -680,11 +706,11 @@ export function calibrateMultiSlotJointConformal(
   const validated = validateConformalConfig({ ...config, randomized: false });
 
   const maxScores: number[] = [];
-  const perSlotProbs = nullProtoRecord<Record<string, number>[]>();
-  const perSlotLabels = nullProtoRecord<string[]>();
+  const perSlotProbs = new Map<string, Readonly<Record<string, number>>[]>();
+  const perSlotLabels = new Map<string, string[]>();
   for (const slotName of slotNames) {
-    perSlotProbs[slotName] = [];
-    perSlotLabels[slotName] = [];
+    perSlotProbs.set(slotName, []);
+    perSlotLabels.set(slotName, []);
   }
 
   for (let idx = 0; idx < calibSlotProbabilities.length; idx += 1) {
@@ -721,8 +747,8 @@ export function calibrateMultiSlotJointConformal(
       if (goldScore > rowMax) {
         rowMax = goldScore;
       }
-      perSlotProbs[slotName]?.push(slotDist);
-      perSlotLabels[slotName]?.push(gold);
+      perSlotProbs.get(slotName)?.push(slotDist);
+      perSlotLabels.get(slotName)?.push(gold);
     }
     maxScores.push(rowMax);
   }
@@ -750,8 +776,8 @@ export function calibrateMultiSlotJointConformal(
   const bonferroniSlotQHats = nullProtoRecord<number>();
   for (const slotName of slotNames) {
     const slotCal = calibrateConformalQuantile(
-      perSlotProbs[slotName] ?? [],
-      perSlotLabels[slotName] ?? [],
+      perSlotProbs.get(slotName) ?? [],
+      perSlotLabels.get(slotName) ?? [],
       bonferroniAlpha,
       {
         method: validated.method,
@@ -776,8 +802,9 @@ export function calibrateMultiSlotJointConformal(
   };
 }
 
+/** Builds simultaneous prediction sets across all calibrated slots in `jointCalibration`. */
 export function multiSlotJointConformalSets(
-  slotProbabilities: Record<string, Record<string, number>>,
+  slotProbabilities: Readonly<Record<string, Readonly<Record<string, number>>>>,
   jointCalibration: MultiSlotJointConformalResult,
   options: {
     readonly useBonferroni?: boolean;
@@ -789,7 +816,7 @@ export function multiSlotJointConformalSets(
     const dist = hasOwn(slotProbabilities, slotName)
       ? slotProbabilities[slotName]
       : undefined;
-    if (!dist || typeof dist !== "object") {
+    if (!dist || typeof dist !== "object" || Array.isArray(dist)) {
       throw new MDMValidationError(
         `missing slot ${JSON.stringify(slotName)} in slotProbabilities`,
       );
@@ -824,6 +851,7 @@ function riemannZetaApprox(exponentP: number): number {
   return partial + tail;
 }
 
+/** Computes the polynomial alpha-spending budget allocated to 1-based trajectory step `stepIndex`. */
 export function polynomialAlphaAtStep(
   stepIndex: number,
   config: PolynomialAlphaConfig = {},
@@ -869,6 +897,7 @@ export function polynomialAlphaAtStep(
   return Math.min(0.999999, Math.max(Number.MIN_VALUE, rawAlpha));
 }
 
+/** Evaluates whether intervening on a failing step yields positive net expected value. */
 export function evaluateNevcGate(
   rawFailProbability: number,
   policy: NevControllerPolicy = {},
@@ -938,14 +967,15 @@ export function evaluateNevcGate(
   };
 }
 
+/** Returns true when held-out competence metrics indicate Stage-2 escalation hurts accuracy or Brier score. */
 export function isNegativeTransfer(
   profile: DomainCompetenceProfile,
   options: NegativeTransferOptions = {},
 ): boolean {
-  if (!profile || typeof profile !== "object") {
+  if (!isPlainRecord(profile)) {
     throw new MDMValidationError("profile must be an object");
   }
-  if (!options || typeof options !== "object") {
+  if (!isPlainRecord(options)) {
     throw new MDMValidationError("options must be an object");
   }
   const { stage1Accuracy, stage2Accuracy } = profile;
@@ -1035,6 +1065,7 @@ export function isNegativeTransfer(
   return stage2Accuracy < stage1Accuracy - margin;
 }
 
+/** Computes chance-adjusted Dawid-Skene log-odds fusion weights `[w1, w2]` for Stage 1 and Stage 2. */
 export function computeDawidSkenePoeWeights(
   stage1Accuracy: number,
   stage2Accuracy: number,
@@ -1089,14 +1120,15 @@ export function computeDawidSkenePoeWeights(
   return [stage1Weight, stage2Weight];
 }
 
+/** Returns true when every entry in `probs` is within `tolerance` of `1 / K`. */
 export function isUniformDistribution(
-  probs: Record<string, number>,
+  probs: Readonly<Record<string, number>>,
   tolerance = 1e-6,
 ): boolean {
   if (typeof tolerance !== "number" || !Number.isFinite(tolerance) || tolerance < 0.0) {
     throw new MDMValidationError("tolerance must be a finite number >= 0");
   }
-  if (!probs || typeof probs !== "object" || Array.isArray(probs)) {
+  if (!isPlainRecord(probs)) {
     return false;
   }
   const values = Object.values(probs);

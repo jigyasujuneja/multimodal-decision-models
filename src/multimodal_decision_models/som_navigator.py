@@ -28,14 +28,17 @@ GRID_4X4_COLS = ("c0", "c1", "c2", "c3")
 
 
 def box_center(box: tuple[float, float, float, float]) -> tuple[float, float]:
+    """Return the `(cy, cx)` midpoint of a `[y_min, x_min, y_max, x_max]` box."""
     return (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
 
 
 def box_area(box: tuple[float, float, float, float]) -> float:
+    """Return the non-negative area of a `[y_min, x_min, y_max, x_max]` box."""
     return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
 
 
 def box_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """Return the intersection-over-union in `[0, 1]` between two boxes."""
     ih = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
     iw = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
     inter = ih * iw
@@ -44,16 +47,19 @@ def box_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, 
 
 
 def point_in_box(cy: float, cx: float, box: tuple[float, float, float, float]) -> bool:
+    """Return True when point `(cy, cx)` lies on or inside `box`."""
     return box[0] <= cy <= box[2] and box[1] <= cx <= box[3]
 
 
 def assign_point_to_grid_cell(cy: float, cx: float) -> str:
+    """Map normalized `(cy, cx)` in `[0, 100]` to a 3x3 spatial cell name."""
     r = max(0, min(2, int((cy / 100.0) * 3.0)))
     c = max(0, min(2, int((cx / 100.0) * 3.0)))
     return f"{GRID_ROWS[r]}_{GRID_COLS[c]}"
 
 
 def assign_box_to_grid_cell(box: tuple[float, float, float, float]) -> str:
+    """Map a `[y_min, x_min, y_max, x_max]` box center to its 3x3 spatial cell."""
     cy, cx = box_center(box)
     return assign_point_to_grid_cell(cy, cx)
 
@@ -146,8 +152,7 @@ def safe_expected_mark_center(
         return ey, ex, containing, True
 
     # Bimodal split or non-convex gap: snap to highest-probability candidate mark
-    best_p, best_y, best_x, best_mark = max(weighted, key=lambda t: (t[0], -box_area(t[3].box)))
-    _ = best_p
+    _, best_y, best_x, best_mark = max(weighted, key=lambda t: (t[0], -box_area(t[3].box)))
     return best_y, best_x, best_mark, True
 
 

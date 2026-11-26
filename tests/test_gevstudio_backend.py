@@ -36,13 +36,13 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
     def test_gevstudio_build_url_encodes_target_query_param(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
             endpoint_url="https://gevstudio.example.com",
-            target="beyond-decision:/models/gemini-decision-1?hc=true;temp=1.0",
+            target="decision:/models/gemini-decision-1?hc=true;temp=1.0",
         )
         url = backend.build_url()
         self.assertEqual(
             url,
             "https://gevstudio.example.com/api/gev/systemone"
-            "?target=beyond-decision%3A%2Fmodels%2Fgemini-decision-1%3Fhc%3Dtrue%3Btemp%3D1.0",
+            "?target=decision%3A%2Fmodels%2Fgemini-decision-1%3Fhc%3Dtrue%3Btemp%3D1.0",
         )
 
     def test_gevstudio_build_payload_formats_multimodal_media_and_question_types(self) -> None:
@@ -165,12 +165,34 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         self.assertGreater(dists["action"]["stop"], 0.998)
         self.assertEqual(trace["discrete_fallback_slots"], ["action"])
 
-        strict = mdm.GevStudioSystemOneBackend(
-            target="gemini-3.6-flash",
-            allow_discrete_fallback=False,
-        )
-        with self.assertRaises(mdm.LogprobAlignmentError):
+        strict = mdm.GevStudioSystemOneBackend(target="gemini-3.6-flash")
+        self.assertFalse(strict.allow_discrete_fallback)
+        with self.assertRaisesRegex(mdm.LogprobAlignmentError, r"empty probabilities|lacks continuous probabilities"):
             strict.parse_response(wire_discrete, questions)
+
+        # Injected transport callback works without external shell tools; use_sso_client=True fails closed.
+        called_urls: list[str] = []
+
+        def fake_transport(url: str, payload: dict[str, object]) -> dict[str, object]:
+            called_urls.append(url)
+            self.assertIn("questions", payload)
+            return {
+                "answers": {
+                    "action": {"probabilities": {"stop": 0.80, "proceed": 0.20}},
+                }
+            }
+
+        custom_transport_backend = mdm.GevStudioSystemOneBackend(
+            endpoint_url="https://gevstudio.example.com/api/gev/systemone",
+            target="gemini-decision-1",
+            transport=fake_transport,
+        )
+        t_dists = custom_transport_backend.score_questions(state={"x": 1}, questions=questions)
+        self.assertAlmostEqual(t_dists["action"]["stop"], 0.80, places=6)
+        self.assertEqual(len(called_urls), 1)
+
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"use_sso_client=True"):
+            mdm.GevStudioSystemOneBackend(use_sso_client=True)
 
     def test_gevstudio_cascade_orchestrator_end_to_end(self) -> None:
         backend = mdm.GevStudioSystemOneBackend(
@@ -205,9 +227,9 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         self.assertGreater(result.slots["sku"].probabilities["sku_a"], 0.88)
 
     def test_gevstudio_validation_errors(self) -> None:
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"http:// or https://"):
             mdm.GevStudioSystemOneBackend(endpoint_url="file:///etc/passwd")
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"label_smoothing_eps"):
             mdm.GevStudioSystemOneBackend(label_smoothing_eps=0.75)
 
     def test_gevstudio_v1_systemone_populates_images_alongside_media(self) -> None:
@@ -278,7 +300,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
             images=[
                 "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
                 "/9j/4AAQSkZJRg==",
-                "R0lGRg==",
+                "UklGRgAAAABXRUJQ",
             ],
         )
         user_parts = payload["contents"][0]["parts"]
@@ -293,7 +315,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         )
         self.assertEqual(
             user_parts[2],
-            {"inlineData": {"mimeType": "image/webp", "data": "R0lGRg=="}},
+            {"inlineData": {"mimeType": "image/webp", "data": "UklGRgAAAABXRUJQ"}},
         )
         self.assertIn("text", user_parts[3])
 
@@ -309,7 +331,10 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
             "iVBORw0KGgoAAAANSUhEUg==",
         )
         for bad_images in invalid_image_inputs:
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(
+                mdm.SchemaContractViolationError,
+                r"must not be empty|images|base64|non-empty|URL|URI",
+            ):
                 vertex_backend.build_generate_content_payload(
                     state={"bay": "aisle_1"},
                     questions=questions,
@@ -353,7 +378,7 @@ class GevStudioBackendAndPropositionsTest(unittest.TestCase):
         self.assertGreater(h_top5, 0.43)
 
         # Fail-closed rejection of all-zero raw_probs in pre_gated_bayesian_poe_fusion
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"positive|mass|zero|sum"):
             mdm.pre_gated_bayesian_poe_fusion({"a": 0.0, "b": 0.0})
 
         # Stage-2A fast-exit gate on M=2 and M=3 shortlists

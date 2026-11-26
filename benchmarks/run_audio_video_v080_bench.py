@@ -103,9 +103,11 @@ def run_benchmark() -> dict[str, Any]:
     vad_correct: list[bool] = []
     raw_correct: list[bool] = []
     vap_correct: list[bool] = []
+    vad_false_barge = 0
     raw_false_barge = 0
     vap_false_barge = 0
     thinking_total = 0
+    vad_loss_sum = 0.0
     raw_loss_sum = 0.0
     vap_loss_sum = 0.0
 
@@ -120,7 +122,7 @@ def run_benchmark() -> dict[str, Any]:
             user_overlap_active=bool(item["user_overlap_active"]),
             config=cfg,
         )
-        # Baseline 1: Fixed 500ms VAD silence threshold
+        # Baseline 1: Fixed 200ms VAD silence threshold
         if item["user_overlap_active"]:
             vad_pred = "barge_in_interrupt"
         elif float(item["pause_ms"]) >= 200.0:
@@ -137,11 +139,14 @@ def run_benchmark() -> dict[str, Any]:
 
         if truth in ("wait_user_thinking", "hold_floor"):
             thinking_total += 1
+            if vad_pred in ("barge_in_interrupt", "yield_turn"):
+                vad_false_barge += 1
             if raw_pred in ("barge_in_interrupt", "yield_turn"):
                 raw_false_barge += 1
             if vap_pred in ("barge_in_interrupt", "yield_turn"):
                 vap_false_barge += 1
 
+        vad_loss_sum += res.expected_losses[vad_pred]
         raw_loss_sum += res.expected_losses[raw_pred]
         vap_loss_sum += res.expected_losses[vap_pred]
 
@@ -151,6 +156,8 @@ def run_benchmark() -> dict[str, Any]:
         "speech_fixture_duration_sec": round(wav_speech_summary.duration_sec, 2),
         "speech_fixture_peak_dbfs": round(wav_speech_summary.peak_dbfs, 2),
         "fixed_vad_accuracy": round(sum(vad_correct) / float(len(vap_items)), 4),
+        "fixed_vad_false_interruption_rate": round(float(vad_false_barge) / float(max(1, thinking_total)), 4),
+        "fixed_vad_mean_expected_loss": round(vad_loss_sum / float(len(vap_items)), 4),
         "raw_stage1_accuracy": round(sum(raw_correct) / float(len(vap_items)), 4),
         "calibrated_vap_accuracy": round(sum(vap_correct) / float(len(vap_items)), 4),
         "raw_false_interruption_rate": round(float(raw_false_barge) / float(max(1, thinking_total)), 4),
@@ -221,6 +228,7 @@ def run_benchmark() -> dict[str, Any]:
         "naive_early_exit_accuracy": round(sum(naive_correct) / float(len(stream_items)), 4),
         "conformal_martingale_exit_accuracy": round(sum(mart_correct) / float(len(stream_items)), 4),
         "naive_mean_exit_chunks": round(float(naive_steps_sum) / float(len(stream_items)), 2),
+        "naive_compute_saved_pct": round(100.0 * (10.0 - float(naive_steps_sum) / float(len(stream_items))) / 10.0, 2),
         "conformal_martingale_mean_exit_chunks": round(float(mart_steps_sum) / float(len(stream_items)), 2),
         "conformal_compute_saved_pct": round(100.0 * (10.0 - float(mart_steps_sum) / float(len(stream_items))) / 10.0, 2),
         "shift_anomaly_recall": round(float(shift_detected) / float(max(1, shift_items)), 4),
@@ -237,8 +245,11 @@ def run_benchmark() -> dict[str, Any]:
     naive_poe_correct: list[bool] = []
     avel_v080_correct: list[bool] = []
     spoof_total = 0
-    spoof_caught_naive = 0
     spoof_caught_v080 = 0
+    offscreen_total = 0
+    offscreen_correct_v080 = 0
+    silent_total = 0
+    silent_correct_v080 = 0
 
     for item in avel_items:
         pa = item["audio_probs"]
@@ -272,6 +283,14 @@ def run_benchmark() -> dict[str, Any]:
             spoof_total += 1
             if res_av.regime == "cross_modal_spoof_or_conflict" and res_av.escalate_to_stage2:
                 spoof_caught_v080 += 1
+        elif gt_regime == "audible_offscreen_event":
+            offscreen_total += 1
+            if v080_ok:
+                offscreen_correct_v080 += 1
+        elif gt_regime == "visible_silent_event":
+            silent_total += 1
+            if v080_ok:
+                silent_correct_v080 += 1
 
     mcnemar_p3 = paired_mcnemar_test(naive_poe_correct, avel_v080_correct)
     p3_summary = {
@@ -280,8 +299,11 @@ def run_benchmark() -> dict[str, Any]:
         "visual_only_accuracy": round(sum(vis_only_correct) / float(len(avel_items)), 4),
         "naive_poe_accuracy": round(sum(naive_poe_correct) / float(len(avel_items)), 4),
         "jsd_triangle_avel_accuracy": round(sum(avel_v080_correct) / float(len(avel_items)), 4),
-        "naive_spoof_detection_rate": round(float(spoof_caught_naive) / float(max(1, spoof_total)), 4),
+        # Naive unweighted PoE emits only class argmax and has no spoof/conflict quarantine gate.
+        "naive_spoof_detection_rate": 0.0,
         "v080_spoof_detection_rate": round(float(spoof_caught_v080) / float(max(1, spoof_total)), 4),
+        "v080_offscreen_audio_accuracy": round(float(offscreen_correct_v080) / float(max(1, offscreen_total)), 4),
+        "v080_silent_visual_accuracy": round(float(silent_correct_v080) / float(max(1, silent_total)), 4),
         "mcnemar_p_value": float(mcnemar_p3.p_two_sided),
     }
 
@@ -375,57 +397,55 @@ def run_benchmark() -> dict[str, Any]:
 
     report_md = f"""# Audio and Video Decision Models v0.8.0 Benchmark Report
 
-This benchmark evaluates 400 real audio-visual instances in `real_audio_video_decision_receipts.jsonl` across `DecisionGemma-2B`, `Gemini-3.5-Flash`, Vovk conformal martingales, and `RAPS` conformal sets (`audio_video_decision.py` and `audio_video_v080.go`). We rejected naive unweighted Product-of-Experts (`PoE`) and fixed `500 ms` silence thresholds because they collapse on cognitive pauses and cross-modal spoofs, whereas cost-sensitive `VAP` and triangle consistency gates preserve finite-sample calibration at the cost of `+3.4 ms` prosodic prior overhead.
+This benchmark evaluates 400 real audio-visual instances in `real_audio_video_decision_receipts.jsonl` across `DecisionGemma-2B`, `Gemini-3.5-Flash`, Vovk conformal martingales, and `RAPS` conformal sets (`audio_video_decision.py` and `audio_video_v080.go`). We rejected naive unweighted Product-of-Experts (`PoE`) and fixed `200 ms` silence thresholds because they fail on cognitive pauses and cross-modal spoofs, whereas cost-sensitive `VAP` and triangle consistency gates maintain finite-sample calibration at `+3.4 ms` prosodic prior overhead.
 
 ## Executive Summary
 
 | Pillar | Audio / Video Decision Mechanism | Baseline Metric | `v0.8.0` Calibrated Metric | Verified Improvement |
 | :--- | :--- | :--- | :--- | :--- |
 | **Pillar 1** (`N=100`) | **Full-Duplex Voice Activity Projection (`VAP`) & Conformal Barge-In Guard** | Raw `/v1/systemone` Acc: `{p1_summary['raw_stage1_accuracy']:.4f}` (False Barge-In: `{p1_summary['raw_false_interruption_rate']:.4f}`) | **Calibrated VAP Acc: `{p1_summary['calibrated_vap_accuracy']:.4f}`** (False Barge-In: **`{p1_summary['calibrated_vap_false_interruption_rate']:.4f}`**) | **`+{p1_summary['calibrated_vap_accuracy'] - p1_summary['raw_stage1_accuracy']:.4f}` acc (`p={p1_summary['mcnemar_p_value']:.2e}`)** |
-| **Pillar 2** (`N=100`) | **Anytime-Valid Conformal Martingale & Streaming Video Early-Exit** | Naive 1-Chunk Exit Acc: `{p2_summary['naive_early_exit_accuracy']:.4f}` (`10.0` full chunks) | **Martingale Early-Exit Acc: `{p2_summary['conformal_martingale_exit_accuracy']:.4f}`** (**`{p2_summary['conformal_martingale_mean_exit_chunks']:.2f}`** chunks) | **`{p2_summary['conformal_compute_saved_pct']:.1f}%` video frames saved (`0.0%` false alarms)** |
+| **Pillar 2** (`N=100`) | **Anytime-Valid Conformal Martingale & Streaming Video Early-Exit** | Naive 1-Chunk Exit Acc: `{p2_summary['naive_early_exit_accuracy']:.4f}` (`10.0` full chunks) | **Martingale Early-Exit Acc: `{p2_summary['conformal_martingale_exit_accuracy']:.4f}`** (**`{p2_summary['conformal_martingale_mean_exit_chunks']:.2f}`** chunks) | **`{p2_summary['conformal_compute_saved_pct']:.1f}%` video frames saved (`{p2_summary['stationary_false_alarm_rate'] * 100:.1f}%` false alarms)** |
 | **Pillar 3** (`N=100`) | **Dense Audio-Visual Event Localization (`AVEL`) & Triangle Spoof Gate** | Naive PoE Fusion Acc: `{p3_summary['naive_poe_accuracy']:.4f}` (Spoof Recall: `{p3_summary['naive_spoof_detection_rate']:.4f}`) | **JSD + Triangle `AVEL` Acc: `{p3_summary['jsd_triangle_avel_accuracy']:.4f}`** (Spoof Recall: **`{p3_summary['v080_spoof_detection_rate']:.4f}`**) | **`+{p3_summary['jsd_triangle_avel_accuracy'] - p3_summary['naive_poe_accuracy']:.4f}` acc (`p={p3_summary['mcnemar_p_value']:.2e}`)** |
 | **Pillar 4** (`N=100`) | **Submodular Keyframe & RIFF WAV Spectrogram Contact Sheet (`ST-SoM`)** | Additive Top-4 Facet Recall: `{p4_summary['additive_top_b_facet_recall']:.4f}` (Strided: `{p4_summary['uniform_strided_facet_recall']:.4f}`) | **Submodular `ST-SoM` Recall: `{p4_summary['submodular_stsom_facet_recall']:.4f}`** (Coverage: **`{p4_summary['submodular_temporal_coverage_ratio']:.4f}`**) | **`+{p4_summary['submodular_stsom_facet_recall'] - p4_summary['additive_top_b_facet_recall']:.4f}` facet recall (`p={p4_summary['mcnemar_p_value']:.2e}`)** |
 
----
-
-## Pillar 1: Full-Duplex Turn-Taking (`VAP`)
+## Pillar 1 Full-Duplex Turn-Taking (`VAP`)
 
 | Turn-Taking Policy | Action Accuracy | False Interruption Rate on Cognitive Pauses | Mean Expected Asymmetric Risk | Server p50 Latency |
 | :--- | :---: | :---: | :---: | :---: |
-| Fixed `500 ms` Acoustic VAD Threshold | `{p1_summary['fixed_vad_accuracy']:.4f}` | `0.6667` | `2.1420` | `12.0 ms` |
+| Fixed `200 ms` Acoustic VAD Threshold | `{p1_summary['fixed_vad_accuracy']:.4f}` | `{p1_summary['fixed_vad_false_interruption_rate']:.4f}` | `{p1_summary['fixed_vad_mean_expected_loss']:.4f}` | `12.0 ms` |
 | Raw Stage-1 `/v1/systemone` Argmax | `{p1_summary['raw_stage1_accuracy']:.4f}` | `{p1_summary['raw_false_interruption_rate']:.4f}` | `{p1_summary['raw_mean_expected_loss']:.4f}` | `55.0 ms` |
 | **Cost-Sensitive Conformal VAP (`v0.8.0`)** | **`{p1_summary['calibrated_vap_accuracy']:.4f}`** | **`{p1_summary['calibrated_vap_false_interruption_rate']:.4f}`** | **`{p1_summary['calibrated_vap_mean_expected_loss']:.4f}`** | **`58.4 ms`** |
 
-## Pillar 2: Conformal Martingale Video Early-Exit
+## Pillar 2 Conformal Martingale Video Early-Exit
 
 | Streaming Video Policy | Held-Out Accuracy | Mean Evaluated Chunks (of `10`) | Compute / Frames Saved | Shift Anomaly Recall | Stationary False-Alarm Rate |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | Exhaustive Full-Clip Readout (`10` chunks) | `{p2_summary['exhaustive_full_stream_accuracy']:.4f}` | `10.00` | `0.00%` | `-` | `-` |
-| Naive Uncalibrated Single-Chunk Exit | `{p2_summary['naive_early_exit_accuracy']:.4f}` | `{p2_summary['naive_mean_exit_chunks']:.2f}` | `88.00%` | `0.0000` | `0.3333` |
+| Naive Uncalibrated Single-Chunk Exit | `{p2_summary['naive_early_exit_accuracy']:.4f}` | `{p2_summary['naive_mean_exit_chunks']:.2f}` | `{p2_summary['naive_compute_saved_pct']:.2f}%` | `0.0000` | `-` |
 | **Anytime-Valid Conformal Martingale (`v0.8.0`)** | **`{p2_summary['conformal_martingale_exit_accuracy']:.4f}`** | **`{p2_summary['conformal_martingale_mean_exit_chunks']:.2f}`** | **`{p2_summary['conformal_compute_saved_pct']:.2f}%`** | **`{p2_summary['shift_anomaly_recall']:.4f}`** | **`{p2_summary['stationary_false_alarm_rate']:.4f}`** |
 
-## Pillar 3: Audio-Visual Event Agreement (`AVEL`)
+## Pillar 3 Audio-Visual Event Agreement (`AVEL`)
 
 | Cross-Modal Policy | 4-Regime Joint Accuracy | Spoof / Conflict Quarantine Recall | Handles Off-Screen Audio Events? | Handles Silent Visual Events? |
 | :--- | :---: | :---: | :---: | :---: |
 | Audio-Only Readout | `{p3_summary['audio_only_accuracy']:.4f}` | `0.0000` | Yes | No |
 | Visual-Only Readout | `{p3_summary['visual_only_accuracy']:.4f}` | `0.0000` | No | Yes |
 | Naive Unweighted Product-of-Experts (`PoE`) | `{p3_summary['naive_poe_accuracy']:.4f}` | `{p3_summary['naive_spoof_detection_rate']:.4f}` | No (diluted by visual background) | No (diluted by audio background) |
-| **Cross-Modal `JSD` + Triangle `AVEL` (`v0.8.0`)** | **`{p3_summary['jsd_triangle_avel_accuracy']:.4f}`** | **`{p3_summary['v080_spoof_detection_rate']:.4f}`** | **Yes (`96.0%`)** | **Yes (`96.0%`)** |
+| **Cross-Modal `JSD` + Triangle `AVEL` (`v0.8.0`)** | **`{p3_summary['jsd_triangle_avel_accuracy']:.4f}`** | **`{p3_summary['v080_spoof_detection_rate']:.4f}`** | **Yes (`{p3_summary['v080_offscreen_audio_accuracy'] * 100:.1f}%`)** | **Yes (`{p3_summary['v080_silent_visual_accuracy'] * 100:.1f}%`)** |
 
-## Pillar 4: Submodular Spatio-Temporal Contact Sheet (`ST-SoM`)
+## Pillar 4 Submodular Spatio-Temporal Contact Sheet (`ST-SoM`)
 
 | Frame & Spectrogram Selection Policy | Distinct Event-Facet Recall (`B = 4`) | Temporal Coverage Ratio | Compiled Contact Sheet Resolution | Lossless PNG Size |
 | :--- | :---: | :---: | :---: | :---: |
-| Uniform Strided Sampling (`0, 4, 8, 11`) | `{p4_summary['uniform_strided_facet_recall']:.4f}` | `0.6120` | `320x102` | `{p4_summary['compiled_sheet_png_bytes']} B` |
-| Additive Top-4 Hesitation Sampling | `{p4_summary['additive_top_b_facet_recall']:.4f}` | `0.5480` | `320x102` | `{p4_summary['compiled_sheet_png_bytes']} B` |
+| Uniform Strided Sampling (`0, 4, 8, 11`) | `{p4_summary['uniform_strided_facet_recall']:.4f}` | `-` | `{p4_summary['compiled_sheet_dimensions']}` | `{p4_summary['compiled_sheet_png_bytes']} B` |
+| Additive Top-4 Hesitation Sampling | `{p4_summary['additive_top_b_facet_recall']:.4f}` | `-` | `{p4_summary['compiled_sheet_dimensions']}` | `{p4_summary['compiled_sheet_png_bytes']} B` |
 | **Submodular Spatio-Temporal `ST-SoM` (`v0.8.0`)** | **`{p4_summary['submodular_stsom_facet_recall']:.4f}`** | **`{p4_summary['submodular_temporal_coverage_ratio']:.4f}`** | **`{p4_summary['compiled_sheet_dimensions']}`** | **`{p4_summary['compiled_sheet_png_bytes']} B`** |
 
 ## Scope Boundaries, Trade-Offs, & Limitations
 
-Cost-sensitive Conformal `VAP` outperforms raw `/v1/systemone` argmax readout by `+{p1_summary['calibrated_vap_accuracy'] - p1_summary['raw_stage1_accuracy']:.4f}` accuracy (exact McNemar `p-value` $= {p1_summary['mcnemar_p_value']:.2e}$, reducing Brier and ECE calibration error) and cuts false barge-in interruptions on cognitive pauses from `{p1_summary['raw_false_interruption_rate']:.2%}` to `{p1_summary['calibrated_vap_false_interruption_rate']:.2%}`, whereas Anytime-Valid Conformal Martingale early exit ($\\alpha = 0.05$) saves `{p2_summary['conformal_compute_saved_pct']:.1f}%` of video chunk evaluations with `0.0%` stationary false alarms under Ville's maximal inequality.
+Cost-sensitive Conformal `VAP` outperforms raw `/v1/systemone` argmax readout by `+{p1_summary['calibrated_vap_accuracy'] - p1_summary['raw_stage1_accuracy']:.4f}` accuracy (exact McNemar `p-value` $= {p1_summary['mcnemar_p_value']:.2e}$, reducing Brier and ECE calibration error) and cuts false barge-in interruptions on cognitive pauses from `{p1_summary['raw_false_interruption_rate']:.2%}` to `{p1_summary['calibrated_vap_false_interruption_rate']:.2%}`, whereas Anytime-Valid Conformal Martingale early exit ($\\alpha = 0.05$) saves `{p2_summary['conformal_compute_saved_pct']:.1f}%` of video chunk evaluations with `{p2_summary['stationary_false_alarm_rate'] * 100:.1f}%` stationary false alarms under Ville's maximal inequality.
 
-- **Limitations & Failure Modes**: Pure-stdlib Goertzel spectral extraction (`extract_wav_acoustic_features`) targets 4 canonical prosodic/transient bands (`250 Hz`, `1000 Hz`, `2500 Hz`, `4000 Hz`) on 16-bit PCM `WAV` streams; compressed container formats (`MP3`, `AAC`, `Opus`) require linear PCM decoding before invoking the stdlib analyzer. In Pillar 1, pauses exceeding `670 ms` accompanied by prematurely high syntactic completion scores (`>= 0.78`) still cause an `{p1_summary['calibrated_vap_false_interruption_rate']:.2%}` residual false turn-taking rate (`{p1_summary['calibrated_vap_accuracy']:.2%}` overall accuracy), and in Pillar 3 simultaneous low-SNR corruption across both audio and visual channels (`JSD < 0.36`, $s_{{\\triangle,\\text{{AV}}}} < 0.30$) leaves a `4.0%` unflagged spoof residual (`96.0%` recall).
+- **Limitations & Failure Modes**: Pure-stdlib Goertzel spectral extraction (`extract_wav_acoustic_features`) targets 4 canonical prosodic/transient bands (`250 Hz`, `1000 Hz`, `2500 Hz`, `4000 Hz`) on 16-bit PCM `WAV` streams; compressed container formats (`MP3`, `AAC`, `Opus`) require linear PCM decoding before invoking the stdlib analyzer. In Pillar 1, pauses exceeding `670 ms` accompanied by prematurely high syntactic completion scores (`>= 0.78`) still cause an `{p1_summary['calibrated_vap_false_interruption_rate']:.2%}` residual false turn-taking rate (`{p1_summary['calibrated_vap_accuracy']:.2%}` overall accuracy), and in Pillar 3 simultaneous low-SNR corruption across both audio and visual channels (`JSD < 0.36`, $s_{{\\triangle,\\text{{AV}}}} < 0.30$) leaves a `{(1.0 - p3_summary['v080_spoof_detection_rate']) * 100:.1f}%` unflagged spoof residual (`{p3_summary['v080_spoof_detection_rate'] * 100:.1f}%` recall).
 """
     (RESULTS_DIR / "audio_video_v080_report.md").write_text(report_md, encoding="utf-8")
     return results

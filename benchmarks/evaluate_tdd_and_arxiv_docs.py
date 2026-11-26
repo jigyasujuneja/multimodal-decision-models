@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 Google LLC / Jigyasu Juneja
+# Copyright 2026 Jigyasu Juneja
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,16 +17,13 @@
 
 Synthesizes open engineering and academic style checklists into a single domain-agnostic,
 scalable evaluation harness supporting Markdown (`.md`), Typst (`.typ`), and LaTeX (`.tex`):
-  1. `paper-writing-style` & `claudeisms` (LLM stylistic tic detector, scientific paper workflow, and venue checklists)
-  2. `design-doc-readability` (14-Point Design Doc Readability & Clean Prose Checklist)
-  3. `writing-guidelines` (Heading/Table Budgets & Plan-to-Doc Abstraction Firewall)
-  4. `judgement-doc` (Feynman Whiteboard Defense, First-Principles
-     Trade-Offs, 4 Marks of AI Slop, Contradiction Scan, Retrieve-or-Refuse Metric Provenance)
-  5. `speak-like-tl` & `technical-writing` (Executive clarity, technical writing, and document hygiene checklists)
-  6. `academic-paper-reviewer` & `document_review` (Math dimensional consistency, BibTeX
-     citation resolution, anonymity/confidentiality, and 3-persona adversarial review)
-  7. `golden-eval-judge-audit` (Calibrated LLM-as-a-Judge rubric where LLM leniency cannot
-     override deterministic gate failures)
+  1. Scientific prose hygiene (deterministic LLM stylistic tic detection, active voice, and venue checklists)
+  2. Technical design doc readability (14-point design clarity and clean prose criteria)
+  3. Structural budgets (heading/table density budgets and plan-to-doc abstraction firewall)
+  4. First-principles rigor (whiteboard defense, explicit trade-offs, contradiction checks, and provenance)
+  5. Executive clarity (concise plain-English engineering writing and document hygiene)
+  6. Peer-review readiness (math dimensional consistency, BibTeX resolution, anonymity, and 3-persona review)
+  7. Calibration-guarded judging (deterministic gate failures cannot be overridden by LLM leniency)
 
 Every gate outputs a strict binary `1` (Meets Bar) or `0` (Fails Bar).
 The overall document score is the logical AND (`min`) across all 14 gates (`14/14 -> 1`, else `0`).
@@ -35,12 +32,15 @@ The overall document score is the logical AND (`min`) across all 14 gates (`14/1
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+import urllib.error
+import urllib.request
 
 
 # ==============================================================================
@@ -48,7 +48,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ==============================================================================
 
 # Severity 3 (High-confidence LLM giveaway tics - strictly 0 allowed in narrative prose)
-CLAUDEISMS_SEV3_PATTERNS: List[Tuple[str, str]] = [
+LLM_TIC_SEV3_PATTERNS: list[tuple[str, str]] = [
     (r"\b[Dd]elve(?:s|d|ing)?\b", "vocab-delve: delve"),
     (r"\b(?:[Tt]apestr(?:y|ies)|rich\s+tapestry)\b", "vocab-tapestry: tapestry"),
     (r"\b[Pp]ivotal\b", "vocab-pivotal: pivotal"),
@@ -84,7 +84,7 @@ CLAUDEISMS_SEV3_PATTERNS: List[Tuple[str, str]] = [
 ]
 
 # Severity 2 (Inflated promotional vocabulary, copulative evasion, zombie nouns)
-CLAUDEISMS_SEV2_PATTERNS: List[Tuple[str, str]] = [
+LLM_TIC_SEV2_PATTERNS: list[tuple[str, str]] = [
     (
         r"\b(?:[Bb]eacon|[Cc]ornerstone|[Ss]ymphony|[Tt]ransformative|[Gg]roundbreaking|[Gg]ame-changing|[Cc]utting-edge|[Pp]aradigm\s+shift|[Ss]ynergy|[Hh]olistic|[Mm]eticulous|[Mm]ultifaceted|[Oo]verarching|[Pp]aramount|[Ii]ndispensable)\b",
         "vocab-puffery: inflated AI adjective/noun",
@@ -111,23 +111,54 @@ CLAUDEISMS_SEV2_PATTERNS: List[Tuple[str, str]] = [
     ),
 ]
 
-# Internal agent, level, or client leakage patterns (strictly 0 allowed)
-META_AND_CLIENT_LEAKAGE_PATTERNS: List[Tuple[str, str]] = [
-    (r"\bJetski\b", "agent_leak: internal agent codename 'Jetski'"),
-    (r"\bGDM-caliber\b|\bGDM\s+caliber\b", "meta_leak: 'GDM-caliber' self-label"),
-    (r"\bL8\s+(?:GDM|Research|GenAI|Principal)\b", "meta_leak: internal level label 'L8 ...'"),
-    (r"\bBoltzbit\b", "client_leak: Boltzbit"),
-    (r"\bUnilever\b", "client_leak: Unilever"),
-    (r"\bHUL\b", "client_leak: HUL"),
-    (r"ul-fs-s-sandbx-16-prj", "client_leak: GCP sandbox project ID"),
-    (r"\bProject\s+Aegis\b", "client_leak: internal codename Project Aegis"),
+# Generic meta-prompt and internal-proxy leak patterns (strictly 0 allowed).
+META_AND_CLIENT_LEAKAGE_PATTERNS: list[tuple[str, str]] = [
+    (r"\bL[6-9]\s+(?:Research|GenAI|Principal|Staff|SWE)\b", "meta_leak: internal career level label"),
     (r"80%\s+of\s+the\s+way", "meta_prompt_leak: conversational prompt phrase '80% of the way'"),
-    (r"\." + "uplink" + r"\.goog", "proxy_leak: internal uplink proxy domain"),
-    ("artifact" + "-foundry", "proxy_leak: internal package mirror hostname"),
+    (r"\.[a-z0-9-]+\.goog\b", "proxy_leak: internal .goog proxy domain"),
 ]
 
+# SHA-256 digests of lowercase restricted internal/client tokens and compound host
+# bigrams so this evaluator contains zero literal restricted identifiers.
+RESTRICTED_TOKEN_SHA256: frozenset[str] = frozenset(
+    {
+        "9918f0455cefecd78b99a6d8daf7da74732ccd50fdbafda860ecc0f050f2e725",
+        "bbf997173d125ed48a1c6b9888e4f594245381b679cc44e651f964d18940d092",
+        "a38c2d7bfc423b198f0e188e4d988bc1b8e8c107a760f9f66a2fc7e9b5b4ede5",
+        "03fe7af632b170c39ca385e5f085b9f07ace99ce1edb6c9c4b541ad320b57d2b",
+        "ebd8de38e4a70bc8b0fa11982ebe5c38d12b528bd3d0081c57f50412dcfe792b",
+        "598f7a741a1e3a05654d346033571fda567af6dc2bf099b34b930171519d995f",
+        "03c7909a40d39f970672583e1ef91e4ff68a733007faa80cd754bee272fb682f",
+        "8220a7d77b2d0afc8b035f40ee37ba8a45a93cd0005daf7deae6ea83d283c29c",
+        "97b88d712509ef740e2fef2844b7ffadf47e7eea02bb2d6f89a35ffb030a87ae",
+        "61fc8ab7307d1b416ad49370b10fc1f104acacb13940771e560c6df4142e42bd",
+    }
+)
+
+
+def _find_restricted_token_leaks(raw_text: str) -> list[tuple[int, str, str]]:
+    """Scan lines for SHA-256-hashed restricted internal/client tokens or bigrams."""
+    hits: list[tuple[int, str, str]] = []
+    for line_no, line in enumerate(raw_text.splitlines(), start=1):
+        lowered = line.lower()
+        candidates: set[str] = set(re.findall(r"[a-z0-9]+", lowered))
+        for compound in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)+", lowered):
+            parts = compound.split("-")
+            for idx in range(len(parts) - 1):
+                candidates.add(f"{parts[idx]}-{parts[idx + 1]}")
+        for dotted in re.findall(r"[a-z0-9]+(?:\.[a-z0-9]+)+", lowered):
+            parts = dotted.split(".")
+            for idx in range(len(parts) - 1):
+                candidates.add(f"{parts[idx]}.{parts[idx + 1]}")
+        for token in candidates:
+            digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if digest in RESTRICTED_TOKEN_SHA256:
+                hits.append((line_no, line.strip()[:120], f"restricted_token_leak: {token!r}"))
+                break
+    return hits
+
 # Stale model alias patterns & retired synthetic benchmark model names (strictly 0 allowed)
-STALE_OR_SYNTHETIC_MODEL_PATTERNS: List[Tuple[str, str]] = [
+STALE_OR_SYNTHETIC_MODEL_PATTERNS: list[tuple[str, str]] = [
     (r"gemini-2\.5-flash-lite", "stale_model: gemini-2.5-flash-lite (use gemini-3.5-flash-lite)"),
     (r"gemini-2\.5-flash\b", "stale_model: gemini-2.5-flash (use gemini-3.5-flash)"),
     (r"Claude-3\.7-Sonnet-Dirichlet-M5", "synthetic_model_leak: retired synthetic v0.5.0 model name"),
@@ -136,7 +167,7 @@ STALE_OR_SYNTHETIC_MODEL_PATTERNS: List[Tuple[str, str]] = [
 ]
 
 # Stale MDM-Bench v0.5.0 synthetic numbers that were superseded by 100% real receipts
-STALE_MDM_BENCH_METRIC_PATTERNS: List[Tuple[str, str]] = [
+STALE_MDM_BENCH_METRIC_PATTERNS: list[tuple[str, str]] = [
     (r"62\.50%\s*\(marginal\s+RAPS\)|rare-tail\s+coverage\s+from\s+`?62\.50%`?", "stale_metric: old synthetic Mondrian rare-tail baseline 62.50% (real is 58.75% -> 88.75%)"),
     (r"66\.25%\s*4-slot\s+coverage|from\s+`?66\.25%`?\s*\(uncorrected", "stale_metric: old synthetic 4-slot coverage 66.25% (real is 68.00% -> 90.25% / 90.50%)"),
     (r"flip\s+rate\s+from\s+`?16\.25%`?\s+to\s+`?6\.00%`?", "stale_metric: old synthetic PriDe flip rate 16.25% -> 6.00% (real is 10.25% -> 6.50%)"),
@@ -212,9 +243,9 @@ def find_line_matches(
     suffix: str = ".md",
     ignore_code_and_quotes: bool = True,
     scan_inside_code_blocks: bool = False,
-) -> List[Tuple[int, str]]:
+) -> list[tuple[int, str]]:
     """Find line numbers and snippets matching a regex pattern, skipping code/math/table-header blocks."""
-    matches: List[Tuple[int, str]] = []
+    matches: list[tuple[int, str]] = []
     in_code = False
     in_env = False
     in_typ_figure = 0
@@ -264,9 +295,9 @@ def find_line_matches(
     return matches
 
 
-def _verify_markdown_links(path: Path, raw_text: str) -> List[str]:
+def _verify_markdown_links(path: Path, raw_text: str) -> list[str]:
     """Verify that relative file links and file:/// links resolve on disk."""
-    broken: List[str] = []
+    broken: list[str] = []
     in_code = False
     for line in raw_text.splitlines():
         if line.strip().startswith("```"):
@@ -295,7 +326,7 @@ def _verify_markdown_links(path: Path, raw_text: str) -> List[str]:
     return broken
 
 
-def _verify_bib_citations(path: Path, raw_text: str, suffix: str) -> Tuple[int, List[str]]:
+def _verify_bib_citations(path: Path, raw_text: str, suffix: str) -> tuple[int, list[str]]:
     """Verify that all @citation keys in .typ or \\cite{} keys in .tex resolve in refs.bib."""
     bib_candidates = [
         path.parent / "refs.bib",
@@ -327,26 +358,27 @@ def _verify_bib_citations(path: Path, raw_text: str, suffix: str) -> Tuple[int, 
     return len(cited_keys), missing
 
 
-def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]:
+def evaluate_document(path: Path, run_llm_judge: bool = False) -> dict[str, Any]:
     """Run all 14 binary (1/0) gates across the 7 pillars on a single document."""
     raw_text = path.read_text(encoding="utf-8")
     suffix = path.suffix.lower()
     archetype = detect_archetype(path, raw_text)
     prose_text = strip_code_and_math_for_prose(raw_text, suffix)
 
-    gates: Dict[str, Dict[str, Any]] = {}
+    gates: dict[str, dict[str, Any]] = {}
 
     # --------------------------------------------------------------------------
     # PILLAR 1: TASTE (G1, G2)
     # --------------------------------------------------------------------------
     # G1: Respectful Terminology ("existing" over "legacy") & Zero Meta/Agent/Client Leakage
     legacy_hits = find_line_matches(raw_text, r"\b[Ll]egacy\b", suffix=suffix)
-    leak_hits: List[Tuple[int, str, str]] = []
+    leak_hits: list[tuple[int, str, str]] = []
     for pat, label in META_AND_CLIENT_LEAKAGE_PATTERNS:
         for ln, snippet in find_line_matches(
             raw_text, pat, suffix=suffix, ignore_code_and_quotes=False, scan_inside_code_blocks=True
         ):
             leak_hits.append((ln, snippet, label))
+    leak_hits.extend(_find_restricted_token_leaks(raw_text))
 
     g1_pass = 1 if (len(legacy_hits) == 0 and len(leak_hits) == 0) else 0
     gates["G1_taste_terminology_and_anonymity"] = {
@@ -386,21 +418,21 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     }
 
     # --------------------------------------------------------------------------
-    # PILLAR 2: WRITING & ANTI-SLOP (G3, G4)
+    # PILLAR 2: WRITING & PROSE CLARITY (G3, G4)
     # --------------------------------------------------------------------------
     # G3: Zero LLM Stylistic Tells & Zombie Nouns (deterministic prose tic detector)
-    sev3_hits: List[Tuple[int, str, str]] = []
-    for pat, label in CLAUDEISMS_SEV3_PATTERNS:
+    sev3_hits: list[tuple[int, str, str]] = []
+    for pat, label in LLM_TIC_SEV3_PATTERNS:
         for ln, snippet in find_line_matches(raw_text, pat, suffix=suffix):
             sev3_hits.append((ln, snippet, label))
 
-    sev2_hits: List[Tuple[int, str, str]] = []
-    for pat, label in CLAUDEISMS_SEV2_PATTERNS:
+    sev2_hits: list[tuple[int, str, str]] = []
+    for pat, label in LLM_TIC_SEV2_PATTERNS:
         for ln, snippet in find_line_matches(raw_text, pat, suffix=suffix):
             sev2_hits.append((ln, snippet, label))
 
     g3_pass = 1 if (len(sev3_hits) == 0 and len(sev2_hits) == 0) else 0
-    gates["G3_writing_zero_claudeisms_and_ai_slop"] = {
+    gates["G3_writing_zero_llm_tics_and_puffery"] = {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": g3_pass,
@@ -422,7 +454,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
         )
         if not raw_text.splitlines()[ln - 1].strip().startswith("|")
     ]
-    raw_arrow_hits: List[Tuple[int, str]] = []
+    raw_arrow_hits: list[tuple[int, str]] = []
     for ln, snippet in find_line_matches(raw_text, r"(?<=\s)->(?=\s)", suffix=suffix):
         line_str = raw_text.splitlines()[ln - 1].strip()
         if not line_str.startswith(("#", "|", "-", "*", "\\", "=", "//")):
@@ -487,7 +519,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     }
 
     # G6: Cross-Document Model & Metric Parity (Zero stale/synthetic model drift or stale MDM-Bench numbers)
-    stale_hits: List[Tuple[int, str, str]] = []
+    stale_hits: list[tuple[int, str, str]] = []
     for pat, label in STALE_OR_SYNTHETIC_MODEL_PATTERNS + STALE_MDM_BENCH_METRIC_PATTERNS:
         for ln, snippet in find_line_matches(
             raw_text, pat, suffix=suffix, ignore_code_and_quotes=False, scan_inside_code_blocks=True
@@ -649,7 +681,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
         table_count = len(re.findall(r"(?m)^\|[-:| ]+\|$", raw_text))
         has_compiled_pdf = True
 
-    unbalanced_math_lines: List[int] = []
+    unbalanced_math_lines: list[int] = []
     if suffix in (".md", ".tex"):
         in_code_blk = False
         in_display_math = False
@@ -721,7 +753,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     # --------------------------------------------------------------------------
     # PILLAR 7: POLISH & 3-PERSONA LLM JUDGE (G13, G14)
     # --------------------------------------------------------------------------
-    # G14: Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall
+    # G14: Cold-Reader Self-Containment & Abstraction Firewall
     plan_leak_hits = find_line_matches(
         raw_text,
         r"(?i)\b(?:User\s+Request:|Step\s+\d+\.\d+:|Task\s+\d+:|In\s+this\s+PR\s+we|In\s+this\s+CL\s+we)\b",
@@ -732,9 +764,9 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
         re.search(r"(?m)^(?:#|=|\\title|\\section)", raw_text[:1500])
     )
     g14_pass = 1 if (len(plan_leak_hits) == 0 and has_self_contained_opening) else 0
-    gates["G14_polish_goldfish_self_containment_and_firewall"] = {
+    gates["G14_polish_self_containment_and_abstraction_firewall"] = {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": g14_pass,
         "details": {
             "plan_leak_count": len(plan_leak_hits),
@@ -744,7 +776,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     }
 
     # G13: 3-Persona Adversarial Review Judge (Theory Specialist + Empirical Practitioner + Principal Architect)
-    # Grounded in `paper-writing-style` Phase 5 + `golden-eval-judge-audit` calibration guard
+    # Enforces a calibration guard so LLM leniency cannot override deterministic failures.
     theory_persona_pass = (g7_pass == 1 and g11_pass == 1) and bool(
         re.search(
             r"(?i)\b(?:simplex|conformal|entropy|hesitation|dirichlet|brier|posterior|quantile|submodular|polytope|bandit|covariance|theorem|proposition|invariant)\b",
@@ -754,13 +786,13 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     empirical_persona_pass = (g5_pass == 1 and g6_pass == 1 and g8_pass == 1)
     architect_persona_pass = (g1_pass == 1 and g2_pass == 1 and g3_pass == 1 and g4_pass == 1 and g9_pass == 1 and g10_pass == 1 and g14_pass == 1)
 
-    llm_judge_verdict: Optional[Dict[str, Any]] = None
+    llm_judge_verdict: dict[str, Any] | None = None
     if run_llm_judge:
         llm_judge_verdict = call_live_llm_judge(path.name, archetype, raw_text[:12000])
 
     deterministic_3persona_pass = 1 if (theory_persona_pass and empirical_persona_pass and architect_persona_pass) else 0
     if llm_judge_verdict and "overall_pass" in llm_judge_verdict:
-        # Calibration guard (`golden-eval-judge-audit`): LLM judge cannot override a deterministic failure
+        # Calibration guard: LLM judge cannot override a deterministic failure.
         g13_pass = 1 if (deterministic_3persona_pass == 1 and llm_judge_verdict["overall_pass"] == 1) else 0
     else:
         g13_pass = deterministic_3persona_pass
@@ -781,7 +813,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     total_gates = len(gates)
     overall_binary_score = 1 if total_passed == total_gates else 0
 
-    pillars_summary: Dict[str, int] = {}
+    pillars_summary: dict[str, int] = {}
     for g in gates.values():
         p = g["pillar"]
         pillars_summary[p] = pillars_summary.get(p, 1) & g["score"]
@@ -798,7 +830,7 @@ def evaluate_document(path: Path, run_llm_judge: bool = False) -> Dict[str, Any]
     }
 
 
-def call_live_llm_judge(filename: str, archetype: str, excerpt: str) -> Dict[str, Any]:
+def call_live_llm_judge(filename: str, archetype: str, excerpt: str) -> dict[str, Any]:
     """Optional live LLM-as-a-Judge call via Vertex AI / Gemini API when credentials are present."""
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -807,26 +839,31 @@ def call_live_llm_judge(filename: str, archetype: str, excerpt: str) -> Dict[str
             "note": "Evaluated via deterministic 3-persona calibration-guarded rubric (set GEMINI_API_KEY for live API call).",
         }
     try:
-        import urllib.request
-
         prompt = (
             "You are a strict binary (1/0) LLM Judge evaluating a technical design document or arXiv paper "
             f"('{filename}', archetype='{archetype}') across 3 adversarial personas:\n"
             "1. Theory Specialist: Are equations/mechanisms dimensionally sound, properly bounded, and paired with clear operational restatements?\n"
             "2. Empirical Practitioner: Are baselines named, sample sizes (N) and proper scoring / significance metrics explicit, and claims grounded in real data?\n"
-            "3. Principal Architect: Is the prose free of AI slop ('delve', 'pivotal', 'tapestry', 'legacy'), decisive in trade-offs, and self-contained for a cold reader?\n\n"
+            "3. Principal Architect: Is the prose free of LLM stylistic tics ('delve', 'pivotal', 'tapestry', 'legacy'), decisive in trade-offs, and self-contained for a cold reader?\n\n"
             "Respond ONLY with valid JSON: "
             '{"theory_pass": 1, "empirical_pass": 1, "architect_pass": 1, "overall_pass": 1, "rationale": "one sentence summary"}\n\n'
             f"DOCUMENT EXCERPT:\n{excerpt[:6000]}"
         )
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key={api_key}"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-pro:generateContent"
         payload = json.dumps(
             {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
             }
         ).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+        )
         with urllib.request.urlopen(req, timeout=15.0) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         text_resp = body["candidates"][0]["content"]["parts"][0]["text"]
@@ -834,7 +871,16 @@ def call_live_llm_judge(filename: str, archetype: str, excerpt: str) -> Dict[str
         if isinstance(parsed, dict) and "overall_pass" in parsed:
             parsed["judge_mode"] = "live_gemini_api"
             return parsed
-    except Exception as exc:
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        json.JSONDecodeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ) as exc:
         return {
             "judge_mode": "calibrated_deterministic_3persona",
             "note": f"Live API call skipped ({type(exc).__name__}); verified via deterministic 3-persona rubric.",
@@ -842,9 +888,9 @@ def call_live_llm_judge(filename: str, archetype: str, excerpt: str) -> Dict[str
     return {"judge_mode": "calibrated_deterministic_3persona"}
 
 
-def format_markdown_report(results: List[Dict[str, Any]]) -> str:
+def format_markdown_report(results: list[dict[str, Any]]) -> str:
     """Render a clean Markdown scorecard table across all evaluated documents."""
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("# Scalable TDD & arXiv Research Paper Binary (`1/0`) Evaluation Report")
     lines.append("")
     lines.append(
@@ -855,12 +901,12 @@ def format_markdown_report(results: List[Dict[str, Any]]) -> str:
     for r in results:
         g = r["gates"]
         c_taste = f"{g['G1_taste_terminology_and_anonymity']['score']}/{g['G2_taste_decisive_stance_and_negative_space']['score']}"
-        c_writ = f"{g['G3_writing_zero_claudeisms_and_ai_slop']['score']}/{g['G4_writing_punctuation_and_active_voice']['score']}"
+        c_writ = f"{g['G3_writing_zero_llm_tics_and_puffery']['score']}/{g['G4_writing_punctuation_and_active_voice']['score']}"
         c_fact = f"{g['G5_factuality_statistical_and_quantitative_rigor']['score']}/{g['G6_factuality_model_and_metric_consistency']['score']}"
         c_grnd = f"{g['G7_groundedness_claim_to_proof_and_zero_placeholders']['score']}/{g['G8_groundedness_citations_and_baselines']['score']}"
         c_strc = f"{g['G9_structure_archetype_and_intuitive_restatement']['score']}/{g['G10_structure_heading_and_paragraph_pacing']['score']}"
         c_fmt = f"{g['G11_formatting_tables_and_math_hygiene']['score']}/{g['G12_formatting_publication_visuals_and_zero_ascii_art']['score']}"
-        c_pol = f"{g['G13_polish_three_persona_llm_judge']['score']}/{g['G14_polish_goldfish_self_containment_and_firewall']['score']}"
+        c_pol = f"{g['G13_polish_three_persona_llm_judge']['score']}/{g['G14_polish_self_containment_and_abstraction_firewall']['score']}"
         lines.append(
             f"| `{r['filename']}` | `{r['archetype']}` | **{c_taste}** | **{c_writ}** | **{c_fact}** | **{c_grnd}** | **{c_strc}** | **{c_fmt}** | **{c_pol}** | **{r['gates_passed']}/{r['gates_total']}** | **{r['overall_binary_score']}** |"
         )
@@ -876,12 +922,12 @@ def format_markdown_report(results: List[Dict[str, Any]]) -> str:
         if failed_gates:
             lines.append(f"### Gate Failures in `{r['filename']}` (`{r['file']}`)")
             for k, v in failed_gates:
-                lines.append(f"- **`{k}` ({v['name']})**: `0` — `{json.dumps(v['details'])}`")
+                lines.append(f"- **`{k}` ({v['name']})**: `0`: `{json.dumps(v['details'])}`")
             lines.append("")
     return "\n".join(lines)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Evaluate TDDs and arXiv papers (.md, .typ, .tex) on 14 binary (1/0) gates across 7 pillars."
     )
@@ -891,7 +937,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--md-out", type=str, default="", help="Optional path to save Markdown evaluation report.")
     args = parser.parse_args(argv)
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for p_str in args.paths:
         p = Path(p_str)
         if not p.exists():

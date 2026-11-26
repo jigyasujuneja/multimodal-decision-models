@@ -80,13 +80,13 @@ class TestV060RealPublicBenchmarksAndArxiv2610(unittest.TestCase):
         self.assertEqual(len(code_map), 255)
         self.assertIn("Reply with the option code only.", prompt)
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"question has 257 options, exceeding extended"):
             build_extended_255_code_bijection([f"x_{i}" for i in range(257)])
 
     def test_unstripped_think_tag_leakage_raises_logprob_alignment_error(self) -> None:
         # When enable_thinking=False is omitted on a hybrid model, <think> dominates top_logprobs
         leaked = {"<think>": -0.05, "A": -3.50, "B": -4.20}
-        with self.assertRaises(LogprobAlignmentError):
+        with self.assertRaisesRegex(LogprobAlignmentError, r"thinking token '<think>' dominates first-token"):
             OpenAILogprobBackend.extract_letter_distribution(leaked, {"A": "no", "B": "yes"})
 
         # Normal clean logprobs succeed

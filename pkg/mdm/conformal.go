@@ -73,8 +73,8 @@ type ConformalConfig struct {
 	AbstainKeys []string   `json:"abstain_keys,omitempty"` // opt-in abstain/catch-all keys; empty/nil disables automatic abstain escalation
 }
 
-// HmacUint64 returns the big-endian uint64 unpacked from the first 8 bytes of HMAC-SHA256(seedKey, itemKey+"\x00"+tag).
-func HmacUint64(seedKey, itemKey, tag string) uint64 {
+// HMACUint64 returns the big-endian uint64 unpacked from the first 8 bytes of HMAC-SHA256(seedKey, itemKey+"\x00"+tag).
+func HMACUint64(seedKey, itemKey, tag string) uint64 {
 	effectiveKey := seedKey
 	if effectiveKey == "" {
 		effectiveKey = DefaultConformalSeedKey
@@ -87,14 +87,28 @@ func HmacUint64(seedKey, itemKey, tag string) uint64 {
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
-// HmacUniformFloat64 draws a stateless Uniform[0, 1) float64 with 53-bit mantissa precision matching Python and TypeScript.
-func HmacUniformFloat64(seedKey, itemKey, tag string) float64 {
-	top53 := HmacUint64(seedKey, itemKey, tag) >> 11
+// HmacUint64 is a compatibility alias for HMACUint64.
+//
+// Deprecated: Use HMACUint64 instead.
+func HmacUint64(seedKey, itemKey, tag string) uint64 {
+	return HMACUint64(seedKey, itemKey, tag)
+}
+
+// HMACUniformFloat64 draws a stateless Uniform[0, 1) float64 with 53-bit mantissa precision matching Python and TypeScript.
+func HMACUniformFloat64(seedKey, itemKey, tag string) float64 {
+	top53 := HMACUint64(seedKey, itemKey, tag) >> 11
 	return float64(top53) * (1.0 / float64(uint64(1)<<53))
 }
 
+// HmacUniformFloat64 is a compatibility alias for HMACUniformFloat64.
+//
+// Deprecated: Use HMACUniformFloat64 instead.
+func HmacUniformFloat64(seedKey, itemKey, tag string) float64 {
+	return HMACUniformFloat64(seedKey, itemKey, tag)
+}
+
 func drawStatelessHMACOrderAndU(groups [][]string, seedKey, itemKey string) (float64, []string) {
-	uDraw := HmacUniformFloat64(seedKey, itemKey, "u")
+	uDraw := HMACUniformFloat64(seedKey, itemKey, "u")
 	flat := make([]string, 0, len(groups)*2)
 	for _, grp := range groups {
 		if len(grp) <= 1 {
@@ -104,8 +118,8 @@ func drawStatelessHMACOrderAndU(groups [][]string, seedKey, itemKey string) (flo
 		shuffled := make([]string, len(grp))
 		copy(shuffled, grp)
 		sort.Slice(shuffled, func(i, j int) bool {
-			hi := HmacUint64(seedKey, itemKey, "tie:"+shuffled[i])
-			hj := HmacUint64(seedKey, itemKey, "tie:"+shuffled[j])
+			hi := HMACUint64(seedKey, itemKey, "tie:"+shuffled[i])
+			hj := HMACUint64(seedKey, itemKey, "tie:"+shuffled[j])
 			if hi != hj {
 				return hi < hj
 			}
@@ -413,7 +427,7 @@ func CalibrateConformalQuantileWithKeys(
 	for i, dist := range calibProbs {
 		ranked, norm, nErr := normalizeAndRankConformalProbs(dist)
 		if nErr != nil {
-			return 0, fmt.Errorf("mdm: calibration item %d: %w", i, nErr)
+			return 0, fmt.Errorf("mdm: calibration item %d: %v", i, nErr)
 		}
 		gold := calibLabels[i]
 		if _, ok := norm[gold]; !ok {
@@ -1037,6 +1051,7 @@ func LabelShiftWeightedConformalPredictionSet(
 
 	var predSet []string
 	maxQ := 0.0
+	seenFiniteQ := false
 	containsAbstain := false
 	for _, cand := range testRanked {
 		rhoCand := 1.0
@@ -1054,8 +1069,11 @@ func LabelShiftWeightedConformalPredictionSet(
 				break
 			}
 		}
-		if !math.IsInf(qY, 0) && qY > maxQ {
-			maxQ = qY
+		if !math.IsInf(qY, 0) {
+			if !seenFiniteQ || qY > maxQ {
+				maxQ = qY
+			}
+			seenFiniteQ = true
 		}
 		if math.IsInf(qY, 1) || testScores[cand] <= qY+1e-12 {
 			predSet = append(predSet, cand)
@@ -1063,6 +1081,9 @@ func LabelShiftWeightedConformalPredictionSet(
 				containsAbstain = true
 			}
 		}
+	}
+	if !seenFiniteQ {
+		maxQ = math.Inf(1)
 	}
 	singleton := len(predSet) == 1
 	return ConformalSet{
@@ -1180,7 +1201,9 @@ func MultiSlotJointConformalSets(
 		}
 		qUse := jointCal.GlobalMaxQHat
 		if useBonferroni {
-			qUse = jointCal.BonferroniQs[sName]
+			if qBonf, hasSlot := jointCal.BonferroniQs[sName]; hasSlot {
+				qUse = qBonf
+			}
 		}
 		cset, err := ConformalPredictionSet(dist, qUse, cfg)
 		if err != nil {

@@ -133,17 +133,39 @@ def binary_auroc(
     positive_scores: Sequence[float],
     negative_scores: Sequence[float],
 ) -> float:
-    """Compute exact tie-aware Wilcoxon-Mann-Whitney AUROC in [0, 1]."""
+    """Compute exact tie-aware Wilcoxon-Mann-Whitney AUROC in [0, 1] in O(N log N) time."""
     if not positive_scores or not negative_scores:
         raise ValueError("positive_scores and negative_scores must both be non-empty")
+    combined: list[tuple[float, int]] = []
+    for raw_score in positive_scores:
+        score = float(raw_score)
+        if not math.isfinite(score):
+            raise ValueError(f"positive_scores must contain finite numbers, got {raw_score!r}")
+        combined.append((score, 1))
+    for raw_score in negative_scores:
+        score = float(raw_score)
+        if not math.isfinite(score):
+            raise ValueError(f"negative_scores must contain finite numbers, got {raw_score!r}")
+        combined.append((score, 0))
+    combined.sort(key=lambda pair: pair[0])
+
     concordant = 0.0
-    for ps in positive_scores:
-        for ns in negative_scores:
-            if ps > ns:
-                concordant += 1.0
-            elif ps == ns:
-                concordant += 0.5
-    return concordant / (len(positive_scores) * len(negative_scores))
+    neg_below = 0
+    idx = 0
+    total_len = len(combined)
+    while idx < total_len:
+        cur_score = combined[idx][0]
+        group_pos = 0
+        group_neg = 0
+        while idx < total_len and combined[idx][0] == cur_score:
+            if combined[idx][1] == 1:
+                group_pos += 1
+            else:
+                group_neg += 1
+            idx += 1
+        concordant += float(group_pos) * (float(neg_below) + 0.5 * float(group_neg))
+        neg_below += group_neg
+    return concordant / float(len(positive_scores) * len(negative_scores))
 
 
 def selective_risk_coverage_aurc(
@@ -684,7 +706,7 @@ def tango_paired_non_inferiority_test(
     z_stat = (float(w - loss_count) + float(n_total) * margin) / math.sqrt(var_h0)
     p_asym = 0.5 * math.erfc(z_stat / math.sqrt(2.0))
 
-    z_gamma = 3.890592
+    z_gamma = _normal_two_sided_z(gamma)
     phat_d = float(d) / float(n_total)
     rad = z_gamma * math.sqrt(max(phat_d * (1.0 - phat_d) / float(n_total), 1e-9)) + 1.0 / (2.0 * float(n_total))
     q_lo = max(margin, phat_d - rad)
@@ -879,12 +901,21 @@ def _student_t_two_sided_p(abs_t: float, df: float) -> float:
 
 
 def _normal_two_sided_z(alpha: float) -> float:
-    """Compute standard normal two-sided upper critical value z_{1 - alpha/2}."""
-    half_alpha = min(0.499999, max(1e-15, 0.5 * float(alpha)))
-    t_val = math.sqrt(-2.0 * math.log(half_alpha))
-    num = 2.515517 + 0.802853 * t_val + 0.010328 * t_val * t_val
-    den = 1.0 + 1.432788 * t_val + 0.189269 * t_val * t_val + 0.001308 * (t_val**3)
-    return max(1e-6, t_val - (num / den))
+    """Compute exact standard normal two-sided upper critical value z_{1 - alpha/2}."""
+    target = min(0.999999999, max(1e-15, float(alpha)))
+    lo = 0.0
+    hi = 10.0
+    inv_sqrt2 = 1.0 / math.sqrt(2.0)
+    while math.erfc(hi * inv_sqrt2) > target and hi < 1e6:
+        lo = hi
+        hi *= 2.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if math.erfc(mid * inv_sqrt2) > target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
 
 
 def _student_t_critical(alpha: float, df: float) -> float:
@@ -1460,7 +1491,7 @@ def paraphrase_conformal_stability_audit(
         max_calib_scores.append(worst_score)
 
     sorted_max = sorted(max_calib_scores)
-    k_rank = math.ceil((n_calib + 1) * (1.0 - alpha))
+    k_rank = max(1, math.ceil((n_calib + 1) * (1.0 - alpha) - 1e-12))
     envelope_q_hat = sorted_max[k_rank - 1] if k_rank <= n_calib else float("inf")
 
     single_all_covered = 0

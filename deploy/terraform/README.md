@@ -6,7 +6,7 @@ This root module provisions a least-privilege Google Cloud reference stack for r
 
 - **Digest-Pinned Images Only**: `orchestrator_container_image` and `vertex_serving_container_image` enforce `@sha256:<64-hex>` immutable digests via variable validation.
 - **Zero Public Unauthenticated Invokers**: `invoker_members` rejects `allUsers` and `allAuthenticatedUsers` at `terraform plan` time, and `cloudrun_ingress` defaults to `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`.
-- **Zero Plaintext Secrets in State**: Upstream API credentials are mounted directly into Cloud Run from Secret Manager (`upstream_api_key_secret_id`) rather than Terraform variables.
+- **Zero Plaintext Secrets in State**: Upstream API credentials are mounted directly into Cloud Run from Secret Manager (`upstream_api_key_secret_id`) instead of Terraform variables.
 - **Enforced Bucket Isolation**: `google_storage_bucket.calibration_artifacts` enforces `uniform_bucket_level_access = true`, `public_access_prevention = "enforced"`, object versioning, and optional CMEK (`kms_key_name`).
 
 ## 3-Bucket Capability Scope
@@ -31,7 +31,7 @@ terraform plan
 
 ## Offline Validation Test
 
-CI validates HCL structural integrity, variable/output completeness, `@sha256:` digest enforcement, `allUsers` rejection, and public hygiene without requiring cloud credentials:
+CI validates HCL structural integrity, variable/output completeness, `@sha256:` digest enforcement, `allUsers` rejection, plus public hygiene without requiring cloud credentials:
 
 ```bash
 python3 deploy/terraform/test_terraform_config.py

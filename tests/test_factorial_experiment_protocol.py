@@ -80,7 +80,7 @@ class FactorialProtocolAndShapleyTests(unittest.TestCase):
         self.assertEqual(len(full_cube), 16)
         self.assertEqual(len({cfg.bit_code for cfg in full_cube}), 16)
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"bit_code must be a 4-character binary string in"):
             FactorialConfig.from_bit_code("1020")
 
     def test_dataset_split_lock_enforces_g03_sha256_and_g13_cluster_disjointness(self) -> None:
@@ -112,7 +112,7 @@ class FactorialProtocolAndShapleyTests(unittest.TestCase):
             content_sha256=raw_records[0].content_sha256,
             num_turns=6,
         )
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"duplicate content_sha256 detected on episode"):
             partition_episodes_cluster_disjoint(
                 [*raw_records, duplicate_clone],
                 deduplicate_sha256=False,
@@ -131,7 +131,7 @@ class FactorialProtocolAndShapleyTests(unittest.TestCase):
 
             tampered_payload = json.loads(lock_path.read_text(encoding="utf-8"))
             tampered_payload["manifest_sha256"] = "0" * 64
-            with self.assertRaises(SchemaContractViolationError):
+            with self.assertRaisesRegex(SchemaContractViolationError, r"lockfile manifest_sha256 mismatch: expected"):
                 DatasetSplitLock.from_dict(tampered_payload)
 
         cal_ep = split_lock.episodes_for_split("cal")[0]
@@ -149,7 +149,7 @@ class FactorialProtocolAndShapleyTests(unittest.TestCase):
             )
             for rec in split_lock.records
         ]
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"G13 cluster leakage: cluster_id 'cluster_003' spans"):
             verify_disjoint_episode_splits(leaked_cluster_records)
 
     def test_five_fold_oof_calibration_eliminates_resubstitution_undercoverage(self) -> None:

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import copy
 import dataclasses
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ import os
 from pathlib import Path
 import re
 import threading
-from typing import Any, Mapping, Sequence
+from typing import Any
 import unicodedata
 
 from .types import DecisionQuestion, DecisionResult, DecisionTerminalState, FailureCategory, SlotReadout
@@ -55,13 +56,34 @@ _TAG_BREAKOUT_RE = re.compile(
     re.IGNORECASE,
 )
 _INJECTION_DIRECTIVE_RE = re.compile(
-    r"(?im)(?:^\s*(?:system|developer|assistant)\s*:\s*"
+    r"(?im)(?:^[ \t]*(?:system|developer|assistant)[ \t]*:[ \t]*"
     r"(?:approve|allow|grant|accept|deny|reject|block|select|choose|pick|output|return"
     r"|ignore|disregard|forget|override|bypass|assign|rank|you\s+are|do\s+not)\b"
     r"|\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+"
     r"(?:instructions?|prompts?|rules?|rubrics?|criteria)\b"
     r"|\breply\s+with\s+the\s+single\s+uppercase\s+option\s+letter\b)"
 )
+
+
+def _reject_nonfinite_cache_constant(token: str) -> Any:
+    """Reject non-RFC-8259 JSON constants (NaN/Infinity) when loading persisted cache rows."""
+    raise SchemaContractViolationError(f"non-finite JSON constant {token!r} in persisted cache row")
+
+
+def _canonical_json_sort_key(value: Any) -> str:
+    """Serialize a canonicalized value into a deterministic JSON sort key."""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _canonical_entry_sort_key(entry: Sequence[Any]) -> str:
+    """Serialize a mapping entry's type and key components into a deterministic JSON sort key."""
+    return _canonical_json_sort_key(entry[:2])
 
 
 @dataclass(frozen=True)
@@ -354,12 +376,7 @@ def _canonicalize_cache_value(
             _canonicalize_cache_value(x, allow_pos_inf=allow_pos_inf, _seen=next_seen)
             for x in val
         ]
-        sorted_items = sorted(
-            canon_items,
-            key=lambda x: json.dumps(
-                x, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-            ),
-        )
+        sorted_items = sorted(canon_items, key=_canonical_json_sort_key)
         return {"__mdm_type__": "set", "items": sorted_items}
     if isinstance(val, Mapping):
         if all(type(k) is str for k in val.keys()) and "__mdm_type__" not in val:
@@ -375,11 +392,7 @@ def _canonicalize_cache_value(
             ]
             for k, v in val.items()
         ]
-        entries.sort(
-            key=lambda item: json.dumps(
-                item[:2], sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-            )
-        )
+        entries.sort(key=_canonical_entry_sort_key)
         return {"__mdm_type__": "mapping", "entries": entries}
     if dataclasses.is_dataclass(val) and not isinstance(val, type):
         return {
@@ -467,6 +480,8 @@ def compute_decision_cache_key(
             "prior_logits": clean_q_priors,
             "evidence_prompt": q.evidence_prompt,
             "evidence_criteria": _canonicalize_cache_value(q.evidence_criteria),
+            "option_descriptions": _canonicalize_cache_value(q.option_descriptions),
+            "domain_competence": _canonicalize_cache_value(q.domain_competence),
         }
 
     q_sorted = {qid: q_canonical[qid] for qid in sorted(q_canonical.keys())}
@@ -495,15 +510,7 @@ def compute_decision_cache_key(
                 ]
                 for k, v in extra_config.items()
             ]
-            entries.sort(
-                key=lambda item: json.dumps(
-                    item[:2],
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-            )
+            entries.sort(key=_canonical_entry_sort_key)
             cfg_canonical = {"__mdm_type__": "mapping", "entries": entries}
 
     envelope = {
@@ -587,7 +594,7 @@ class ContentAddressedDecisionCache:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            row = json.loads(line)
+            row = json.loads(line, parse_constant=_reject_nonfinite_cache_constant)
             key = str(row["cache_key"])
             if not key:
                 raise SchemaContractViolationError("persisted cache_key must be non-empty")

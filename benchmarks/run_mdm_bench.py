@@ -426,7 +426,7 @@ def run_upgrade3_pride_cyclic_debiasing(
     }
 
 
-def run_upgrade4_ltt_funnel_And_cascade(
+def run_upgrade4_ltt_funnel_and_cascade(
     rows: Sequence[Mapping[str, Any]],
     fast_model: str = "DecisionGemma-2B",
     verifier_model: str = "Gemini-3.8-Flash-Logprob",
@@ -702,11 +702,11 @@ def run_upgrade6_transitive_polytope_projection() -> dict[str, Any]:
 
 
 def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
-    """Render clean, anti-slop compliant Markdown report for MDM-Bench."""
+    """Render concise Markdown report for MDM-Bench."""
     lines: list[str] = [
-        "# MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark (`v0.5.0`)",
+        "# MDM-Bench 8-Track Practical Multimodal & System-1 Decision Benchmark (`v0.5.0`)",
         "",
-        "Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAPS Calibrated Cascade** across **$N = 400$ decision items** ($50$ items per track across 8 real-world agent, visual, coding, relational, judge, and safety tracks), plus out-of-fold ablations for the **6 Multimodal Calibration & Routing Upgrades**.",
+        "Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAPS Calibrated Cascade** across **$N = 400$ decision items** ($50$ items per track across 8 practical tracks covering agent routing, vision, coding, relational, judge, plus safety decisions), alongside out-of-fold ablations for the **6 Multimodal Calibration & Routing Upgrades**.",
         "",
         "## 1. Aggregate Cross-Model Leaderboard ($N = 400$ Items across 8 Tracks)",
         "",
@@ -749,19 +749,22 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             cells.append(f"`{tm['accuracy'] * 100:.1f}%` / `{tm['brier']:.4f}`")
         lines.append(f"| `{tr}` | " + " | ".join(cells) + " |")
 
-    u1 = results["gdm_upgrades"]["upgrade1_mondrian_and_weighted_conformal"]
-    u2 = results["gdm_upgrades"]["upgrade2_multislot_joint_conformal"]
-    u3 = results["gdm_upgrades"]["upgrade3_pride_cyclic_debiasing"]
-    u4 = results["gdm_upgrades"]["upgrade4_ltt_funnel_calibration"]
-    u5 = results["gdm_upgrades"]["upgrade5_submodular_context_pruning"]
-    u6 = results["gdm_upgrades"]["upgrade6_transitive_polytope_projection"]
+    u1 = results["cascade_upgrades"]["upgrade1_mondrian_and_weighted_conformal"]
+    u2 = results["cascade_upgrades"]["upgrade2_multislot_joint_conformal"]
+    u3 = results["cascade_upgrades"]["upgrade3_pride_cyclic_debiasing"]
+    u4 = results["cascade_upgrades"]["upgrade4_ltt_funnel_calibration"]
+    u5 = results["cascade_upgrades"]["upgrade5_submodular_context_pruning"]
+    u6 = results["cascade_upgrades"]["upgrade6_transitive_polytope_projection"]
+
+    casc_arm = arms["LTT + RAPS Cascade (DecisionGemma-2B -> Gemini-3.8-Flash)"]
+    flash_arm = arms["Gemini-3.8-Flash-Logprob"]
 
     lines.extend(
         [
             "",
-            "## 3. Multimodal Calibration & Routing Upgrades: Out-of-Fold Verification Summary",
+            "## 3. Multimodal Calibration & Routing Upgrades Out-of-Fold Verification Summary",
             "",
-            "### 3.1 Upgrade 1: Class/Rarity-Conditional Mondrian & Weighted Conformal Prediction ($\\alpha = 0.10$)",
+            "### 3.1 Upgrade 1 Class/Rarity-Conditional Mondrian & Weighted Conformal Prediction ($\\alpha = 0.10$)",
             "",
             "| Conformal Method | Overall Coverage ($N=400$) | Head-Group Coverage ($N=320$) | Rare-Tail Coverage ($N=80$) | Mean Set Size |",
             "| :--- | :---: | :---: | :---: | :---: |",
@@ -769,7 +772,7 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             f"| **Mondrian Group-Conditional RAPS (`v0.5.0`)** | `{u1['mondrian_raps']['overall_coverage'] * 100:.2f}%` | `{u1['mondrian_raps']['head_coverage'] * 100:.2f}%` | `{u1['mondrian_raps']['tail_coverage'] * 100:.2f}%` | `{u1['mondrian_raps']['mean_set_size']:.3f}` |",
             f"| **Tibshirani Likelihood-Ratio Weighted RAPS (`v0.5.0`)** | `{u1['weighted_conformal_raps']['overall_coverage'] * 100:.2f}%` | `{u1['weighted_conformal_raps']['head_coverage'] * 100:.2f}%` | `{u1['weighted_conformal_raps']['tail_coverage'] * 100:.2f}%` | `{u1['weighted_conformal_raps']['mean_set_size']:.3f}` |",
             "",
-            "### 3.2 Upgrade 2: Simultaneous 4-Slot Joint Conformal Calibration ($\\alpha_{\\text{family}} = 0.10$)",
+            "### 3.2 Upgrade 2 Simultaneous 4-Slot Joint Conformal Calibration ($\\alpha_{\\text{family}} = 0.10$)",
             "",
             "| Multi-Slot Calibration Scheme | Simultaneous 4-Slot Coverage | Target Family-Wise Coverage | Mean Per-Slot Set Size |",
             "| :--- | :---: | :---: | :---: |",
@@ -777,14 +780,14 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             f"| **Joint Max-Score Split Conformal (`v0.5.0`)** | `{u2['joint_max_score_conformal']['simultaneous_coverage'] * 100:.2f}%` | `90.00%` | `{u2['joint_max_score_conformal']['mean_slot_set_size']:.3f}` |",
             f"| **Joint Bonferroni Conformal (`v0.5.0`)** | `{u2['joint_bonferroni_conformal']['simultaneous_coverage'] * 100:.2f}%` | `90.00%` | `{u2['joint_bonferroni_conformal']['mean_slot_set_size']:.3f}` |",
             "",
-            "### 3.3 Upgrade 3: `PriDe` Cyclic Permutation Debiasing & Flip-Rate Stability",
+            "### 3.3 Upgrade 3 `PriDe` Cyclic Permutation Debiasing & Flip-Rate Stability",
             "",
             "| Readout Mode | Top-1 Accuracy | Multiclass Brier | Option-Order Flip Rate | Mean JS Divergence (bits) |",
             "| :--- | :---: | :---: | :---: | :---: |",
             f"| **Raw Canonical Order (Shift 0)** | `{u3['raw_canonical_shift0']['accuracy'] * 100:.2f}%` | `{u3['raw_canonical_shift0']['brier']:.4f}` | `{u3['raw_canonical_shift0']['top1_flip_rate_under_shift'] * 100:.2f}%` | `{u3['raw_canonical_shift0']['mean_js_divergence_bits']:.4f}` |",
             f"| **`PriDe` Cyclic Permutation Debiased (`v0.5.0`)** | `{u3['pride_cyclic_debiased']['accuracy'] * 100:.2f}%` | `{u3['pride_cyclic_debiased']['brier']:.4f}` | `{u3['pride_cyclic_debiased']['top1_flip_rate_under_shift'] * 100:.2f}%` | `{u3['pride_cyclic_debiased']['mean_js_divergence_bits']:.4f}` |",
             "",
-            "### 3.4 Upgrades 4, 5, and 6: LTT Funnel Risk Control, Submodular Context Pruning, & Transitive Polytope Projection",
+            "### 3.4 Upgrades 4, 5, and 6 LTT Funnel Risk Control, Submodular Context Pruning, & Transitive Polytope Projection",
             "",
             "| Upgrade Component | Baseline Metric | `v0.5.0` Upgraded Metric | Guarantee / Outcome |",
             "| :--- | :---: | :---: | :--- |",
@@ -794,8 +797,8 @@ def render_mdm_bench_markdown(results: Mapping[str, Any]) -> str:
             "",
             "## 4. Scope Boundaries, Trade-Offs, & Limitations",
             "",
-            "- **Pareto Trade-Off Rationale**: We adopt the `LTT + RAPS Cascade` because it reduces multiclass Brier (`0.1598` vs `0.1613`), NLL (`0.3205` vs `0.3407`), ECE (`0.0390` vs `0.0445`), and AURC (`0.0376` vs `0.0402`) compared to standalone `Gemini-3.8-Flash-Logprob` while cutting p50 latency from `348.9 ms` to `128.4 ms`.",
-            "- **Limitations & Negative Space**: Marginal split conformal under-coverage on rare tail classes (`58.75%`) requires explicit group/rarity partitioning (`calibrate_mondrian_conformal_quantiles`) or likelihood-ratio weighting (`weighted_conformal_prediction_set`) when deployment base rates shift.",
+            f"- **Pareto Trade-Off Rationale**: We adopt the `LTT + RAPS Cascade` because it achieves `{casc_arm['accuracy'] * 100:.2f}%` accuracy (vs `{flash_arm['accuracy'] * 100:.2f}%` for standalone `Gemini-3.8-Flash-Logprob`) with `{casc_arm['brier']:.4f}` Brier (vs `{flash_arm['brier']:.4f}`), `{casc_arm['nll']:.4f}` NLL (vs `{flash_arm['nll']:.4f}`), `{casc_arm['ece']:.4f}` ECE (vs `{flash_arm['ece']:.4f}`), and `{casc_arm['aurc']:.4f}` AURC (vs `{flash_arm['aurc']:.4f}`) while reducing p50 latency from `{flash_arm['p50_latency_ms']:.1f} ms` to `{casc_arm['p50_latency_ms']:.1f} ms`.",
+            f"- **Limitations & Negative Space**: Marginal split conformal under-coverage on rare tail classes (`{u1['marginal_raps']['tail_coverage'] * 100:.2f}%`) requires explicit group/rarity partitioning (`calibrate_mondrian_conformal_quantiles`) or likelihood-ratio weighting (`weighted_conformal_prediction_set`) when deployment base rates shift.",
             "",
         ]
     )
@@ -826,7 +829,7 @@ def run_benchmark(
         metrics["paradigm"] = paradigm_map[m_name]
         arms_out[m_name] = metrics
 
-    casc_probs, casc_lats, ltt_summary = run_upgrade4_ltt_funnel_And_cascade(rows)
+    casc_probs, casc_lats, ltt_summary = run_upgrade4_ltt_funnel_and_cascade(rows)
     casc_name = "LTT + RAPS Cascade (DecisionGemma-2B -> Gemini-3.8-Flash)"
     casc_metrics = evaluate_arm_predictions(rows, casc_probs, casc_lats)
     casc_metrics["paradigm"] = "ltt_conformal_cascade"
@@ -860,7 +863,7 @@ def run_benchmark(
             "chi2_cc": round(mcnemar.chi2_cc, 4),
             "p_two_sided": float(f"{mcnemar.p_two_sided:.6e}"),
         },
-        "gdm_upgrades": {
+        "cascade_upgrades": {
             "upgrade1_mondrian_and_weighted_conformal": u1,
             "upgrade2_multislot_joint_conformal": u2,
             "upgrade3_pride_cyclic_debiasing": u3,

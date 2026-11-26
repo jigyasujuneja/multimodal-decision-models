@@ -16,14 +16,17 @@
 
 Supports:
   1. DgemSystemOneBackend: /v1/systemone parallel masked diffusion endpoints.
-  2. OpenAILogprobBackend: /v1/chat/completions single-token logprob readout (vLLM, SGLang, OpenAI, Gemma 4)
+  2. GevStudioSystemOneBackend: /api/gev/systemone multi-target decision endpoints.
+  3. OpenAILogprobBackend: /v1/chat/completions single-token logprob readout (vLLM, SGLang, OpenAI, Gemma 4)
      with Vision `image_url` blocks, bounded multi-slot concurrency, and zero uniform fallback.
-  3. VertexGeminiBackend: Vertex AI generateContent with single-token `[A..Z]` enum binding,
+  4. VertexGeminiBackend: Vertex AI generateContent with single-token `[A..Z]` enum binding,
      `responseLogprobs` validation, and zero fabricated fallback distributions.
-  4. BlackBoxSampledBackend: Logprob-free multi-sample and verbalized-vote adapter with symmetric
+  5. GeminiDecisionsBackend: Native `/v1beta/decisions` (`CreateDecision`) adapter with
+     structured choice, noul, and score log-likelihood decoding.
+  6. BlackBoxSampledBackend: Logprob-free multi-sample and verbalized-vote adapter with symmetric
      Dirichlet/Jeffreys prior smoothing and posterior epistemic variance.
-  5. MockCallableBackend: Deterministic in-memory adapter for unit testing and offline replay.
-  6. CascadeDecisionOrchestrator: Unifies Stage-2A Fast-Exit, Wide-Option Shortlist, Co-Denoised/Causal
+  7. MockCallableBackend: Deterministic in-memory adapter for unit testing and offline replay.
+  8. CascadeDecisionOrchestrator: Unifies Stage-2A Fast-Exit, Wide-Option Shortlist, Co-Denoised/Causal
      Evidence Slot, Pre-Fusion Split Conformal / RAPS Set-Size Gating, Pre-Gated Bayesian PoE Prior Fusion,
      Layer-5 Guards, Hesitation-Gated Escalation, SHA-256 Content-Addressed Caching, and
      `RETRY_PENDING` / `REJECTED_CONTRACT_VIOLATION` Total Contracts.
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable, Collection, Mapping, Sequence
 import concurrent.futures as cf
 import copy
 import http.client
@@ -42,14 +46,11 @@ import math
 import os
 import random
 import re
-import socket
 import ssl
 import string
-import subprocess
-import tempfile
 import threading
 import time
-from typing import Any, Callable, Collection, Mapping, Protocol, Sequence
+from typing import Any, Protocol
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -142,7 +143,15 @@ _CHOICE_ALIAS_KEYS = ("choice", "answer", "selected", "predicted")
 CONNECT_TIMEOUT_SECONDS: float = 20.0
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 _CREDENTIAL_HEADER_NAMES: frozenset[str] = frozenset(
-    {"authorization", "x-dgem-key", "x-dgem-api-key", "x-goog-api-key"}
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "x-api-key",
+        "x-dgem-key",
+        "x-dgem-api-key",
+        "x-goog-api-key",
+    }
 )
 
 
@@ -161,7 +170,7 @@ def parse_url_origin(
         Normalized ``(scheme, hostname, port)`` tuple.
 
     Raises:
-        SchemaContractViolationError: If ``raw_url`` contains control chars, uses a forbidden scheme, or lacks a host.
+        SchemaContractViolationError: If ``raw_url`` contains control chars, userinfo, uses a forbidden scheme, or lacks a host.
     """
     if not isinstance(raw_url, str):
         raise SchemaContractViolationError(f"endpoint URL must be a string, got {raw_url!r}")
@@ -174,6 +183,10 @@ def parse_url_origin(
         port = parsed.port
     except ValueError as exc:
         raise SchemaContractViolationError(f"invalid endpoint URL {raw_url!r}: {exc}") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise SchemaContractViolationError(
+            "endpoint URL must not embed userinfo credentials; pass credentials via headers"
+        )
     if scheme not in ("http", "https") or not hostname:
         raise SchemaContractViolationError(
             f"endpoint URL must use http:// or https:// with a valid host, got {raw_url!r}"
@@ -184,6 +197,16 @@ def parse_url_origin(
         )
     resolved_port = port if port is not None else (443 if scheme == "https" else 80)
     return (scheme, hostname, resolved_port)
+
+
+def _resolve_chat_completions_url(endpoint_url: str) -> str:
+    """Resolve an OpenAI-compatible chat completions URL without doubling ``/v1``."""
+    clean = endpoint_url.rstrip("/")
+    if clean.endswith("/v1/chat/completions"):
+        return clean
+    if clean.endswith("/v1"):
+        return f"{clean}/chat/completions"
+    return f"{clean}/v1/chat/completions"
 
 
 def is_raw_predict_endpoint(raw_url: str) -> bool:
@@ -202,14 +225,17 @@ def _validate_http_url(url: str) -> str:
 
 
 def _validate_header_map(headers: Mapping[str, str]) -> dict[str, str]:
-    """Validate header names and values against CR/LF header injection."""
+    """Validate header names and values against CR/LF/NUL header injection."""
     clean_headers: dict[str, str] = {}
     for raw_name, raw_value in headers.items():
         header_name = str(raw_name)
         header_value = str(raw_value)
-        if "\r" in header_name or "\n" in header_name or "\r" in header_value or "\n" in header_value:
+        if any(
+            ch in header_name or ch in header_value
+            for ch in ("\r", "\n", "\x00")
+        ):
             raise SchemaContractViolationError(
-                f"HTTP header {header_name!r} must not contain CR or LF characters"
+                f"HTTP header {header_name!r} must not contain CR, LF, or NUL characters"
             )
         clean_headers[header_name] = header_value
     return clean_headers
@@ -239,10 +265,10 @@ class _BoundedConnectHTTPSHandler(urllib.request.HTTPSHandler):
         super().__init__(context=context)
         self._ssl_context = context
 
-    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+    def https_open(self, request: urllib.request.Request) -> http.client.HTTPResponse:
         return self.do_open(
             _BoundedConnectHTTPSConnection,
-            req,
+            request,
             context=self._ssl_context,
         )
 
@@ -263,14 +289,13 @@ class _OriginGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: http.client.HTTPMessage,
         newurl: str,
     ) -> urllib.request.Request | None:
-        first_origin = getattr(
-            request,
-            "_mdm_first_origin",
-            parse_url_origin(request.full_url, allow_insecure_http=self._allow_insecure_http),
+        current_origin = parse_url_origin(
+            request.full_url, allow_insecure_http=self._allow_insecure_http
         )
+        first_origin = getattr(request, "_mdm_first_origin", current_origin)
         resolved_url = urllib.parse.urljoin(request.full_url, newurl.replace(" ", "%20"))
         next_origin = parse_url_origin(resolved_url, allow_insecure_http=self._allow_insecure_http)
-        if first_origin[0] == "https" and next_origin[0] != "https":
+        if (first_origin[0] == "https" or current_origin[0] == "https") and next_origin[0] != "https":
             raise SchemaContractViolationError(
                 f"refusing HTTPS-to-HTTP downgrade redirect from {request.full_url!r} to {resolved_url!r}"
             )
@@ -296,7 +321,7 @@ class _OriginGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
             next_origin = parse_url_origin(
                 redirected.full_url, allow_insecure_http=self._allow_insecure_http
             )
-            if first_origin[0] == "https" and next_origin[0] != "https":
+            if (first_origin[0] == "https" or current_origin[0] == "https") and next_origin[0] != "https":
                 raise SchemaContractViolationError(
                     f"refusing HTTPS-to-HTTP downgrade redirect from {request.full_url!r} to {redirected.full_url!r}"
                 )
@@ -470,7 +495,6 @@ def _post_json_with_retry(
             raise
         except (
             TimeoutError,
-            socket.timeout,
             urllib.error.URLError,
             http.client.HTTPException,
             OSError,
@@ -485,7 +509,8 @@ def _post_json_with_retry(
                     break
             time.sleep(backoff)
 
-    assert last_err is not None
+    if last_err is None:
+        raise UpstreamTransientError("upstream request failed without an error record")
     if isinstance(last_err, DecisionContractError):
         raise last_err
     raise UpstreamTransientError(str(last_err))
@@ -500,7 +525,7 @@ class DecisionBackend(Protocol):
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         """Return raw probability distributions {slot_id: {option_key: prob}} for each question."""
         ...
@@ -512,7 +537,7 @@ class MockCallableBackend:
     def __init__(
         self,
         name: str,
-        fn: Callable[[Any, Mapping[str, DecisionQuestion], list[str] | None], dict[str, dict[str, float]]],
+        fn: Callable[[Any, Mapping[str, DecisionQuestion], Sequence[str] | None], dict[str, dict[str, float]]],
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise SchemaContractViolationError("MockCallableBackend name must be a non-empty string")
@@ -533,7 +558,7 @@ class MockCallableBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
         *,
         cancel_event: Any = None,
     ) -> dict[str, dict[str, float]]:
@@ -639,7 +664,10 @@ class DgemSystemOneBackend:
         )
         try:
             with opener.open(request, timeout=self.timeout_sec) as response:
-                parsed = json.loads(_read_bounded_utf8_response(response))
+                parsed = json.loads(
+                    _read_bounded_utf8_response(response),
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
         except SchemaContractViolationError:
             raise
         except urllib.error.HTTPError as exc:
@@ -647,7 +675,7 @@ class DgemSystemOneBackend:
             if code in _RETRYABLE_HTTP_STATUS:
                 raise UpstreamTransientError(f"transient upstream HTTP {code} from {health_url}", status_code=code) from exc
             raise SchemaContractViolationError(f"non-retryable upstream HTTP {code} from {health_url}", status_code=code) from exc
-        except (TimeoutError, socket.timeout, urllib.error.URLError, http.client.HTTPException) as exc:
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             raise UpstreamTransientError(f"upstream health error: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise SchemaContractViolationError(f"upstream health returned invalid JSON: {exc}") from exc
@@ -659,7 +687,7 @@ class DgemSystemOneBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
         prior_logits: Mapping[str, Mapping[str, float]] | None = None,
     ) -> dict[str, Any]:
         q_payload: dict[str, Any] = {}
@@ -775,7 +803,7 @@ class DgemSystemOneBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         url = self.resolve_predict_url()
         parse_url_origin(url, allow_insecure_http=self.allow_insecure_http)
@@ -795,12 +823,70 @@ class DgemSystemOneBackend:
         return dists
 
 
-class GevStudioSystemOneBackend:
-    """Adapter for Gev Studio (/api/gev/systemone) multi-target System 1 decision endpoints.
+def _infer_mime_and_b64(raw_item: str) -> dict[str, str]:
+    """Parse a data URI or raw base64 string into a validated {mime_type, data} media block."""
+    if not isinstance(raw_item, str):
+        raise SchemaContractViolationError(
+            f"image/media item must be a string, got {type(raw_item).__qualname__}"
+        )
+    stripped_item = raw_item.strip()
+    if not stripped_item:
+        raise SchemaContractViolationError("image/media string must not be empty")
+    lowered_item = stripped_item.lower()
+    if lowered_item.startswith(("http://", "https://")):
+        raise SchemaContractViolationError(
+            "remote HTTP(S) image URLs are not supported; pass a data:...;base64,... URI or raw base64"
+        )
+    if lowered_item.startswith("data:"):
+        semi_idx = lowered_item.find(";base64,")
+        if semi_idx < 5:
+            raise SchemaContractViolationError(
+                "data: image URI must include ';base64,' encoding specifier"
+            )
+        mime_type = stripped_item[5:semi_idx].split(";", 1)[0].strip() or "image/png"
+        b64_payload = "".join(stripped_item[semi_idx + 8 :].split())
+        if not b64_payload:
+            raise SchemaContractViolationError("data: image URI base64 payload must not be empty")
+        try:
+            decoded_bytes = base64.b64decode(b64_payload, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise SchemaContractViolationError(
+                f"malformed base64 payload in data: URI: {exc}"
+            ) from exc
+        if not decoded_bytes:
+            raise SchemaContractViolationError("decoded base64 image payload must not be empty")
+        return {"mime_type": mime_type, "data": b64_payload}
+    if "://" in stripped_item:
+        raise SchemaContractViolationError(
+            "URI schemes are not supported for inline media; pass a data:...;base64,... URI or raw base64"
+        )
+    compact_b64 = "".join(stripped_item.split())
+    try:
+        decoded_bytes = base64.b64decode(compact_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise SchemaContractViolationError(
+            f"malformed raw base64 image payload: {exc}"
+        ) from exc
+    if not decoded_bytes:
+        raise SchemaContractViolationError("decoded base64 image payload must not be empty")
+    if decoded_bytes.startswith(b"\xff\xd8\xff"):
+        return {"mime_type": "image/jpeg", "data": compact_b64}
+    if decoded_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return {"mime_type": "image/png", "data": compact_b64}
+    if len(decoded_bytes) >= 12 and decoded_bytes[:4] == b"RIFF" and decoded_bytes[8:12] == b"WEBP":
+        return {"mime_type": "image/webp", "data": compact_b64}
+    if len(decoded_bytes) >= 12 and decoded_bytes[:4] == b"RIFF" and decoded_bytes[8:12] == b"WAVE":
+        return {"mime_type": "audio/wav", "data": compact_b64}
+    if decoded_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return {"mime_type": "image/gif", "data": compact_b64}
+    return {"mime_type": "image/png", "data": compact_b64}
 
-    Supports Gev Studio backend targets via `?target=...` (for example, `gemini-decision-1`,
-    `gemini-decision-1?hc=true`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`,
-    `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`),
+
+class GevStudioSystemOneBackend:
+    """Adapter for `/api/gev/systemone` multi-target System 1 decision endpoints.
+
+    Supports target routing via `?target=...` (for example, `gemini-decision-1`,
+    `gemini-decision-1?hc=true`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`),
     multimodal `media` payloads (`image/png`, `image/jpeg`, `audio/wav`, `video/mp4`),
     and all 3 question types (`choice`, `noul`, `score`).
     """
@@ -813,12 +899,13 @@ class GevStudioSystemOneBackend:
         temperature: float | None = None,
         api_key: str | None = None,
         use_sso_client: bool = False,
-        allow_discrete_fallback: bool = True,
+        allow_discrete_fallback: bool = False,
         label_smoothing_eps: float = 1e-4,
         timeout_sec: float = 30.0,
         max_retries: int = 2,
         base_backoff_sec: float = 0.05,
         name: str | None = None,
+        transport: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         resolved_endpoint_url = (
             endpoint_url
@@ -844,6 +931,15 @@ class GevStudioSystemOneBackend:
             raise SchemaContractViolationError(f"api_key must be a string or None, got {api_key!r}")
         if not isinstance(use_sso_client, bool):
             raise SchemaContractViolationError("use_sso_client must be a boolean")
+        if use_sso_client:
+            raise SchemaContractViolationError(
+                "use_sso_client=True is not supported in the open-source package; "
+                "pass a custom transport callback or api_key bearer token instead"
+            )
+        if transport is not None and (not callable(transport) or inspect.iscoroutinefunction(transport)):
+            raise SchemaContractViolationError(
+                "transport must be a synchronous callable taking (url, payload) or None"
+            )
         if not isinstance(allow_discrete_fallback, bool):
             raise SchemaContractViolationError("allow_discrete_fallback must be a boolean")
         clean_eps = _require_positive_finite_number(label_smoothing_eps, "label_smoothing_eps")
@@ -861,6 +957,7 @@ class GevStudioSystemOneBackend:
         self.temperature = temperature
         self.api_key = api_key
         self.use_sso_client = use_sso_client
+        self.transport = transport
         self.allow_discrete_fallback = allow_discrete_fallback
         self.label_smoothing_eps = clean_eps
         self.timeout_sec = _require_positive_finite_number(timeout_sec, "timeout_sec")
@@ -874,61 +971,7 @@ class GevStudioSystemOneBackend:
     @staticmethod
     def _infer_mime_and_b64(raw_item: str) -> dict[str, str]:
         """Parse a data URI or raw base64 string into a validated {mime_type, data} media block."""
-        if not isinstance(raw_item, str):
-            raise SchemaContractViolationError(
-                f"image/media item must be a string, got {type(raw_item).__qualname__}"
-            )
-        stripped_item = raw_item.strip()
-        if not stripped_item:
-            raise SchemaContractViolationError("image/media string must not be empty")
-        lowered_item = stripped_item.lower()
-        if lowered_item.startswith(("http://", "https://")):
-            raise SchemaContractViolationError(
-                "remote HTTP(S) image URLs are not supported; pass a data:...;base64,... URI or raw base64"
-            )
-        if lowered_item.startswith("data:"):
-            semi_idx = lowered_item.find(";base64,")
-            if semi_idx < 5:
-                raise SchemaContractViolationError(
-                    "data: image URI must include ';base64,' encoding specifier"
-                )
-            mime_type = stripped_item[5:semi_idx].split(";", 1)[0].strip() or "image/png"
-            b64_payload = "".join(stripped_item[semi_idx + 8 :].split())
-            if not b64_payload:
-                raise SchemaContractViolationError("data: image URI base64 payload must not be empty")
-            try:
-                decoded_bytes = base64.b64decode(b64_payload, validate=True)
-            except (binascii.Error, ValueError) as exc:
-                raise SchemaContractViolationError(
-                    f"malformed base64 payload in data: URI: {exc}"
-                ) from exc
-            if not decoded_bytes:
-                raise SchemaContractViolationError("decoded base64 image payload must not be empty")
-            return {"mime_type": mime_type, "data": b64_payload}
-        if "://" in stripped_item:
-            raise SchemaContractViolationError(
-                "URI schemes are not supported for inline media; pass a data:...;base64,... URI or raw base64"
-            )
-        compact_b64 = "".join(stripped_item.split())
-        try:
-            decoded_bytes = base64.b64decode(compact_b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise SchemaContractViolationError(
-                f"malformed raw base64 image payload: {exc}"
-            ) from exc
-        if not decoded_bytes:
-            raise SchemaContractViolationError("decoded base64 image payload must not be empty")
-        if compact_b64.startswith("/9j/"):
-            return {"mime_type": "image/jpeg", "data": compact_b64}
-        if compact_b64.startswith("iVBOR"):
-            return {"mime_type": "image/png", "data": compact_b64}
-        if compact_b64.startswith("R0lGR"):
-            return {"mime_type": "image/webp", "data": compact_b64}
-        if compact_b64.startswith("UklGR"):
-            return {"mime_type": "audio/wav", "data": compact_b64}
-        if compact_b64.startswith("R0lGOD"):
-            return {"mime_type": "image/gif", "data": compact_b64}
-        return {"mime_type": "image/png", "data": compact_b64}
+        return _infer_mime_and_b64(raw_item)
 
     def build_url(self) -> str:
         """Return the resolved /api/gev/systemone URL with URL-encoded ?target=... query parameter."""
@@ -948,8 +991,8 @@ class GevStudioSystemOneBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
-        media: list[Mapping[str, str]] | None = None,
+        images: Sequence[str] | None = None,
+        media: Sequence[Mapping[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Construct a Gev Studio systemone.Request JSON payload."""
         clean_state = state
@@ -1169,86 +1212,24 @@ class GevStudioSystemOneBackend:
         }
         return out, evidence_map, trace
 
-    def _post_via_sso_client(self, url: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Execute POST via Google corp `sso_client` CLI using a /tmp payload file."""
-        try:
-            raw_json = json.dumps(payload, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise SchemaContractViolationError(f"failed to serialize request payload: {exc}") from exc
-
-        attempts = max(0, int(self.max_retries)) + 1
-        last_err: Exception | None = None
-        timeout_int = max(5, int(math.ceil(self.timeout_sec)))
-
-        for attempt in range(attempts):
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".json", prefix="gev_req_", dir="/tmp", delete=True
-            ) as tmp_f:
-                tmp_f.write(raw_json)
-                tmp_f.flush()
-                cmd = [
-                    "sso_client",
-                    f"--url={url}",
-                    "--method=POST",
-                    "--headers=Content-Type: application/json",
-                    f"--data_file={tmp_f.name}",
-                    f"--request_timeout={timeout_int}",
-                ]
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=self.timeout_sec + 5.0,
-                        check=False,
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    last_err = UpstreamTransientError(f"sso_client timed out after {self.timeout_sec}s: {exc}")
-                    proc = None
-
-            if proc is not None:
-                stdout = (proc.stdout or "").strip()
-                if stdout.startswith("{"):
-                    try:
-                        parsed = json.loads(stdout)
-                    except json.JSONDecodeError as exc:
-                        last_err = UpstreamTransientError(f"invalid JSON from sso_client: {exc}")
-                        parsed = None
-                    if isinstance(parsed, dict):
-                        if "error" in parsed and "answers" not in parsed:
-                            last_err = UpstreamTransientError(
-                                f"Gev Studio error from {url}: {parsed.get('error')}"
-                            )
-                        else:
-                            return parsed
-                else:
-                    stderr_snip = (proc.stderr or stdout)[:240]
-                    last_err = UpstreamTransientError(
-                        f"sso_client non-JSON response (rc={proc.returncode}): {stderr_snip}"
-                    )
-
-            if attempt + 1 < attempts:
-                backoff = self.base_backoff_sec * (2**attempt) * (0.75 + 0.5 * random.random())
-                time.sleep(backoff)
-
-        assert last_err is not None
-        if isinstance(last_err, DecisionContractError):
-            raise last_err
-        raise UpstreamTransientError(str(last_err))
-
     def score_questions(
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         if not questions:
             return {}
+        if self.use_sso_client:
+            raise SchemaContractViolationError(
+                "use_sso_client=True is not supported in the open-source package; "
+                "pass a custom transport callback or api_key bearer token instead"
+            )
         url = self.build_url()
         _validate_http_url(url)
         payload = self.build_payload(state, questions, images)
-        if self.use_sso_client:
-            data = self._post_via_sso_client(url, payload)
+        if self.transport is not None:
+            data = self.transport(url, payload)
         else:
             headers = {"Content-Type": "application/json"}
             if self.api_key:
@@ -1314,12 +1295,14 @@ class OpenAILogprobBackend:
                 raise SchemaContractViolationError("letter_token_ids must be a mapping when provided")
             if letter_token_ids:
                 clean_token_ids = {}
-                for ltr, tid in letter_token_ids.items():
-                    if not isinstance(ltr, str) or not ltr.strip():
+                for letter, token_id in letter_token_ids.items():
+                    if not isinstance(letter, str) or not letter.strip():
                         raise SchemaContractViolationError(
-                            f"letter_token_ids keys must be non-empty strings, got {ltr!r}"
+                            f"letter_token_ids keys must be non-empty strings, got {letter!r}"
                         )
-                    clean_token_ids[ltr] = _require_nonneg_int(tid, f"letter_token_ids[{ltr!r}]")
+                    clean_token_ids[letter] = _require_nonneg_int(
+                        token_id, f"letter_token_ids[{letter!r}]"
+                    )
         self.endpoint_url = clean_url
         self.model = model
         self.api_key = api_key
@@ -1442,7 +1425,7 @@ class OpenAILogprobBackend:
         total = sum(exps.values())
         return {k: v / total for k, v in exps.items()}
 
-    def _build_user_content(self, prompt_text: str, images: list[str] | None) -> Any:
+    def _build_user_content(self, prompt_text: str, images: Sequence[str] | None) -> Any:
         if not images:
             return prompt_text
         content_parts: list[dict[str, Any]] = []
@@ -1459,7 +1442,7 @@ class OpenAILogprobBackend:
         headers: Mapping[str, str],
         state: Any,
         q: DecisionQuestion,
-        images: list[str] | None,
+        images: Sequence[str] | None,
     ) -> dict[str, float]:
         has_bias = self.letter_token_ids is not None
         prompt_text, letter_to_key = self.build_letter_prompt(state, q, allow_above_20=has_bias)
@@ -1531,15 +1514,11 @@ class OpenAILogprobBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         if not questions:
             return {}
-        url = (
-            self.endpoint_url
-            if self.endpoint_url.endswith("/v1/chat/completions")
-            else f"{self.endpoint_url}/v1/chat/completions"
-        )
+        url = _resolve_chat_completions_url(self.endpoint_url)
         _validate_http_url(url)
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -1663,7 +1642,7 @@ class VertexGeminiBackend:
             if isinstance(images, (str, bytes, bytearray)) or not isinstance(images, Sequence):
                 raise SchemaContractViolationError("images must be a sequence of string payloads")
             for image_item in images:
-                inferred_media = GevStudioSystemOneBackend._infer_mime_and_b64(image_item)
+                inferred_media = _infer_mime_and_b64(image_item)
                 parts.append(
                     {
                         "inlineData": {
@@ -1724,7 +1703,7 @@ class VertexGeminiBackend:
         if not raw_text.strip():
             raise SchemaContractViolationError("Vertex Gemini candidate returned empty content text")
         try:
-            parsed_json = json.loads(raw_text)
+            parsed_json = json.loads(raw_text, parse_constant=_reject_nonfinite_json_constant)
         except json.JSONDecodeError as exc:
             raise SchemaContractViolationError(f"Vertex Gemini JSON decode failed: {exc}") from exc
         if not isinstance(parsed_json, Mapping):
@@ -1859,7 +1838,7 @@ class VertexGeminiBackend:
         )
         if env_tok:
             return env_tok
-        raise RuntimeError(
+        raise SchemaContractViolationError(
             "VertexGeminiBackend requires access_token_fn or VERTEX_ACCESS_TOKEN / GOOGLE_OAUTH_ACCESS_TOKEN"
         )
 
@@ -1867,7 +1846,7 @@ class VertexGeminiBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         url = self.endpoint_url()
         _validate_http_url(url)
@@ -2173,7 +2152,7 @@ class GeminiDecisionsBackend:
     @staticmethod
     def _encode_inline_image(raw_image: str) -> dict[str, Any]:
         """Convert a data URI or base64 image string into an ``inline_data`` part."""
-        inferred = GevStudioSystemOneBackend._infer_mime_and_b64(raw_image)
+        inferred = _infer_mime_and_b64(raw_image)
         return {"inline_data": {"mime_type": inferred["mime_type"], "data": inferred["data"]}}
 
     def build_decisions_payload(
@@ -2383,6 +2362,16 @@ class GeminiDecisionsBackend:
             raise LogprobAlignmentError(f"{label} contains invalid non-finite log-likelihood {value!r}")
         return value
 
+    @staticmethod
+    def _coerce_finite_score_metric(raw_value: Any, label: str) -> float:
+        """Validate a score summary field (expected_score or variance) as a finite number."""
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise LogprobAlignmentError(f"{label} must be a finite numeric value, got {raw_value!r}")
+        value = float(raw_value)
+        if not math.isfinite(value):
+            raise LogprobAlignmentError(f"{label} must be finite, got {value!r}")
+        return value
+
     @classmethod
     def _normalize_log_likelihood_map(
         cls,
@@ -2501,7 +2490,8 @@ class GeminiDecisionsBackend:
 
             if kind == "noul":
                 sub_obj = entry.get("noul") if isinstance(entry.get("noul"), Mapping) else entry
-                assert isinstance(sub_obj, Mapping)
+                if not isinstance(sub_obj, Mapping):
+                    raise SchemaContractViolationError(f"noul slot {slot_id!r} entry must be a JSON object")
                 neg_key = str(plan["negative_key"])
                 pos_key = str(plan["positive_key"])
                 raw_lls = (
@@ -2553,7 +2543,8 @@ class GeminiDecisionsBackend:
 
             elif kind == "score":
                 sub_obj = entry.get("score") if isinstance(entry.get("score"), Mapping) else entry
-                assert isinstance(sub_obj, Mapping)
+                if not isinstance(sub_obj, Mapping):
+                    raise SchemaContractViolationError(f"score slot {slot_id!r} entry must be a JSON object")
                 bucket_keys = list(plan["explicit_keys"])
                 bucket_scores = [float(val) for val in plan["bucket_scores"]]
                 raw_lls = (
@@ -2569,7 +2560,7 @@ class GeminiDecisionsBackend:
 
                 raw_expected = sub_obj.get("expected_score", sub_obj.get("expectedScore"))
                 if raw_expected is not None:
-                    expected_score = self._coerce_log_likelihood(
+                    expected_score = self._coerce_finite_score_metric(
                         raw_expected, f"score[{slot_id!r}].expected_score"
                     )
                 else:
@@ -2579,7 +2570,7 @@ class GeminiDecisionsBackend:
 
                 raw_variance = sub_obj.get("variance")
                 if raw_variance is not None:
-                    variance_val = self._coerce_log_likelihood(
+                    variance_val = self._coerce_finite_score_metric(
                         raw_variance, f"score[{slot_id!r}].variance"
                     )
                     if variance_val < 0.0:
@@ -2602,7 +2593,8 @@ class GeminiDecisionsBackend:
 
             else:
                 sub_obj = entry.get("choice") if isinstance(entry.get("choice"), Mapping) else entry
-                assert isinstance(sub_obj, Mapping)
+                if not isinstance(sub_obj, Mapping):
+                    raise SchemaContractViolationError(f"choice slot {slot_id!r} entry must be a JSON object")
                 explicit_keys = list(plan["explicit_keys"])
                 raw_lls = (
                     sub_obj.get("log_likelihoods")
@@ -2691,14 +2683,14 @@ class GeminiDecisionsBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         """Score one or more decision slots via ``POST /v1beta/decisions``.
 
         Args:
             state: Structured or text context isolated inside ``<untrusted_data>``.
             questions: Mapping of slot identifiers to ``DecisionQuestion`` schemas.
-            images: Optional list of base64 or data-URI images.
+            images: Optional sequence of base64 or data-URI images.
 
         Returns:
             Mapping ``{slot_id: {option_key: normalized_probability}}``.
@@ -2743,7 +2735,7 @@ class GeminiDecisionsBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> DecisionResult:
         """Execute ``score_questions`` and wrap readouts + usage telemetry into ``DecisionResult``.
 
@@ -2803,19 +2795,38 @@ class GeminiDecisionsBackend:
 
 
 SamplerFn = Callable[..., Mapping[str, Any] | str]
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 
 def _reject_nonfinite_json_constant(token: str) -> Any:
     raise SchemaContractViolationError(f"non-finite JSON constant {token!r} in sampler output")
 
 
+def _extract_fenced_json_block(text: str) -> str:
+    """Extract the first fenced ```[json] {...} ``` block in linear O(N) time."""
+    cursor = 0
+    text_len = len(text)
+    while cursor < text_len:
+        fence_start = text.find("```", cursor)
+        if fence_start == -1:
+            return ""
+        body_start = fence_start + 3
+        if text[body_start : body_start + 4].lower() == "json":
+            body_start += 4
+        fence_end = text.find("```", body_start)
+        if fence_end == -1:
+            return ""
+        inner = text[body_start:fence_end].strip()
+        if inner.startswith("{") and inner.endswith("}"):
+            return inner
+        cursor = fence_end + 3
+    return ""
+
+
 def _extract_json_dict_if_present(raw_text: str) -> dict[str, Any] | None:
     stripped = raw_text.strip()
     if not stripped:
         return None
-    fenced = _JSON_FENCE_RE.search(stripped)
-    candidate_str = fenced.group(1) if fenced else ""
+    candidate_str = _extract_fenced_json_block(stripped)
     if not candidate_str and "{" in stripped and "}" in stripped:
         i0 = stripped.find("{")
         i1 = stripped.rfind("}")
@@ -3079,10 +3090,11 @@ class BlackBoxSampledBackend:
         pos_arity: int,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None,
+        images: Sequence[str] | None,
         sample_idx: int,
     ) -> Mapping[str, Any] | str:
-        assert self.sampler is not None
+        if self.sampler is None:
+            raise SchemaContractViolationError("BlackBoxSampledBackend sampler callable is not configured")
         if pos_arity >= 4:
             return self.sampler(state, questions, images, sample_idx)
         if pos_arity == 3:
@@ -3239,8 +3251,7 @@ class BlackBoxSampledBackend:
                 f"unsupported sampler draw type: {type(draw).__name__}"
             )
 
-        assert parsed_map is not None
-        if not parsed_map:
+        if parsed_map is None or not parsed_map:
             raise SchemaContractViolationError(
                 "BlackBoxSampledBackend received empty JSON object draw"
             )
@@ -3278,7 +3289,10 @@ class BlackBoxSampledBackend:
                     )
                 for qid in questions:
                     q_votes = raw_top_votes[qid]
-                    assert isinstance(q_votes, Mapping)
+                    if not isinstance(q_votes, Mapping):
+                        raise SchemaContractViolationError(
+                            f"BlackBoxSampledBackend {v_field!r}[{qid!r}] must be a JSON object"
+                        )
                     self._accumulate_votes_map(
                         q_votes,
                         counts[qid],
@@ -3405,7 +3419,7 @@ class BlackBoxSampledBackend:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> dict[str, dict[str, float]]:
         if not questions:
             self.last_epistemic_variance = {}
@@ -3453,12 +3467,11 @@ class BlackBoxSampledBackend:
                 if explicit_votes and not has_sample_idx:
                     break
         else:
-            assert self.endpoint_url is not None
-            url = (
-                self.endpoint_url
-                if self.endpoint_url.endswith("/v1/chat/completions")
-                else f"{self.endpoint_url}/v1/chat/completions"
-            )
+            if self.endpoint_url is None:
+                raise SchemaContractViolationError(
+                    "BlackBoxSampledBackend requires either sampler or endpoint_url"
+                )
+            url = _resolve_chat_completions_url(self.endpoint_url)
             _validate_http_url(url)
             headers = {"Content-Type": "application/json"}
             if self.api_key:
@@ -3585,80 +3598,13 @@ class CascadeDecisionOrchestrator:
         negative_transfer_min_delta_hurt: int = -2,
         negative_transfer_brier_ratio: float = 2.5,
     ) -> None:
-        if stage1_backend is None or not callable(getattr(stage1_backend, "score_questions", None)):
-            raise SchemaContractViolationError(
-                "stage1_backend must implement score_questions(state, questions, images)"
-            )
-        if stage2_backend is not None and not callable(
-            getattr(stage2_backend, "score_questions", None)
-        ):
-            raise SchemaContractViolationError(
-                "stage2_backend must implement score_questions(state, questions, images) when provided"
-            )
-        for flag_name, flag_val in (
-            ("shortlist_pairwise_diff", shortlist_pairwise_diff),
-            ("enable_stage2a_fast_exit", enable_stage2a_fast_exit),
-            ("escalate_on_inferred_evidence", escalate_on_inferred_evidence),
-            ("total_contract_mode", total_contract_mode),
-            ("escalate_on_conformal_ambiguous", escalate_on_conformal_ambiguous),
-            ("conformal_randomized", conformal_randomized),
-            ("use_dawid_skene_poe_weights", use_dawid_skene_poe_weights),
-            ("speculative_stage2", speculative_stage2),
-        ):
-            if not isinstance(flag_val, bool):
-                raise SchemaContractViolationError(
-                    f"{flag_name} must be bool, got {flag_val!r}"
-                )
-        if domain_competence is not None and not isinstance(domain_competence, DomainCompetenceProfile):
-            raise SchemaContractViolationError(
-                f"domain_competence must be a DomainCompetenceProfile or None, got {domain_competence!r}"
-            )
-        if use_dawid_skene_poe_weights and domain_competence is None:
-            raise SchemaContractViolationError(
-                "use_dawid_skene_poe_weights=True requires domain_competence to be set"
-            )
-        clean_stage2_prune = _require_nonneg_int(stage2_prune_top_k, "stage2_prune_top_k")
-        if clean_stage2_prune == 1:
-            raise SchemaContractViolationError("stage2_prune_top_k must be 0 or >= 2")
-        clean_voi_acc = self._validate_unit_interval_number(
-            voi_stage2_expected_accuracy, "voi_stage2_expected_accuracy"
-        )
-        clean_voi_err = (
-            _require_nonneg_finite_number(voi_error_cost, "voi_error_cost")
-            if voi_error_cost is not None
-            else None
-        )
-        clean_voi_rpc = _require_nonneg_finite_number(
-            voi_stage2_rpc_cost_usd, "voi_stage2_rpc_cost_usd"
-        )
-        clean_voi_lat = _require_nonneg_finite_number(voi_latency_cost_usd, "voi_latency_cost_usd")
-        clean_nt_margin = _require_nonneg_finite_number(
-            negative_transfer_margin, "negative_transfer_margin"
-        )
-        clean_nt_min_hurt = _require_strict_int(
-            negative_transfer_min_delta_hurt, "negative_transfer_min_delta_hurt"
-        )
-        if clean_nt_min_hurt > 0:
-            raise SchemaContractViolationError("negative_transfer_min_delta_hurt must be <= 0")
-        clean_nt_brier = _require_finite_number(
-            negative_transfer_brier_ratio, "negative_transfer_brier_ratio"
-        )
-        if clean_nt_brier <= 1.0:
-            raise SchemaContractViolationError("negative_transfer_brier_ratio must be > 1.0")
         self.stage1_backend = stage1_backend
         self.stage2_backend = stage2_backend
-        self.hesitation_threshold = _require_nonneg_finite_number(
-            hesitation_threshold, "hesitation_threshold"
-        )
-        self.prior_weight = _require_nonneg_finite_number(prior_weight, "prior_weight")
+        self.hesitation_threshold = hesitation_threshold
+        self.prior_weight = prior_weight
         self.prior_gate_mode = prior_gate_mode
-        clean_init_temp = _require_positive_finite_number(temperature, "temperature")
-        if not (MIN_TEMPERATURE <= clean_init_temp <= MAX_TEMPERATURE):
-            raise SchemaContractViolationError(
-                f"temperature must lie in [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}], got {temperature!r}"
-            )
-        self.temperature = clean_init_temp
-        self.shortlist_top_k = _require_nonneg_int(shortlist_top_k, "shortlist_top_k")
+        self.temperature = temperature
+        self.shortlist_top_k = shortlist_top_k
         self.shortlist_pairwise_diff = shortlist_pairwise_diff
         self.evidence_prompt = evidence_prompt
         self.evidence_criteria: dict[str, str] | Any = (
@@ -3669,9 +3615,7 @@ class CascadeDecisionOrchestrator:
         self.enable_stage2a_fast_exit = enable_stage2a_fast_exit
         self.escalate_on_inferred_evidence = escalate_on_inferred_evidence
         self.total_contract_mode = total_contract_mode
-        self.sla_timeout_sec = _require_positive_finite_number(
-            sla_timeout_sec, "sla_timeout_sec"
-        )
+        self.sla_timeout_sec = sla_timeout_sec
         self.response_cache = response_cache
         self.oos_keys: frozenset[str] | Any = (
             frozenset(str(k) for k in oos_keys)
@@ -3681,31 +3625,24 @@ class CascadeDecisionOrchestrator:
         self.conformal_q_hat: float | dict[str, float] | Any = (
             dict(conformal_q_hat) if isinstance(conformal_q_hat, Mapping) else conformal_q_hat
         )
-        self.conformal_q_hat = self._validated_conformal_q_hat()
         self.conformal_method = conformal_method
-        self.conformal_lam_reg = _require_nonneg_finite_number(
-            conformal_lam_reg, "conformal_lam_reg"
-        )
-        self.conformal_k_reg = _require_nonneg_int(conformal_k_reg, "conformal_k_reg")
+        self.conformal_lam_reg = conformal_lam_reg
+        self.conformal_k_reg = conformal_k_reg
         self.escalate_on_conformal_ambiguous = escalate_on_conformal_ambiguous
         self.conformal_randomized = conformal_randomized
-        self.conformal_seed = (
-            _require_strict_int(conformal_seed, "conformal_seed")
-            if conformal_seed is not None
-            else None
-        )
+        self.conformal_seed = conformal_seed
         self.conformal_rng = conformal_rng
         self.domain_competence = domain_competence
         self.use_dawid_skene_poe_weights = use_dawid_skene_poe_weights
         self.speculative_stage2 = speculative_stage2
-        self.stage2_prune_top_k = clean_stage2_prune
-        self.voi_error_cost = clean_voi_err
-        self.voi_stage2_expected_accuracy = clean_voi_acc
-        self.voi_stage2_rpc_cost_usd = clean_voi_rpc
-        self.voi_latency_cost_usd = clean_voi_lat
-        self.negative_transfer_margin = clean_nt_margin
-        self.negative_transfer_min_delta_hurt = clean_nt_min_hurt
-        self.negative_transfer_brier_ratio = clean_nt_brier
+        self.stage2_prune_top_k = stage2_prune_top_k
+        self.voi_error_cost = voi_error_cost
+        self.voi_stage2_expected_accuracy = voi_stage2_expected_accuracy
+        self.voi_stage2_rpc_cost_usd = voi_stage2_rpc_cost_usd
+        self.voi_latency_cost_usd = voi_latency_cost_usd
+        self.negative_transfer_margin = negative_transfer_margin
+        self.negative_transfer_min_delta_hurt = negative_transfer_min_delta_hurt
+        self.negative_transfer_brier_ratio = negative_transfer_brier_ratio
         self.layer5_slot_context: dict[str, dict[str, Any]] | Any = (
             {
                 str(qid): (dict(ctx) if isinstance(ctx, Mapping) else ctx)
@@ -3714,6 +3651,158 @@ class CascadeDecisionOrchestrator:
             if isinstance(layer5_slot_context, Mapping)
             else layer5_slot_context
         )
+        validated = self._validate_orchestrator_config(questions=None, check_init_backends=True)
+        self.hesitation_threshold = validated["hesitation_threshold"]
+        self.prior_weight = validated["prior_weight"]
+        self.temperature = validated["temperature"]
+        self.shortlist_top_k = validated["shortlist_top_k"]
+        self.sla_timeout_sec = validated["sla_timeout_sec"]
+        self.conformal_q_hat = validated["conformal_q_hat"]
+        self.conformal_lam_reg = validated["conformal_lam_reg"]
+        self.conformal_k_reg = validated["conformal_k_reg"]
+        self.conformal_seed = validated["conformal_seed"]
+        self.stage2_prune_top_k = validated["stage2_prune_top_k"]
+        self.voi_error_cost = validated["voi_error_cost"]
+        self.voi_stage2_expected_accuracy = validated["voi_stage2_expected_accuracy"]
+        self.voi_stage2_rpc_cost_usd = validated["voi_stage2_rpc_cost_usd"]
+        self.voi_latency_cost_usd = validated["voi_latency_cost_usd"]
+        self.negative_transfer_margin = validated["negative_transfer_margin"]
+        self.negative_transfer_min_delta_hurt = validated["negative_transfer_min_delta_hurt"]
+        self.negative_transfer_brier_ratio = validated["negative_transfer_brier_ratio"]
+
+    def _validate_orchestrator_config(
+        self,
+        *,
+        questions: Mapping[str, DecisionQuestion] | None,
+        check_init_backends: bool = False,
+    ) -> dict[str, Any]:
+        """Validate all orchestrator configuration fields in one shared pass."""
+        if check_init_backends:
+            if self.stage1_backend is None or not callable(
+                getattr(self.stage1_backend, "score_questions", None)
+            ):
+                raise SchemaContractViolationError(
+                    "stage1_backend must implement score_questions(state, questions, images)"
+                )
+            if self.stage2_backend is not None and not callable(
+                getattr(self.stage2_backend, "score_questions", None)
+            ):
+                raise SchemaContractViolationError(
+                    "stage2_backend must implement score_questions(state, questions, images) when provided"
+                )
+        for flag_name, flag_val in (
+            ("shortlist_pairwise_diff", self.shortlist_pairwise_diff),
+            ("enable_stage2a_fast_exit", self.enable_stage2a_fast_exit),
+            ("escalate_on_inferred_evidence", self.escalate_on_inferred_evidence),
+            ("total_contract_mode", self.total_contract_mode),
+            ("escalate_on_conformal_ambiguous", self.escalate_on_conformal_ambiguous),
+            ("conformal_randomized", self.conformal_randomized),
+            ("use_dawid_skene_poe_weights", self.use_dawid_skene_poe_weights),
+            ("speculative_stage2", self.speculative_stage2),
+        ):
+            if not isinstance(flag_val, bool):
+                raise SchemaContractViolationError(
+                    f"{flag_name} must be bool, got {flag_val!r}"
+                )
+        clean_hes = _require_nonneg_finite_number(self.hesitation_threshold, "hesitation_threshold")
+        clean_pw = _require_nonneg_finite_number(self.prior_weight, "prior_weight")
+        clean_temp = _require_positive_finite_number(self.temperature, "temperature")
+        if not (MIN_TEMPERATURE <= clean_temp <= MAX_TEMPERATURE):
+            raise SchemaContractViolationError(
+                f"temperature must lie in [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}], got {self.temperature!r}"
+            )
+        clean_top_k = _require_nonneg_int(self.shortlist_top_k, "shortlist_top_k")
+        clean_sla = _require_positive_finite_number(self.sla_timeout_sec, "sla_timeout_sec")
+        if not isinstance(self.oos_keys, frozenset):
+            raise SchemaContractViolationError("oos_keys must be a collection of strings")
+        if not isinstance(self.prior_gate_mode, str) or self.prior_gate_mode not in VALID_PRIOR_GATE_MODES:
+            raise SchemaContractViolationError(
+                f"prior_gate_mode must be one of {VALID_PRIOR_GATE_MODES}, got {self.prior_gate_mode!r}"
+            )
+        if not isinstance(self.evidence_prompt, str):
+            raise SchemaContractViolationError(
+                f"evidence_prompt must be str, got {self.evidence_prompt!r}"
+            )
+        if self.evidence_criteria is not None and not isinstance(self.evidence_criteria, Mapping):
+            raise SchemaContractViolationError("evidence_criteria must be a mapping when provided")
+        clean_q_hat = self._validated_conformal_q_hat()
+        clean_lam = _require_nonneg_finite_number(self.conformal_lam_reg, "conformal_lam_reg")
+        clean_k = _require_nonneg_int(self.conformal_k_reg, "conformal_k_reg")
+        clean_seed = (
+            _require_strict_int(self.conformal_seed, "conformal_seed")
+            if self.conformal_seed is not None
+            else None
+        )
+        if self.domain_competence is not None and not isinstance(
+            self.domain_competence, DomainCompetenceProfile
+        ):
+            raise SchemaContractViolationError(
+                f"domain_competence must be a DomainCompetenceProfile or None, got {self.domain_competence!r}"
+            )
+        if self.use_dawid_skene_poe_weights and self.domain_competence is None:
+            has_all_slot_profiles = (
+                questions is not None
+                and isinstance(questions, Mapping)
+                and bool(questions)
+                and all(
+                    isinstance(q_obj, DecisionQuestion)
+                    and isinstance(q_obj.domain_competence, DomainCompetenceProfile)
+                    for q_obj in questions.values()
+                )
+            )
+            if not has_all_slot_profiles:
+                raise SchemaContractViolationError(
+                    "use_dawid_skene_poe_weights=True requires domain_competence to be set"
+                )
+        clean_stage2_prune = _require_nonneg_int(self.stage2_prune_top_k, "stage2_prune_top_k")
+        if clean_stage2_prune == 1:
+            raise SchemaContractViolationError("stage2_prune_top_k must be 0 or >= 2")
+        clean_voi_acc = self._validate_unit_interval_number(
+            self.voi_stage2_expected_accuracy, "voi_stage2_expected_accuracy"
+        )
+        clean_voi_err = (
+            _require_nonneg_finite_number(self.voi_error_cost, "voi_error_cost")
+            if self.voi_error_cost is not None
+            else None
+        )
+        clean_voi_rpc = _require_nonneg_finite_number(
+            self.voi_stage2_rpc_cost_usd, "voi_stage2_rpc_cost_usd"
+        )
+        clean_voi_lat = _require_nonneg_finite_number(
+            self.voi_latency_cost_usd, "voi_latency_cost_usd"
+        )
+        clean_nt_margin = _require_nonneg_finite_number(
+            self.negative_transfer_margin, "negative_transfer_margin"
+        )
+        clean_nt_min_hurt = _require_strict_int(
+            self.negative_transfer_min_delta_hurt, "negative_transfer_min_delta_hurt"
+        )
+        if clean_nt_min_hurt > 0:
+            raise SchemaContractViolationError("negative_transfer_min_delta_hurt must be <= 0")
+        clean_nt_brier = _require_finite_number(
+            self.negative_transfer_brier_ratio, "negative_transfer_brier_ratio"
+        )
+        if clean_nt_brier <= 1.0:
+            raise SchemaContractViolationError("negative_transfer_brier_ratio must be > 1.0")
+        return {
+            "hesitation_threshold": clean_hes,
+            "prior_weight": clean_pw,
+            "temperature": clean_temp,
+            "shortlist_top_k": clean_top_k,
+            "sla_timeout_sec": clean_sla,
+            "conformal_q_hat": clean_q_hat,
+            "conformal_lam_reg": clean_lam,
+            "conformal_k_reg": clean_k,
+            "conformal_seed": clean_seed,
+            "stage2_prune_top_k": clean_stage2_prune,
+            "voi_error_cost": clean_voi_err,
+            "voi_stage2_expected_accuracy": clean_voi_acc,
+            "voi_stage2_rpc_cost_usd": clean_voi_rpc,
+            "voi_latency_cost_usd": clean_voi_lat,
+            "negative_transfer_margin": clean_nt_margin,
+            "negative_transfer_min_delta_hurt": clean_nt_min_hurt,
+            "negative_transfer_brier_ratio": clean_nt_brier,
+        }
 
     @staticmethod
     def _validate_unit_interval_number(raw_value: Any, field: str) -> float:
@@ -3755,7 +3844,7 @@ class CascadeDecisionOrchestrator:
         backend: DecisionBackend,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None,
+        images: Sequence[str] | None,
         cancel_token: _CancelTokenView | None,
     ) -> Mapping[str, Mapping[str, float]]:
         if cancel_token is not None and cancel_token.is_set():
@@ -3802,8 +3891,16 @@ class CascadeDecisionOrchestrator:
             return out
         return self._validate_conformal_q_hat_value(self.conformal_q_hat, "conformal_q_hat")
 
-    def _resolve_slot_q_hat(self, qid: str) -> float | None:
-        clean_q = self._validated_conformal_q_hat()
+    def _resolve_slot_q_hat(
+        self,
+        qid: str,
+        validated_q_hat: float | Mapping[str, float] | None = None,
+    ) -> float | None:
+        clean_q = (
+            validated_q_hat
+            if validated_q_hat is not None
+            else self._validated_conformal_q_hat()
+        )
         if clean_q is None:
             return None
         if isinstance(clean_q, Mapping):
@@ -4008,7 +4105,7 @@ class CascadeDecisionOrchestrator:
         self,
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
         prior_logits: Mapping[str, Mapping[str, float]] | None = None,
         shortlist_scores: Mapping[str, Mapping[str, float]] | None = None,
         candidate_pack_sizes: Mapping[str, int] | None = None,
@@ -4030,25 +4127,24 @@ class CascadeDecisionOrchestrator:
                 )
             if cancel_event is not None and bool(cancel_event.is_set()):
                 raise cf.CancelledError("Decision evaluation cancelled before Stage 1")
-            clean_hes = _require_finite_number(self.hesitation_threshold, "hesitation_threshold")
-            clean_pw = _require_nonneg_finite_number(self.prior_weight, "prior_weight")
-            clean_temp = _require_finite_number(self.temperature, "temperature")
-            if not (MIN_TEMPERATURE <= clean_temp <= MAX_TEMPERATURE):
-                raise SchemaContractViolationError(
-                    f"temperature must lie in [{MIN_TEMPERATURE}, {MAX_TEMPERATURE}], got {self.temperature!r}"
-                )
-            clean_top_k = _require_strict_int(self.shortlist_top_k, "shortlist_top_k")
-            clean_sla = _require_finite_number(self.sla_timeout_sec, "sla_timeout_sec")
-            if clean_sla <= 0.0:
-                raise SchemaContractViolationError(
-                    f"sla_timeout_sec must be > 0, got {self.sla_timeout_sec!r}"
-                )
+            validated = self._validate_orchestrator_config(questions=questions)
+            clean_hes = validated["hesitation_threshold"]
+            clean_pw = validated["prior_weight"]
+            clean_temp = validated["temperature"]
+            clean_top_k = validated["shortlist_top_k"]
+            clean_q_hat = validated["conformal_q_hat"]
+            clean_stage2_prune = validated["stage2_prune_top_k"]
+            clean_voi_acc = validated["voi_stage2_expected_accuracy"]
+            clean_voi_err = validated["voi_error_cost"]
+            clean_voi_rpc = validated["voi_stage2_rpc_cost_usd"]
+            clean_voi_lat = validated["voi_latency_cost_usd"]
+            clean_nt_margin = validated["negative_transfer_margin"]
+            clean_nt_min_hurt = validated["negative_transfer_min_delta_hurt"]
+            clean_nt_brier = validated["negative_transfer_brier_ratio"]
             if not isinstance(sister_pack_collision, bool):
                 raise SchemaContractViolationError(
                     f"sister_pack_collision must be bool, got {sister_pack_collision!r}"
                 )
-            if not isinstance(self.oos_keys, frozenset):
-                raise SchemaContractViolationError("oos_keys must be a collection of strings")
             clean_dec_pack = (
                 _require_strict_int(decoded_pack_size, "decoded_pack_size")
                 if decoded_pack_size is not None
@@ -4075,93 +4171,6 @@ class CascadeDecisionOrchestrator:
             clean_call_slot_ctx = self._validate_slot_context_map(
                 layer5_slot_context, "call_layer5_slot_context"
             )
-            if not isinstance(self.prior_gate_mode, str) or self.prior_gate_mode not in VALID_PRIOR_GATE_MODES:
-                raise SchemaContractViolationError(
-                    f"prior_gate_mode must be one of {VALID_PRIOR_GATE_MODES}, got {self.prior_gate_mode!r}"
-                )
-            if not isinstance(self.enable_stage2a_fast_exit, bool):
-                raise SchemaContractViolationError(
-                    f"enable_stage2a_fast_exit must be bool, got {self.enable_stage2a_fast_exit!r}"
-                )
-            if not isinstance(self.shortlist_pairwise_diff, bool):
-                raise SchemaContractViolationError(
-                    f"shortlist_pairwise_diff must be bool, got {self.shortlist_pairwise_diff!r}"
-                )
-            if not isinstance(self.escalate_on_inferred_evidence, bool):
-                raise SchemaContractViolationError(
-                    f"escalate_on_inferred_evidence must be bool, got {self.escalate_on_inferred_evidence!r}"
-                )
-            if not isinstance(self.escalate_on_conformal_ambiguous, bool):
-                raise SchemaContractViolationError(
-                    f"escalate_on_conformal_ambiguous must be bool, got {self.escalate_on_conformal_ambiguous!r}"
-                )
-            if not isinstance(self.evidence_prompt, str):
-                raise SchemaContractViolationError(
-                    f"evidence_prompt must be str, got {self.evidence_prompt!r}"
-                )
-            if self.evidence_criteria is not None and not isinstance(self.evidence_criteria, Mapping):
-                raise SchemaContractViolationError("evidence_criteria must be a mapping when provided")
-            clean_q_hat = self._validated_conformal_q_hat()
-            if not isinstance(self.conformal_randomized, bool):
-                raise SchemaContractViolationError(
-                    f"conformal_randomized must be bool, got {self.conformal_randomized!r}"
-                )
-            if self.conformal_seed is not None:
-                _require_strict_int(self.conformal_seed, "conformal_seed")
-            if not isinstance(self.use_dawid_skene_poe_weights, bool):
-                raise SchemaContractViolationError(
-                    f"use_dawid_skene_poe_weights must be bool, got {self.use_dawid_skene_poe_weights!r}"
-                )
-            if self.domain_competence is not None and not isinstance(
-                self.domain_competence, DomainCompetenceProfile
-            ):
-                raise SchemaContractViolationError(
-                    f"domain_competence must be a DomainCompetenceProfile or None, got {self.domain_competence!r}"
-                )
-            if self.use_dawid_skene_poe_weights and self.domain_competence is None:
-                if not isinstance(questions, Mapping) or not questions or not all(
-                    isinstance(q_obj, DecisionQuestion) and isinstance(q_obj.domain_competence, DomainCompetenceProfile)
-                    for q_obj in questions.values()
-                ):
-                    raise SchemaContractViolationError(
-                        "use_dawid_skene_poe_weights=True requires domain_competence to be set"
-                    )
-            if not isinstance(self.speculative_stage2, bool):
-                raise SchemaContractViolationError(
-                    f"speculative_stage2 must be bool, got {self.speculative_stage2!r}"
-                )
-            clean_stage2_prune = _require_nonneg_int(
-                self.stage2_prune_top_k, "stage2_prune_top_k"
-            )
-            if clean_stage2_prune == 1:
-                raise SchemaContractViolationError("stage2_prune_top_k must be 0 or >= 2")
-            clean_voi_acc = self._validate_unit_interval_number(
-                self.voi_stage2_expected_accuracy, "voi_stage2_expected_accuracy"
-            )
-            clean_voi_err = (
-                _require_nonneg_finite_number(self.voi_error_cost, "voi_error_cost")
-                if self.voi_error_cost is not None
-                else None
-            )
-            clean_voi_rpc = _require_nonneg_finite_number(
-                self.voi_stage2_rpc_cost_usd, "voi_stage2_rpc_cost_usd"
-            )
-            clean_voi_lat = _require_nonneg_finite_number(
-                self.voi_latency_cost_usd, "voi_latency_cost_usd"
-            )
-            clean_nt_margin = _require_nonneg_finite_number(
-                self.negative_transfer_margin, "negative_transfer_margin"
-            )
-            clean_nt_min_hurt = _require_strict_int(
-                self.negative_transfer_min_delta_hurt, "negative_transfer_min_delta_hurt"
-            )
-            if clean_nt_min_hurt > 0:
-                raise SchemaContractViolationError("negative_transfer_min_delta_hurt must be <= 0")
-            clean_nt_brier = _require_finite_number(
-                self.negative_transfer_brier_ratio, "negative_transfer_brier_ratio"
-            )
-            if clean_nt_brier <= 1.0:
-                raise SchemaContractViolationError("negative_transfer_brier_ratio must be > 1.0")
             if isinstance(questions, Mapping):
                 for q_slot_id, q_slot_obj in questions.items():
                     if isinstance(q_slot_obj, DecisionQuestion) and q_slot_obj.domain_competence is not None:
@@ -4324,6 +4333,7 @@ class CascadeDecisionOrchestrator:
                 sister_pack_collision=sister_pack_collision,
                 layer5_slot_context=clean_call_slot_ctx,
                 cancel_event=cancel_event,
+                validated_conformal_q_hat=clean_q_hat,
             )
         except DecisionContractError as exc:
             if not self.total_contract_mode:
@@ -4339,7 +4349,7 @@ class CascadeDecisionOrchestrator:
         tenant_id: str = "default",
         state: Any,
         questions: Mapping[str, DecisionQuestion],
-        images: list[str] | None,
+        images: Sequence[str] | None,
         prior_logits: Mapping[str, Mapping[str, float]] | None,
         shortlist_scores: Mapping[str, Mapping[str, float]] | None,
         candidate_pack_sizes: Mapping[str, int] | None,
@@ -4350,6 +4360,7 @@ class CascadeDecisionOrchestrator:
         sister_pack_collision: bool,
         layer5_slot_context: Mapping[str, Mapping[str, Any]] | None = None,
         cancel_event: threading.Event | None = None,
+        validated_conformal_q_hat: float | Mapping[str, float] | None = None,
     ) -> DecisionResult:
         # 1. Stage 2A Adaptive Fast-Exit check for single-slot retrieval verification
         if self.enable_stage2a_fast_exit and len(questions) == 1 and prior_logits:
@@ -4541,7 +4552,11 @@ class CascadeDecisionOrchestrator:
                 # Evaluate Split Conformal / RAPS set strictly on raw_dist BEFORE Stage-1 prior fusion.
                 slot_conformal_set: list[str] = []
                 conformal_esc = False
-                slot_q_hat = self._resolve_slot_q_hat(qid) if qid != evidence_slot_id else None
+                slot_q_hat = (
+                    self._resolve_slot_q_hat(qid, validated_q_hat=validated_conformal_q_hat)
+                    if qid != evidence_slot_id
+                    else None
+                )
                 if slot_q_hat is not None:
                     try:
                         conf_res = conformal_prediction_set(
@@ -4727,25 +4742,40 @@ class CascadeDecisionOrchestrator:
                         qid for qid in executable_escalated_qids if qid in speculative_qids
                     ]
                     if speculative_future is not None and covered_by_speculative:
-                        while True:
-                            if stage1_cancel_token.is_set():
-                                local_stage2_abort.set()
-                                raise cf.CancelledError(
-                                    "Decision evaluation cancelled during speculative Stage 2"
-                                )
-                            remaining_sla = self.sla_timeout_sec - (time.perf_counter() - t0)
-                            if remaining_sla <= 0.0:
+                        remaining_sla = self.sla_timeout_sec - (time.perf_counter() - t0)
+                        if remaining_sla <= 0.0:
+                            local_stage2_abort.set()
+                            raise UpstreamTransientError(
+                                f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
+                            )
+                        if cancel_event is None:
+                            try:
+                                spec_result = speculative_future.result(timeout=remaining_sla)
+                            except cf.TimeoutError as exc:
                                 local_stage2_abort.set()
                                 raise UpstreamTransientError(
                                     f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
-                                )
-                            try:
-                                spec_result = speculative_future.result(
-                                    timeout=min(0.01, remaining_sla)
-                                )
-                                break
-                            except cf.TimeoutError:
-                                continue
+                                ) from exc
+                        else:
+                            while True:
+                                if stage1_cancel_token.is_set():
+                                    local_stage2_abort.set()
+                                    raise cf.CancelledError(
+                                        "Decision evaluation cancelled during speculative Stage 2"
+                                    )
+                                remaining_sla = self.sla_timeout_sec - (time.perf_counter() - t0)
+                                if remaining_sla <= 0.0:
+                                    local_stage2_abort.set()
+                                    raise UpstreamTransientError(
+                                        f"Stage-2 exceeded SLA budget ({self.sla_timeout_sec:.1f}s)"
+                                    )
+                                try:
+                                    spec_result = speculative_future.result(
+                                        timeout=min(0.02, remaining_sla)
+                                    )
+                                    break
+                                except cf.TimeoutError:
+                                    continue
                         if not isinstance(spec_result, Mapping):
                             raise SchemaContractViolationError(
                                 "Stage-2 backend returned non-mapping response"
@@ -4827,15 +4857,13 @@ class CascadeDecisionOrchestrator:
                         slot_profile = self._slot_competence_profile(qid, questions)
                         s1_is_uniform = slot_stage1_uniform.get(qid, False)
 
-                        if s1_is_uniform and not stage2_is_uniform:
+                        if s1_is_uniform:
                             s2_dist = norm_s2_dist
-                        elif not s1_is_uniform and stage2_is_uniform:
+                        elif stage2_is_uniform:
                             s2_dist = dict(slots_out[qid].probabilities)
                             escalation_reasons.append(
                                 f"{qid}:stage2_uniform_fallback_preserved_stage1"
                             )
-                        elif s1_is_uniform and stage2_is_uniform:
-                            s2_dist = norm_s2_dist
                         elif self.use_dawid_skene_poe_weights and slot_profile is not None:
                             slot_num_options = max(
                                 slot_profile.num_options,

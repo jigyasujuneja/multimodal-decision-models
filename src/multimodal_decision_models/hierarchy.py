@@ -39,16 +39,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .calibration import normalized_entropy, pre_gated_bayesian_poe_fusion
 from .shortlist import split_identifier_tokens
-from .types import MAX_EXTENDED_OPTIONS_PER_SLOT
-from .types import (
-    DEFAULT_HESITATION_THRESHOLD,
-    MAX_OPTIONS_PER_SLOT,
-    MAX_SLOTS_PER_PASS,
-    DecisionQuestion,
-    DecisionTerminalState,
-    FailureCategory,
-    SlotReadout,
-)
+from .types import DEFAULT_HESITATION_THRESHOLD, MAX_EXTENDED_OPTIONS_PER_SLOT, MAX_OPTIONS_PER_SLOT, MAX_SLOTS_PER_PASS, DecisionQuestion, DecisionTerminalState, FailureCategory, SlotReadout
 
 if TYPE_CHECKING:
     from .backends import DecisionBackend
@@ -218,7 +209,6 @@ class TaxonomyTrie:
 
 def _build_lexical_coarse_groups(
     items: Sequence[tuple[str, str]],
-    cap_coarse: int,
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, str]]:
     """Bucket opaque keys (e.g., option_0 .. option_150) by informative description stems."""
     tok_lists: dict[str, list[str]] = {}
@@ -278,7 +268,7 @@ def build_prefix_taxonomy_trie(
 
     opaque_count = sum(1 for k, _ in non_catch_items if _OPAQUE_KEY_RE.match(k))
     if not domain_map and non_catch_items and opaque_count >= max(2, int(0.8 * len(non_catch_items))):
-        raw_groups, raw_suffixes = _build_lexical_coarse_groups(non_catch_items, cap_coarse)
+        raw_groups, raw_suffixes = _build_lexical_coarse_groups(non_catch_items)
     else:
         raw_groups = {}
         raw_suffixes = {}
@@ -581,7 +571,7 @@ class HierarchicalDecisionRouter:
         slot_id: str,
         question: DecisionQuestion,
         trie: TaxonomyTrie | None = None,
-        images: list[str] | None = None,
+        images: Sequence[str] | None = None,
     ) -> SlotReadout:
         keys = question.option_keys()
         if len(keys) <= MAX_OPTIONS_PER_SLOT:
@@ -1180,7 +1170,7 @@ def demask_coupled_slots(
     mi_coupling_threshold_bits: float = 0.10,
     anchor_hesitation_threshold: float = DEFAULT_HESITATION_THRESHOLD,
     valid_tuples: Sequence[Mapping[str, str] | Sequence[str]] | None = None,
-    images: list[str] | None = None,
+    images: Sequence[str] | None = None,
 ) -> CoupledDemaskResult:
     """Execute dependency-guided 2-step coupled slot unmasking (DEMASK / arXiv:2610.15864).
 

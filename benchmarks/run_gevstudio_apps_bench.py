@@ -16,16 +16,16 @@
 """Live End-to-End Benchmark of `multimodal-decision-models` on Gev Studio (`/apps`).
 
 Executes stateless live evaluations against `GEV_STUDIO_ENDPOINT_URL` (`/api/gev/systemone`)
-across Gev Studio's online targets (`gemini-decision-1`, `gemini-decision-1?hc=true`,
-`gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `dgem:vertex`, `saturn-moe-3p8b-qat-v0-fst-genmedia`)
+across online decision targets (`gemini-decision-1`, `gemini-decision-1?hc=true`,
+`gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `vertex-systemone-26b`, `diffusion-3.8b-fst`)
 on:
-  1. Gev Studio `/apps/vision`: 3-Scene Gauntlet (48 questions, 150 branches).
-  2. Gev Studio `/apps/triage`: All 70 Golden Triage Cases (95 slots across `ops`, `polysemy`, `guardrails`).
-  3. GitHub `multimodal-decision-models` (`v0.4.0–v0.8.0`) Multimodal Suites:
+  1. Vision Gauntlet (`/apps/vision`): 3-Scene Gauntlet (48 questions, 150 branches).
+  2. Triage Gauntlet (`/apps/triage`): All 70 Golden Triage Cases (95 slots across `ops`, `polysemy`, `guardrails`).
+  3. GitHub `multimodal-decision-models` (`v0.4.0-v0.8.0`) Multimodal Suites:
      - 3A: Dual-Buffer 2x2 SKU Contact Sheets (`visual_compiler.py` + `Layer-5 Pack Guard`).
      - 3B: Set-of-Marks (`SoM`) 4x4 Spatial UI Grounding (`som_navigator.py`).
      - 3C: `v0.8.0` Audio (`audio/wav`) Turn-Taking + `ST-SoM` Video Contact Sheets (`audio_video_decision.py`).
-  4. Exports a Gev Studio `/evals` RFC-4180 CSV benchmark (`gevstudio_mdm_eval_suite.csv`).
+  4. Exports a `/evals` RFC-4180 CSV benchmark (`gevstudio_mdm_eval_suite.csv`).
 """
 
 from __future__ import annotations
@@ -39,11 +39,11 @@ import math
 import os
 import pathlib
 import statistics
-import subprocess
-import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from typing import Any, Callable, Mapping
 
 from multimodal_decision_models import CandidateMark, ImageBuffer, VoiceActivityProjectionConfig, apply_layer5_deterministic_guards, brier_score_multiclass, build_set_of_marks_questions, compile_dual_buffer_contact_sheet, evaluate_audiovisual_event_agreement, evaluate_duplex_turn_taking_decision, expected_calibration_error, extract_wav_acoustic_features, fence_untrusted_audio_transcript, inner_crop_cie_lab_similarity, negative_log_likelihood, normalized_entropy, paired_mcnemar_test, pre_gated_bayesian_poe_fusion, safe_expected_mark_center, shades_of_gray_white_balance, write_pcm16_wav_bytes
@@ -82,7 +82,7 @@ def _call_gevstudio_raw(
     target: str | None = None,
     timeout_sec: int = 25,
 ) -> tuple[dict[str, Any], float]:
-    """Perform a stateless POST to Gev Studio /api/gev/systemone via sso_client with UTA backoff."""
+    """Perform a stateless HTTP POST to /api/gev/systemone with exponential backoff."""
     raw_json = json.dumps(payload, sort_keys=True, allow_nan=False)
     cache_key = hashlib.sha256(f"{target or 'default'}::{raw_json}".encode("utf-8")).hexdigest()
     with _CACHE_LOCK:
@@ -93,30 +93,23 @@ def _call_gevstudio_raw(
     url = GEV_STUDIO_BASE_URL
     if target:
         url = f"{url}?target={urllib.parse.quote(target, safe='')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    api_key = os.environ.get("GEV_STUDIO_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
+    last_error = ""
+    raw_bytes = raw_json.encode("utf-8")
     for attempt in range(6):
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", prefix="gev_bench_", dir="/tmp", delete=True
-        ) as tf:
-            tf.write(raw_json)
-            tf.flush()
-            t0 = time.perf_counter()
-            proc = subprocess.run(
-                [
-                    "sso_client",
-                    f"--url={url}",
-                    "--method=POST",
-                    "--headers=Content-Type: application/json",
-                    f"--data_file={tf.name}",
-                    f"--request_timeout={timeout_sec}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec + 5,
-                check=False,
-            )
-            dt_ms = (time.perf_counter() - t0) * 1000.0
-        out = (proc.stdout or "").strip()
+        req = urllib.request.Request(url, data=raw_bytes, headers=headers, method="POST")
+        t0 = time.perf_counter()
+        out = ""
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                out = resp.read().decode("utf-8").strip()
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = str(exc)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
         if out.startswith("{"):
             try:
                 parsed = json.loads(out)
@@ -126,11 +119,11 @@ def _call_gevstudio_raw(
                         if len(_LIVE_CACHE) % 10 == 0:
                             _save_live_cache()
                     return parsed, dt_ms
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as exc:
+                last_error = str(exc)
         if attempt < 5:
             time.sleep(0.45 * (1.8**attempt))
-    raise RuntimeError(f"Gev Studio call failed for target={target!r}: {(proc.stdout or proc.stderr)[:240]}")
+    raise RuntimeError(f"SystemOne endpoint call failed for target={target!r}: {last_error[:240]}")
 
 
 # ============================================================================
@@ -258,15 +251,15 @@ def _score_vision_scene_response(
 
 
 def run_vision_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
-    """Run all 3 Gev Studio Vision Arena scenes (48 questions) across targets + calibrated MDM stack."""
+    """Run all 3 Vision Gauntlet scenes (48 questions) across targets + calibrated MDM stack."""
     scenes = golden["vision_scenes"]
     scene_media = golden["scene_media"]
     targets = [
         ("gemini-decision-1 (raw)", "gemini-decision-1"),
-        ("gemini-decision-1?hc=true (raw)", "beyond-decision:/models/gemini-decision-1?hc=true"),
+        ("gemini-decision-1?hc=true (raw)", "decision:/models/gemini-decision-1?hc=true"),
         ("gemini-3.5-flash-lite (raw)", "gemini-3.5-flash-lite"),
         ("gemini-3.1-flash-lite (raw)", "gemini-3.1-flash-lite"),
-        ("saturn-moe-3p8b-fst (raw)", "saturn-moe-3p8b-qat-v0-fst-genmedia"),
+        ("diffusion-3.8b-fst (raw)", "diffusion-3.8b-fst"),
     ]
 
     raw_cache: dict[tuple[str, str], tuple[dict[str, Any], float]] = {}
@@ -542,7 +535,7 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
     cases = golden["triage_cases"]
     targets = [
         ("gemini-decision-1 (raw)", "gemini-decision-1"),
-        ("dgem:vertex (DGemma 26B-A4B NVFP4 raw)", "dgem:vertex"),
+        ("vertex-systemone-26b (SystemOne 26B-A4B NVFP4 raw)", "vertex-systemone-26b"),
         ("gemini-3.5-flash-lite (raw)", "gemini-3.5-flash-lite"),
     ]
 
@@ -654,7 +647,7 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
         models_summary[label] = _summarize_triage_run(lambda c, tid=target_id: raw_case_outputs[tid][c["id"]])
 
     # Now evaluate MDM Calibrated Cascade:
-    # Stage-1: Fast System 1 (gemini-decision-1 + dgem:vertex covariance-discounted log-linear pool)
+    # Stage-1: Fast System 1 (gemini-decision-1 + vertex-systemone-26b covariance-discounted log-linear pool)
     # + Pre-Gated Bayesian PoE + Hesitation Cascade (H_norm >= 0.14 -> Stage-2 gemini-3.5-flash-lite)
     escalated_slots_count = 0
 
@@ -662,7 +655,7 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
         nonlocal escalated_slots_count
         cid = c["id"]
         resp_decision1, dt_decision1 = raw_case_outputs["gemini-decision-1"][cid]
-        resp_dgem, dt_dgem = raw_case_outputs["dgem:vertex"][cid]
+        resp_dgem, dt_dgem = raw_case_outputs["vertex-systemone-26b"][cid]
         resp_fl, dt_fl = raw_case_outputs["gemini-3.5-flash-lite"][cid]
         priors = _compute_triage_lexical_priors(c)
 
@@ -749,7 +742,7 @@ def run_triage_arena_benchmark(golden: Mapping[str, Any]) -> dict[str, Any]:
     )
     mcnemar_vs_dgem = paired_mcnemar_test(
         mdm_summary["slot_flags"],
-        models_summary["dgem:vertex (DGemma 26B-A4B NVFP4 raw)"]["slot_flags"],
+        models_summary["vertex-systemone-26b (SystemOne 26B-A4B NVFP4 raw)"]["slot_flags"],
     )
     for entry in models_summary.values():
         entry.pop("slot_flags", None)

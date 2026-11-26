@@ -17,11 +17,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import hashlib
 from pathlib import Path
 import re
 import sys
-from typing import Sequence
 
 EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -51,6 +51,13 @@ BANNED_TOKEN_SHA256: frozenset[str] = frozenset(
         "e213661b27230291b4f559cf387ae1fd612af2560a0456648233fad891b49947",
         "e93ed16e76ef29da72cfc4e6b7a6b43cc4aebba41675c299c361997086f40ee3",
         "b3d9fd1b37ea401b47d98a9c14c16c847b1e34d2fed9cc790c5ed7d36123ef0d",
+        "9918f0455cefecd78b99a6d8daf7da74732ccd50fdbafda860ecc0f050f2e725",
+        "bbf997173d125ed48a1c6b9888e4f594245381b679cc44e651f964d18940d092",
+        "a38c2d7bfc423b198f0e188e4d988bc1b8e8c107a760f9f66a2fc7e9b5b4ede5",
+        "03fe7af632b170c39ca385e5f085b9f07ace99ce1edb6c9c4b541ad320b57d2b",
+        "ebd8de38e4a70bc8b0fa11982ebe5c38d12b528bd3d0081c57f50412dcfe792b",
+        "598f7a741a1e3a05654d346033571fda567af6dc2bf099b34b930171519d995f",
+        "03c7909a40d39f970672583e1ef91e4ff68a733007faa80cd754bee272fb682f",
     }
 )
 
@@ -72,6 +79,23 @@ def _build_blocked_line_regex() -> re.Pattern[str]:
         "decision" + "-lab",
         "/usr/local/" + "google",
         r"\b" + "EX" + "P-" + r"\d+\b",
+        r"\b" + "sso" + r"_client\b",
+        "Google" + " corp",
+        "saturn" + "-moe",
+        "dgemma" + r"\.aaie\.cloud",
+        r"\b" + "gev" + r"ctl\b",
+        "gdm" + "_upgrades",
+        "gold" + "fish",
+        "dgem" + ":vertex",
+        "beyond" + "-decision",
+        "beyond" + "-api",
+        "typesafe" + "_adapter",
+        "jev" + ":openjev",
+        "mdm" + ":cascade",
+        "speak" + "-like-tl",
+        "judgement" + "-doc",
+        "golden-eval-" + "judge-audit",
+        "anti" + "-slop",
         r"AIza[0-9A-Za-z_-]{35}",
         r"ya29\.[0-9A-Za-z_-]{20,}",
         "BEGIN" + r" (?:RSA |EC )?PRIVATE KEY",
@@ -90,21 +114,25 @@ def scan_repository(repo_root: Path) -> list[str]:
     """
     blocked_re = _build_blocked_line_regex()
     self_path = Path(__file__).resolve()
-    ci_workflow_path = (repo_root / ".github" / "workflows" / "ci.yml").resolve()
     violations: list[str] = []
+    scanned_count = 0
 
     for file_path in sorted(repo_root.rglob("*")):
-        if any(part in EXCLUDED_DIR_NAMES for part in file_path.parts) or file_path.is_dir():
+        if file_path.is_dir():
+            continue
+        rel_path = file_path.relative_to(repo_root)
+        if any(part in EXCLUDED_DIR_NAMES for part in rel_path.parts):
             continue
         resolved = file_path.resolve()
         try:
             text = file_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        scanned_count += 1
 
-        rel_str = str(file_path.relative_to(repo_root))
+        rel_str = str(rel_path)
         for line_no, line in enumerate(text.splitlines(), start=1):
-            if resolved not in (self_path, ci_workflow_path):
+            if resolved != self_path:
                 match = blocked_re.search(line)
                 if match is not None:
                     violations.append(
@@ -120,6 +148,9 @@ def scan_repository(repo_root: Path) -> list[str]:
                         f"{rel_str}:{line_no}: restricted internal token ({token!r})"
                     )
                     break
+
+    if scanned_count == 0:
+        violations.append(f"{repo_root}:0: sanitization scan inspected 0 files")
 
     return violations
 

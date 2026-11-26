@@ -21,6 +21,14 @@ import {
 } from "./calibration.js";
 import type { MDMClient } from "./client.js";
 import {
+  escapeUntrustedTagVariantsInternal,
+  formatUnknownError,
+  isPlainRecord,
+  nullProtoRecord,
+  truncateCodePoints,
+} from "./internal.js";
+import { auditAndNormalizeUntrustedText } from "./security.js";
+import {
   type ConformalMethod,
   type DecisionQuestion,
   type DecisionResponse,
@@ -35,6 +43,7 @@ const GUARD_BLOCK_LABELS: readonly string[] = [
   "injected_or_unrequested",
 ];
 
+/** Configures confidence thresholds, conformal sets, and NEVC policy for tool authorization. */
 export interface ActionStakesPolicy {
   readonly irreversibleTools?: readonly string[];
   readonly irreversibleMinConfidence?: number;
@@ -46,15 +55,17 @@ export interface ActionStakesPolicy {
   readonly seedKey?: string;
 }
 
+/** Describes a proposed tool invocation evaluated by `createGenkitToolGuard`. */
 export interface GenkitToolGuardInput {
   readonly toolName: string;
-  readonly toolArgs: Record<string, unknown>;
+  readonly toolArgs: Readonly<Record<string, unknown>>;
   readonly userRequest: string;
   readonly untrustedContext?: string;
   readonly requestId?: string;
   readonly stepIndex?: number;
 }
 
+/** Summarizes the fail-closed allow or deny verdict produced by `createGenkitToolGuard`. */
 export interface GenkitToolGuardVerdict {
   readonly allowed: boolean;
   readonly disposition: string;
@@ -69,155 +80,17 @@ export interface GenkitToolGuardVerdict {
 const INJECTION_DIRECTIVE_RE =
   /(?:^|\n|\[escaped_untrusted_tag\])[ \t]*(?:ignore\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)|disregard\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)|forget\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)|reply\s+with\s+the\s+single\s+uppercase\s+option\s+letter|system\s*:|developer\s*:|assistant\s*:)/gi;
 
-function isAsciiOrTagWhitespace(code: number): boolean {
-  return (
-    code === 0x20 ||
-    code === 0x09 ||
-    code === 0x0a ||
-    code === 0x0d ||
-    code === 0x0c ||
-    code === 0x0b ||
-    code === 0xa0
-  );
-}
-
-/**
- * Linear-time O(N) single-pass scanner replacing `< ... untrusted_... >` tags
- * without regex backtracking on malformed or unclosed `<` / `-` sequences.
- */
+/** Replaces `< ... untrusted_... >` tag variants in linear O(N) time without regex backtracking. */
 export function escapeUntrustedTagVariants(input: string): string {
-  const n = input.length;
-  let lastEmit = 0;
-  let i = 0;
-  const parts: string[] = [];
-
-  while (i < n) {
-    if (input.charCodeAt(i) !== 0x3c /* '<' */) {
-      i += 1;
-      continue;
-    }
-    const start = i;
-    let cursor = start + 1;
-    while (cursor < n && isAsciiOrTagWhitespace(input.charCodeAt(cursor))) {
-      cursor += 1;
-    }
-    if (cursor < n && input.charCodeAt(cursor) === 0x2f /* '/' */) {
-      cursor += 1;
-      while (cursor < n && isAsciiOrTagWhitespace(input.charCodeAt(cursor))) {
-        cursor += 1;
-      }
-    }
-    if (
-      cursor + 10 <= n &&
-      input.slice(cursor, cursor + 10).toLowerCase() === "untrusted_"
-    ) {
-      let scan = cursor + 10;
-      while (
-        scan < n &&
-        input.charCodeAt(scan) !== 0x3e /* '>' */ &&
-        input.charCodeAt(scan) !== 0x3c /* '<' */
-      ) {
-        scan += 1;
-      }
-      if (scan < n && input.charCodeAt(scan) === 0x3e /* '>' */) {
-        if (start > lastEmit) {
-          parts.push(input.slice(lastEmit, start));
-        }
-        parts.push("[escaped_untrusted_tag]");
-        i = scan + 1;
-        lastEmit = i;
-        continue;
-      }
-      i = scan;
-      continue;
-    }
-    i = cursor > start + 1 ? cursor : start + 1;
-  }
-
-  if (lastEmit === 0) {
-    return input;
-  }
-  if (lastEmit < n) {
-    parts.push(input.slice(lastEmit));
-  }
-  return parts.join("");
+  return escapeUntrustedTagVariantsInternal(input);
 }
 
-const ANGLE_HOMOGLYPH_MAP: Readonly<Record<number, string>> = {
-  0x2039: "<",
-  0x203a: ">",
-  0x2329: "<",
-  0x232a: ">",
-  0x27e8: "<",
-  0x27e9: ">",
-  0x3008: "<",
-  0x3009: ">",
-  0xfe64: "<",
-  0xfe65: ">",
-};
-
+/** Strips invisible Unicode smuggling characters and folds attack homoglyphs while preserving symbols like `€50/m²`. */
 export function normalizeAndStripInvisibleSmuggling(rawText: string): string {
-  if (typeof rawText !== "string") {
-    throw new MDMValidationError("rawText must be a string");
-  }
-  const out: string[] = [];
-  for (const ch of rawText) {
-    const code = ch.codePointAt(0) ?? 0;
-    if (
-      (code >= 0xe0000 && code <= 0xe007f) ||
-      (code >= 0xe0100 && code <= 0xe01ef) ||
-      (code >= 0xfe00 && code <= 0xfe0f)
-    ) {
-      continue;
-    }
-    if (
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069) ||
-      code === 0x061c ||
-      code === 0x200e ||
-      code === 0x200f
-    ) {
-      continue;
-    }
-    if (
-      (code >= 0x200b && code <= 0x200d) ||
-      (code >= 0x2060 && code <= 0x2064) ||
-      code === 0x00ad ||
-      code === 0xfeff
-    ) {
-      continue;
-    }
-    if (
-      (code >= 0x00 && code <= 0x08) ||
-      code === 0x0b ||
-      code === 0x0c ||
-      (code >= 0x0e && code <= 0x1f) ||
-      (code >= 0x7f && code <= 0x9f)
-    ) {
-      continue;
-    }
-    if (code >= 0x1d400 && code <= 0x1d7ff) {
-      out.push(ch.normalize("NFKC"));
-      continue;
-    }
-    if (code >= 0xff01 && code <= 0xff5e) {
-      out.push(String.fromCodePoint(code - 0xfee0));
-      continue;
-    }
-    if (code === 0x3000) {
-      out.push(" ");
-      continue;
-    }
-    const mapped = ANGLE_HOMOGLYPH_MAP[code];
-    if (mapped !== undefined) {
-      out.push(mapped);
-      continue;
-    }
-    out.push(ch);
-  }
-  return out.join("");
+  return auditAndNormalizeUntrustedText(rawText).normalized;
 }
 
+/** Sanitizes untrusted text and wraps it inside `<untrusted_data>` delimiters. */
 export function neutralizeUntrustedDelimiters(
   rawText: string,
   maxChars = 16_384,
@@ -246,16 +119,13 @@ export function neutralizeUntrustedDelimiters(
     /\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|preceding)\s+(?:instructions?|prompts?|rules?|rubrics?)\b/gi,
     "[neutralized_directive]",
   );
-  const clipped =
-    bodyDirectivesNeutralized.length > maxChars
-      ? bodyDirectivesNeutralized.slice(0, maxChars)
-      : bodyDirectivesNeutralized;
+  const clipped = truncateCodePoints(bodyDirectivesNeutralized, maxChars);
   return `<untrusted_data>\n${clipped}\n</untrusted_data>`;
 }
 
 function safeSerializeJson(value: unknown): string {
   const seen = new WeakSet<object>();
-  return JSON.stringify(value ?? {}, (_key, currentValue: unknown) => {
+  const serialized = JSON.stringify(value ?? {}, (_key, currentValue: unknown) => {
     if (typeof currentValue === "bigint") {
       return currentValue.toString();
     }
@@ -267,17 +137,18 @@ function safeSerializeJson(value: unknown): string {
     }
     return currentValue;
   });
+  return serialized ?? "{}";
 }
 
 function validateGuardProbabilities(
-  probs: Record<string, number> | undefined,
+  probs: unknown,
   expectedKeys: readonly string[],
   slotLabel: string,
 ): Record<string, number> {
-  if (!probs || typeof probs !== "object") {
+  if (!isPlainRecord(probs)) {
     throw new MDMValidationError(`guard slot ${slotLabel} missing probabilities`);
   }
-  const validated = Object.create(null) as Record<string, number>;
+  const validated = nullProtoRecord<number>();
   let total = 0.0;
   for (const key of expectedKeys) {
     const rawVal = Object.hasOwn(probs, key) ? probs[key] : undefined;
@@ -295,12 +166,15 @@ function validateGuardProbabilities(
     );
   }
   for (const key of expectedKeys) {
-    validated[key] = (validated[key] as number) / total;
+    const val = validated[key];
+    if (val !== undefined) {
+      validated[key] = val / total;
+    }
   }
-  return validated;
+  return { ...validated };
 }
 
-const TOOL_GUARD_QUESTIONS: Record<string, DecisionQuestion> = {
+const TOOL_GUARD_QUESTIONS: Readonly<Record<string, DecisionQuestion>> = {
   disposition: {
     type: "choice",
     instructions:
@@ -324,6 +198,7 @@ const TOOL_GUARD_QUESTIONS: Record<string, DecisionQuestion> = {
   },
 };
 
+/** Builds a fail-closed Genkit tool authorization guard backed by `MDMClient`. */
 export function createGenkitToolGuard(
   client: Pick<MDMClient, "decideSystemOne">,
   policy: ActionStakesPolicy = {},
@@ -557,15 +432,16 @@ export function createGenkitToolGuard(
         isIrreversible,
         requiredConfidence,
         shouldEscalate: true,
-        reason: `fail_closed_error:${String(err)}`,
+        reason: `fail_closed_error:${formatUnknownError(err)}`,
       };
     }
   };
 }
 
+/** Creates a reusable Genkit flow step that invokes `decideSystemOne` with optional untrusted-input quarantine. */
 export function createGenkitDecisionStep(
   client: Pick<MDMClient, "decideSystemOne">,
-  questions: Record<string, DecisionQuestion>,
+  questions: Readonly<Record<string, DecisionQuestion>>,
   options: { readonly quarantineUntrusted?: boolean } = {},
 ): (state: unknown, images?: readonly string[]) => Promise<DecisionResponse> {
   if (Object.keys(questions).length === 0) {

@@ -85,6 +85,15 @@ resource "google_cloud_run_v2_service" "orchestrator" {
       }
     }
   }
+
+  depends_on = [google_secret_manager_secret_iam_member.orchestrator_secret_accessor]
+
+  lifecycle {
+    precondition {
+      condition     = var.cloudrun_max_instances >= var.cloudrun_min_instances
+      error_message = "cloudrun_max_instances must be >= cloudrun_min_instances."
+    }
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "authorized_invokers" {

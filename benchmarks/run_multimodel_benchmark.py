@@ -665,7 +665,7 @@ def _fmt_p(p_val: float) -> str:
 
 
 def render_markdown_report(summary: Mapping[str, Any]) -> str:
-    """Render a clean, anti-slop Markdown report with zero dashes or horizontal dividers."""
+    """Render a clean Markdown report with zero dashes or horizontal dividers."""
     p1 = summary["panels"]["multimodel_calibration_50"]
     p2 = summary["panels"]["safety_xstest_360"]
     m_cnt = summary["distinct_model_count"]
@@ -683,7 +683,7 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
         "evaluates embedding probes (`Classy v0.3.3`, `Classier v0.2.0`), compact 2B deciders (`Strands Decider 2B v19`), "
         "and masked diffusion verifiers (`dgem v0.3.1`, `DecisionGemma`).",
         "",
-        "## Panel 1: Multi-Task Calibration Leaderboard (`N = 50`)",
+        "## Panel 1 Multi-Task Calibration Leaderboard (`N = 50`)",
         "",
         "| Arm | Acc | Brier (95% Bootstrap CI) | Murphy REL / RES | NLL | ECE | ACE | AURC | Conformal Cov@0.05 / @0.10 | Mean Set@0.10 | McNemar p (vs Ref) | Mean Latency (ms) | Pareto |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
@@ -708,7 +708,7 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
             "",
             f"**Panel 1 Brier-Latency Pareto Frontier**: {', '.join(f'`{n}`' for n in p1['pareto_frontier_brier_latency'])}.",
             "",
-            "## Panel 2: XSTest Safety Boundary Leaderboard (`N = 360`)",
+            "## Panel 2 XSTest Safety Boundary Leaderboard (`N = 360`)",
             "",
             "| Arm | Acc | Macro-F1 | Brier (95% Bootstrap CI) | Murphy REL / RES | NLL | ECE | ACE | AURC | Conformal Cov@0.05 / @0.10 | Mean Set@0.10 | McNemar p (vs Ref) | Latency (ms) | Pareto |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",

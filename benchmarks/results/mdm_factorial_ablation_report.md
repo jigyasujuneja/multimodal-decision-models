@@ -50,7 +50,7 @@
 | Exact Shapley `phi_K` | `+0.2974` | `[+0.2733, +0.3219]` | `5.750e-126` | `+21.94%` | `[+19.61%, +24.35%]` | `True` |
 | Exact Shapley `phi_P` | `+0.1047` | `[+0.0835, +0.1272]` | `5.371e-21` | `+6.36%` | `[+4.28%, +8.19%]` | `True` |
 
-- **Shapley Efficiency Identity**: `sum(phi) = +0.642380` vs `U(1111) - U(0000) = +0.642380` (residual `0.00e+00`).
+- **Shapley Total Attribution Check**: `sum(phi) = +0.642380` matches `U(1111) - U(0000) = +0.642380` by algebraic efficiency.
 
 ## 4. Mandatory Iso-Escalation & Iso-Budget Controls (`C1..C5` vs `R4`)
 
@@ -83,6 +83,6 @@
 | `1110` | `R3_5_LOO_noP_1110` | 61.50% | 83.47% | 0.2878 | 0.0920 | 10993 | $0.0105 | 52.8% | 0.4267 |
 | `1111` | `R4_1111` | 62.33% | 83.78% | 0.2830 | 0.0919 | 11225 | $0.0076 | 30.9% | 0.4870 |
 
-## 6. Tier-1 Fast Screening Summary (`400` Episodes: `120 D_cal / 80 D_val / 200 D_test`)
+## 6. Tier-1 Fast Screening Summary (`400` Episodes across `120 D_cal / 80 D_val / 200 D_test`)
 
 - **Tier-1 `R1 (0000)` -> `R4 (1111)`**: Episode Success `0.00%` -> `50.00%`, Turn Accuracy `22.83%` -> `78.67%`, Mean Cost `$0.0065` -> `$0.0094`/episode, Net Utility `-0.1178` -> `0.3308` (Shapley sum `+0.4486`).

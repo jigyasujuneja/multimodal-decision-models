@@ -80,11 +80,11 @@ class TestV050GdmUpgradesAndMdmBench(unittest.TestCase):
         self.assertIn("tail_opt", weighted_set.prediction_set)
 
         # Contract validation checks
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"calib_groups must have the same length as"):
             mdm.calibrate_mondrian_conformal_quantiles(
                 calib_probs, calib_labels, calib_groups=["only_one"]
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"test_weight must be finite and > 0"):
             mdm.weighted_conformal_prediction_set(
                 calib_probs, calib_labels, calib_weights, test_tail_prob, test_weight=-1.0
             )
@@ -98,7 +98,7 @@ class TestV050GdmUpgradesAndMdmBench(unittest.TestCase):
         self.assertGreaterEqual(u2["joint_max_score_conformal"]["simultaneous_coverage"], 0.89)
         self.assertGreaterEqual(u2["joint_bonferroni_conformal"]["simultaneous_coverage"], 0.89)
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"calib_slot_probs and calib_slot_labels must be"):
             mdm.calibrate_multislot_joint_conformal([], [], alpha=0.10)
 
     def test_pride_cyclic_permutation_debiasing_and_stability_metrics(self) -> None:
@@ -188,7 +188,7 @@ class TestV050GdmUpgradesAndMdmBench(unittest.TestCase):
         self.assertEqual(sub_res.decisions["root_cause_cfg"], "full")
         self.assertLessEqual(sub_res.tokens_after, 250)
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"redundancy_penalty_weight must lie in \[0\.0, 1\.0\]"):
             mdm.prune_agent_context_blocks(blocks, probs, 250, redundancy_penalty_weight=1.5)
 
     def test_transitive_polytope_projection_eliminates_all_3cycle_violations(self) -> None:

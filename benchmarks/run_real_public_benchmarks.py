@@ -723,7 +723,7 @@ def format_markdown_report(results: Mapping[str, Any]) -> str:
     exp_c = results["experiment_c_jev_agent_harness_and_agentdecisionbench"]
 
     lines = [
-        "# Real-Data Benchmark Report: DecisionBench 1.0, TypedDecisions, arXiv:2610.03935, and arXiv:2610.21412v1",
+        "# Real-Data Benchmark Report for DecisionBench 1.0, TypedDecisions, arXiv:2610.03935, and arXiv:2610.21412v1",
         "",
         "## 1. Real 7-Model Evaluation on Multi-Slot TypedDecisions (`N = 500` Real Questions, `250` Held-Out Test)",
         "",
@@ -768,13 +768,13 @@ def format_markdown_report(results: Mapping[str, Any]) -> str:
             f"   - **Simultaneous Max-Score Joint Conformal (Ours)**: **`{ms['joint_max_score_coverage']:.4f}`** (mean set size `{ms['joint_max_score_mean_set_size']:.3f}`)",
             f"   - **Simultaneous Bonferroni Joint Conformal (Ours)**: **`{ms['joint_bonferroni_coverage']:.4f}`** (mean set size `{ms['joint_bonferroni_mean_set_size']:.3f}`)",
             "",
-            "## 2. Exp A: Universal 256-Code Bijection & Think Guard",
+            "## 2. Exp A Universal 256-Code Bijection & Think Guard",
             "",
             f"- **Universal Single-Token Code Inventory**: `{exp_a['universal_code_count']}` codes (`{exp_a['first_30_codes'][:6]} ... {exp_a['last_10_codes'][-4:]}`)",
             f"- **Contains Rare BPE-Split Two-Letter Pairs (`BQ, CJ, FQ, GZ, ...`)**: `{exp_a['contains_any_bpe_split_pairs']}`",
             f"- **Unstripped `<think>` First-Token Leakage Guard Triggered (`LogprobAlignmentError`)**: `{exp_a['think_tag_leakage_guard_triggered']}`",
             "",
-            "## 3. Exp B: Reasoning-to-Readout Distillation (`N = 300`)",
+            "## 3. Exp B Reasoning-to-Readout Distillation (`N = 300`)",
             "",
             "| Readout / Distillation Arm | Held-Out Accuracy | Multiclass Brier | ECE | NLL | KL to Human Soft Consensus | Ordinal Score MAE |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
@@ -796,7 +796,7 @@ def format_markdown_report(results: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## 4. Exp C: `AgentDecisionBench` (`N = 600` States)",
+            "## 4. Exp C `AgentDecisionBench` (`N = 600` States)",
             "",
             "### 4.1 `L2` Acceptable-Set Accuracy & `must_ask` Errors",
             "",
@@ -840,7 +840,7 @@ def format_markdown_report(results: Mapping[str, Any]) -> str:
             "",
             "## 5. Key Takeaways, Trade-Offs, & Limitations",
             "",
-            "- **Operational Takeaway**: Pre-gated Product-of-Experts (`Pre-Gated PoE + Temperature Scaling`) outperforms Naive 5-Model Mean (`82.08%` vs `78.75%` accuracy, `0.2449` vs `0.3125` Brier) because uncalibrated models (`laya`, `julia-onnx`) degrade unweighted ensembles.",
+            f"- **Operational Takeaway**: Pre-gated Product-of-Experts (`Pre-Gated PoE + Temperature Scaling`) outperforms Naive 5-Model Mean (`{poe['accuracy'] * 100:.2f}%` vs `{naive['accuracy'] * 100:.2f}%` accuracy, `{poe['brier']:.4f}` vs `{naive['brier']:.4f}` Brier) because uncalibrated models (`laya`, `julia-onnx`) degrade unweighted ensembles.",
             "- **Limitations & Scope Boundaries**: Scalar Proposition 1 confidence deferral fails under candidate-set expansion (`69 -> 129` tools on `DecisionGym-Shift`), requiring explicit action-stakes separation ($V_{\\text{irrev}} = 5.0$ vs $V_{\\text{rev}} = 0.15$) and secondary anchor consensus before executing state-mutating calls.",
             "",
         ]

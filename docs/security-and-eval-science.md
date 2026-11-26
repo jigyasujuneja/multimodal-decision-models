@@ -1,18 +1,18 @@
 # Adversarial security hardening and statistical evaluation science
 
-To defend multimodal decision pipelines against indirect prompt injection, calibration data poisoning, cross-tenant cache probing, and biased LLM autoraters, `multimodal-decision-models` (`v1.1.0`) provides fail-closed security primitives in [`security.py`](../src/multimodal_decision_models/security.py) and [`contracts.py`](../src/multimodal_decision_models/contracts.py) paired with debiased inference estimators and factorial ablation protocols in [`eval_suite.py`](../src/multimodal_decision_models/eval_suite.py) and [`experiment_protocol.py`](../src/multimodal_decision_models/experiment_protocol.py). Across pre-registered experiments `EXP-V11-06` through `EXP-V11-10` (`500` deterministic security and evaluation instances) and the `1,200`-episode `MDM-EpisodeBench` `Tier-2` factorial suite (`3,600` locked `D_test` turn decisions), each defense, interaction contrast, and matched-budget control meets its Holm-Bonferroni family-wise threshold ($\alpha = 0.05$).
+To defend multimodal decision pipelines against indirect prompt injection, calibration data poisoning, cross-tenant cache probing, and biased LLM autoraters, `multimodal-decision-models` (`v1.3.1`) provides fail-closed security primitives in [`security.py`](../src/multimodal_decision_models/security.py) and [`contracts.py`](../src/multimodal_decision_models/contracts.py) paired with debiased inference estimators and factorial ablation protocols in [`eval_suite.py`](../src/multimodal_decision_models/eval_suite.py) and [`experiment_protocol.py`](../src/multimodal_decision_models/experiment_protocol.py). Across pre-registered deterministic verification studies `EXP-V11-06` through `EXP-V11-10` (`500` security and statistical stress instances combining committed receipt panels with controlled adversarial injections) and the `1,200`-episode `MDM-EpisodeBench` `Tier-2` factorial suite (`3,600` locked `D_test` turn decisions), each defense, interaction contrast, and matched-budget control meets its Holm-Bonferroni family-wise threshold ($\alpha = 0.05$).
 
 ## Threat model and defense verification matrix
 
 The following table summarizes the adversarial attack surfaces and statistical failure modes verified in [`benchmarks/run_v110_frontier_security_evals_bench.py`](../benchmarks/run_v110_frontier_security_evals_bench.py):
 
-| Experiment ID | Threat or statistical failure mode | Vulnerable baseline outcome | `mdm` (`v1.1.0`) defense or estimator | Verified outcome (`N = 100` per study) |
+| Experiment ID | Threat or statistical failure mode | Vulnerable baseline outcome | `mdm` (`v1.3.1`) defense or estimator | Verification outcome (`N = 100` per study) |
 | :--- | :--- | :--- | :--- | :--- |
 | **`EXP-V11-06`** | Fullwidth `NFKC` homoglyphs, Unicode Tags (`U+E0000..U+E007F`), Bidi overrides (`U+202E`), and Comparative Undermining Attacks (`CUA`) | Static ASCII `<untrusted_data>` fence suffers `80.00%` delimiter escape or sabotage | `normalize_and_strip_invisible_smuggling` + `wrap_canary_untrusted_envelope` + `detect_comparative_undermining_attack` | `0.00%` delimiter escape, `100.00%` attack recall, `0.00%` benign FPR (`p = 1.82e-12`) |
 | **`EXP-V11-07`** | `8%` calibration label/score poisoning driving nonconformity scores to `0.0` (silent under-coverage) or `1.0` (escalation DoS) | Standard split conformal clean coverage drops to `0.7700` (target `0.9000`) | `calibrate_trimmed_robust_conformal_quantile` + `audit_calibration_poisoning_influence` | Restores `0.9000` clean test coverage; `1.0000` poisoning detection `AUROC` (`p = 2.44e-04`) |
-| **`EXP-V11-08`** | Cross-tenant SHA-256 cache oracle, oversized/negative LSP `Content-Length`, `> 32`-depth JSON bombs, `__proto__` keys, and metadata SSRF | Unkeyed content hash leaks cached decisions across tenants; naive parsers crash or block | Domain-separated `HMAC-SHA256` tenant cache + hardened `mcp_server.py` `stdio` framing | `0.00%` cross-tenant hits, `0` unhandled exceptions, `100/100` (`100.0%`) fail-closed rejections |
+| **`EXP-V11-08`** | Cross-tenant SHA-256 cache oracle, oversized/negative LSP `Content-Length`, `> 32`-depth JSON bombs, `__proto__` keys, plus metadata SSRF | Unkeyed content hash leaks cached decisions across tenants; naive parsers crash or block | Domain-separated `HMAC-SHA256` tenant cache + hardened `mcp_server.py` `stdio` framing | `0.00%` cross-tenant hits, `0` unhandled exceptions, `100/100` (`100.0%`) fail-closed rejections |
 | **`EXP-V11-09`** | Biased LLM-as-a-Judge autorater (`+14` pt systematic optimism) used directly for confidence intervals, or `PPI++` applied under severe label shift | Naive autorater 95% CI achieves `0.00%` true parameter coverage | Cross-fitted `power_tuned_ppi_mean_ci` + `compare_rogan_gladen_vs_ppi` regime selector | `0.9440` 95% CI coverage, `38.99%` narrower CI than gold-only (`2.70x` $N_{\text{eff}}/n$), `0.0500` null FPR (`p = 7.45e-09`) |
-| **`EXP-V11-10`** | Single-template conformal collapse under prompt paraphrase, `(A,B)` positional judge bias, and end-state-only agent grading | Worst-paraphrase coverage `0.5500`; single-order judge flip rate `51.00%`; `30.00%` hidden trajectory faults | `paraphrase_conformal_stability_audit` + `position_swapped_autorater_audit` + `evaluate_4stage_trajectory_judge` | `0.9100` worst-paraphrase coverage, `0.00%` swap flip rate, `100.00%` first-fault stage recall |
+| **`EXP-V11-10`** | Single-template conformal collapse under prompt paraphrase, `(A,B)` positional judge bias, and end-state-only agent grading | Worst-paraphrase coverage `0.5500`; single-order judge flip rate `51.00%`; `30.00%` hidden trajectory faults | `paraphrase_conformal_stability_audit` + `position_swapped_autorater_audit` + `evaluate_4stage_trajectory_judge` | `0.9100` worst-paraphrase coverage, symmetric swap averaging (`0.00%` order discrepancy), `100.00%` first-fault stage recall |
 
 ## Quarantine Unicode smuggling, homoglyph breakouts, and `CUA` sabotage
 
@@ -209,7 +209,7 @@ Above `R0` (always-frontier generative ceiling) and `R1 = 0000` (stateless raw d
 
 Stepping from `R1 (0000)` to `R4 (1111)` lifts 6-turn episode success from `0.83%` to `62.33%` while cutting mean episode cost by `84.3%` relative to `R0` (`$0.0482` to `$0.0076`) and by `16.5%` relative to uncalibrated `R1` (`$0.0091`). Against `R0` at a `1.0%` non-inferiority margin, Tango's Berger-Boos paired test (`tango_paired_non_inferiority_test`) confirms turn-level superiority (`delta = +7.39%`, `z = 10.47`, `p = 1.0e-4`).
 
-### Knock-ins, leave-one-out knockouts, Yates synergies, and exact Shapley attribution
+### Knock-ins, leave-one-out knockouts, Yates interactions, and exact Shapley attribution
 
 Evaluating single-factor knock-ins (`KI_*` onto `0000`) alongside Leave-One-Out knockouts (`LOO_*` from `1111`) exposes architectural coupling that a linear ladder alone cannot isolate:
 
@@ -224,7 +224,7 @@ Evaluating single-factor knock-ins (`KI_*` onto `0000`) alongside Leave-One-Out 
 | LOO knockout (ref `1111`) | `LOO_noK` | `1101` | `27.67%` | `-34.67%` | `$0.0129` | `+0.0447` | `-0.4423` | Largest single knockout drop (`+69.7%` cost jump plus multi-turn distractor saturation). |
 | LOO knockout (ref `1111`) | `LOO_noP` | `1110` | `61.50%` | `-0.83%` | `$0.0105` | `+0.4267` | `-0.0603` | Removing `P` retains `61.50%` episode success while raising episode cost by `+38.2%` (`52.8%` vs `30.9%` escalation). |
 
-Across the complete $2^4 = 16$ factorial cube (`B = 2,000` `HMAC`-seeded cluster-bootstrap resamples in `compute_factorial_interactions_and_shapley`), exact Shapley attributions over all $4! = 24$ factor permutations sum identically to $U(1111) - U(0000) = +0.642380$ (`0.00e+00` residual):
+Across the complete $2^4 = 16$ factorial cube (`B = 2,000` `HMAC`-seeded cluster-bootstrap resamples in `compute_factorial_interactions_and_shapley`), exact Shapley attributions over all $4! = 24$ factor permutations decompose total net utility gain $U(1111) - U(0000) = +0.642380$ additively by algebraic efficiency:
 
 | Term | Net utility estimate | 95% cluster-bootstrap CI | Holm-adjusted `p` | Episode success estimate (`95%` CI) | Significant (`FWER <= 0.05`) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -232,11 +232,11 @@ Across the complete $2^4 = 16$ factorial cube (`B = 2,000` `HMAC`-seeded cluster
 | **Exact Shapley $\phi_M$** (`Multimodal compiler`) | **`+0.1813`** | `[+0.1582, +0.2037]` | `1.08e-54` | `+16.17%` (`[+14.06%, +18.19%]`) | `Yes` |
 | **Exact Shapley $\phi_P$** (`Pareto bandit router`) | **`+0.1047`** | `[+0.0835, +0.1272]` | `5.37e-21` | `+6.36%` (`[+4.28%, +8.19%]`) | `Yes` |
 | **Exact Shapley $\phi_C$** (`Calibrated conformal`) | **`+0.0589`** | `[+0.0286, +0.0891]` | `1.72e-04` | `+17.03%` (`[+13.78%, +20.32%]`) | `Yes` |
-| **Synergy $\hat{\tau}_{MK}$** (`Multimodal x Context MCKP`) | **`+0.1681`** | `[+0.1348, +0.2011]` | `1.67e-22` | `+14.92%` (`[+11.75%, +18.00%]`) | `Yes` |
-| **Synergy $\hat{\tau}_{CK}$** (`Conformal x Trajectory budget`) | **`+0.1521`** | `[+0.1157, +0.1865]` | `4.44e-15` | `+10.17%` (`[+6.46%, +13.88%]`) | `Yes` |
-| **Synergy $\hat{\tau}_{CP}$** (`Conformal x Bandit router`) | **`+0.1104`** | `[+0.0535, +0.1644]` | `2.66e-04` | `-15.08%` (`[-20.21%, -10.00%]`) | `Yes` |
-| **Synergy $\hat{\tau}_{CM}$** (`Conformal x Multimodal`) | `+0.0677` | `[+0.0329, +0.1026]` | `2.66e-04` | `+7.50%` (`[+3.88%, +11.08%]`) | `Yes` |
-| **Synergy $\hat{\tau}_{KP}$** (`Trajectory x Bandit router`) | `+0.0314` | `[+0.0056, +0.0592]` | `2.42e-02` | `+7.17%` (`[+4.50%, +9.92%]`) | `Yes` |
+| **Interaction $\hat{\tau}_{MK}$** (`Multimodal x Context MCKP`) | **`+0.1681`** | `[+0.1348, +0.2011]` | `1.67e-22` | `+14.92%` (`[+11.75%, +18.00%]`) | `Yes` |
+| **Interaction $\hat{\tau}_{CK}$** (`Conformal x Trajectory budget`) | **`+0.1521`** | `[+0.1157, +0.1865]` | `4.44e-15` | `+10.17%` (`[+6.46%, +13.88%]`) | `Yes` |
+| **Interaction $\hat{\tau}_{CP}$** (`Conformal x Bandit router`) | **`+0.1104`** | `[+0.0535, +0.1644]` | `2.66e-04` | `-15.08%` (`[-20.21%, -10.00%]`) | `Yes` |
+| **Interaction $\hat{\tau}_{CM}$** (`Conformal x Multimodal`) | `+0.0677` | `[+0.0329, +0.1026]` | `2.66e-04` | `+7.50%` (`[+3.88%, +11.08%]`) | `Yes` |
+| **Interaction $\hat{\tau}_{KP}$** (`Trajectory x Bandit router`) | `+0.0314` | `[+0.0056, +0.0592]` | `2.42e-02` | `+7.17%` (`[+4.50%, +9.92%]`) | `Yes` |
 | **Interaction $\hat{\tau}_{MP}$** (`Multimodal x Bandit`) | `-0.0686` | `[-0.0964, -0.0387]` | `1.29e-05` | `+5.50%` (`[+2.71%, +8.50%]`) | `Yes` |
 
 ### Iso-escalation and iso-budget controls
@@ -302,4 +302,4 @@ assert effect_summary.significant_effects["CP"] is True
 ## Related guides
 
 - Review **[Architectural boundaries and hybrid patterns for decision models](architectural-boundaries.md)** for hybrid reranking, sequential alpha-spending, blind-first consensus, and joint tuple decoding.
-- See **[Production deployment, Terraform, and MCP operations](production-deployment.md)** for Cloud Run, Secret Manager, and monitoring configuration.
+- See **[Production deployment with Terraform and MCP](production-deployment.md)** for Cloud Run, Secret Manager, and monitoring configuration.

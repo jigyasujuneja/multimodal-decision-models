@@ -131,7 +131,7 @@ func TestConformalRAGContextFilterQuarantinesInjections(t *testing.T) {
 		t.Fatalf("expected duplicate DocID to fail closed")
 	}
 
-	// DefaultConformalConfig() (9 abstain keys) must still escalate when DefaultAbstainDocID enters ConformalSetIDs!
+	// DefaultConformalConfig() (empty AbstainKeys) must still escalate when DefaultAbstainDocID enters ConformalSetIDs.
 	escRes, err := ConformalRAGContextFilter(
 		[]RerankCandidate{{DocID: "doc_1", Text: "Marginal evidence."}},
 		map[string]float64{"doc_1": 0.65, DefaultAbstainDocID: 0.35},

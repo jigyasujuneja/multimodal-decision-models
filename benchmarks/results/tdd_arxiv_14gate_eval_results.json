@@ -36,7 +36,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -98,7 +98,7 @@
           "unresolved_citation_count": 0,
           "bib_citations_checked": 0,
           "missing_bib_keys": [],
-          "unique_baseline_or_method_count": 24,
+          "unique_baseline_or_method_count": 23,
           "sample_baselines_found": [
             "aps",
             "bentkus",
@@ -119,7 +119,7 @@
         "score": 1,
         "details": {
           "archetype": "repo_readme_tdd",
-          "headings_count": 13,
+          "headings_count": 16,
           "min_headings_required": 4,
           "has_operational_or_intuitive_restatement": true
         }
@@ -129,10 +129,10 @@
         "name": "Heading Brevity (<=12 words avg, Zero Wh-Question Headings) & Paragraph Pacing (<=85 words avg)",
         "score": 1,
         "details": {
-          "avg_heading_words": 5.6,
+          "avg_heading_words": 6.8,
           "question_headings": [],
-          "avg_paragraph_words": 27.4,
-          "paragraph_count": 18
+          "avg_paragraph_words": 31.2,
+          "paragraph_count": 29
         }
       },
       "G11_formatting_tables_and_math_hygiene": {
@@ -140,7 +140,7 @@
         "name": "Structured Comparison Tables (>=1), Balanced Math Delimiters & Compiled PDF",
         "score": 1,
         "details": {
-          "table_count": 8,
+          "table_count": 11,
           "unbalanced_math_lines": [],
           "has_compiled_pdf": true
         }
@@ -155,9 +155,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -215,7 +215,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -235,7 +235,7 @@
           "double_emdash_hits": [],
           "raw_prose_arrow_count": 0,
           "raw_prose_arrow_hits": [],
-          "passive_voice_pct": 4.5
+          "passive_voice_pct": 4.0
         }
       },
       "G5_factuality_statistical_and_quantitative_rigor": {
@@ -277,7 +277,7 @@
           "unresolved_citation_count": 0,
           "bib_citations_checked": 0,
           "missing_bib_keys": [],
-          "unique_baseline_or_method_count": 32,
+          "unique_baseline_or_method_count": 31,
           "sample_baselines_found": [
             "angelopoulos",
             "aps",
@@ -298,7 +298,7 @@
         "score": 1,
         "details": {
           "archetype": "arxiv_md",
-          "headings_count": 27,
+          "headings_count": 29,
           "min_headings_required": 4,
           "has_operational_or_intuitive_restatement": true
         }
@@ -308,10 +308,10 @@
         "name": "Heading Brevity (<=12 words avg, Zero Wh-Question Headings) & Paragraph Pacing (<=85 words avg)",
         "score": 1,
         "details": {
-          "avg_heading_words": 7.7,
+          "avg_heading_words": 8.0,
           "question_headings": [],
-          "avg_paragraph_words": 47.4,
-          "paragraph_count": 86
+          "avg_paragraph_words": 47.2,
+          "paragraph_count": 100
         }
       },
       "G11_formatting_tables_and_math_hygiene": {
@@ -319,7 +319,7 @@
         "name": "Structured Comparison Tables (>=1), Balanced Math Delimiters & Compiled PDF",
         "score": 1,
         "details": {
-          "table_count": 3,
+          "table_count": 5,
           "unbalanced_math_lines": [],
           "has_compiled_pdf": true
         }
@@ -334,9 +334,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -394,7 +394,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -414,7 +414,7 @@
           "double_emdash_hits": [],
           "raw_prose_arrow_count": 0,
           "raw_prose_arrow_hits": [],
-          "passive_voice_pct": 2.3
+          "passive_voice_pct": 2.2
         }
       },
       "G5_factuality_statistical_and_quantitative_rigor": {
@@ -487,10 +487,10 @@
         "name": "Heading Brevity (<=12 words avg, Zero Wh-Question Headings) & Paragraph Pacing (<=85 words avg)",
         "score": 1,
         "details": {
-          "avg_heading_words": 9.2,
+          "avg_heading_words": 9.1,
           "question_headings": [],
-          "avg_paragraph_words": 34.2,
-          "paragraph_count": 43
+          "avg_paragraph_words": 34.3,
+          "paragraph_count": 44
         }
       },
       "G11_formatting_tables_and_math_hygiene": {
@@ -513,9 +513,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -573,7 +573,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -668,7 +668,7 @@
         "details": {
           "avg_heading_words": 9.5,
           "question_headings": [],
-          "avg_paragraph_words": 31.6,
+          "avg_paragraph_words": 31.7,
           "paragraph_count": 49
         }
       },
@@ -692,9 +692,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -752,7 +752,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -845,9 +845,9 @@
         "name": "Heading Brevity (<=12 words avg, Zero Wh-Question Headings) & Paragraph Pacing (<=85 words avg)",
         "score": 1,
         "details": {
-          "avg_heading_words": 7.4,
+          "avg_heading_words": 7.6,
           "question_headings": [],
-          "avg_paragraph_words": 23.4,
+          "avg_paragraph_words": 23.3,
           "paragraph_count": 9
         }
       },
@@ -871,9 +871,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -931,7 +931,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -1048,9 +1048,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -1108,7 +1108,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -1203,7 +1203,7 @@
         "details": {
           "avg_heading_words": 10.6,
           "question_headings": [],
-          "avg_paragraph_words": 42.7,
+          "avg_paragraph_words": 43.7,
           "paragraph_count": 3
         }
       },
@@ -1227,9 +1227,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -1287,7 +1287,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -1375,7 +1375,7 @@
         "name": "Heading Brevity (<=12 words avg, Zero Wh-Question Headings) & Paragraph Pacing (<=85 words avg)",
         "score": 1,
         "details": {
-          "avg_heading_words": 8.8,
+          "avg_heading_words": 8.9,
           "question_headings": [],
           "avg_paragraph_words": 18.4,
           "paragraph_count": 9
@@ -1401,9 +1401,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -1461,7 +1461,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -1550,7 +1550,7 @@
         "details": {
           "avg_heading_words": 7.6,
           "question_headings": [],
-          "avg_paragraph_words": 25.8,
+          "avg_paragraph_words": 30.8,
           "paragraph_count": 5
         }
       },
@@ -1574,9 +1574,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,
@@ -1634,7 +1634,7 @@
           "has_decisive_tradeoff_rationale": true
         }
       },
-      "G3_writing_zero_claudeisms_and_ai_slop": {
+      "G3_writing_zero_llm_tics_and_puffery": {
         "pillar": "2. Writing",
         "name": "Zero LLM Tells, Puffery & Zombie Nouns (Deterministic Prose Detector)",
         "score": 1,
@@ -1725,7 +1725,7 @@
         "details": {
           "avg_heading_words": 5.6,
           "question_headings": [],
-          "avg_paragraph_words": 76.3,
+          "avg_paragraph_words": 75.3,
           "paragraph_count": 3
         }
       },
@@ -1749,9 +1749,9 @@
           "has_figures_or_structured_scannability": true
         }
       },
-      "G14_polish_goldfish_self_containment_and_firewall": {
+      "G14_polish_self_containment_and_abstraction_firewall": {
         "pillar": "7. Polish",
-        "name": "Goldfish Self-Containment Test & Plan-to-Doc Abstraction Firewall",
+        "name": "Cold-Reader Self-Containment & Abstraction Firewall",
         "score": 1,
         "details": {
           "plan_leak_count": 0,

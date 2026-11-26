@@ -72,7 +72,7 @@ class V100DocumentationHubTest(unittest.TestCase):
     def test_readme_changelog_and_link_checker_pass(self) -> None:
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("docs/index.md", readme_text)
-        self.assertIn("v1.1.0", readme_text)
+        self.assertIn(f"v{mdm.__version__}", readme_text)
         self.assertIn("docs/architectural-boundaries.md", readme_text)
         self.assertIn("docs/security-and-eval-science.md", readme_text)
         self.assertIn("GeminiDecisionsBackend", readme_text)

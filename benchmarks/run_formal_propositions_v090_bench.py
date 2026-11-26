@@ -168,7 +168,7 @@ def run_pillar1_top_m_entropy_experiment(typed_rows: Sequence[Mapping[str, Any]]
         "top_m_escalation_rate": round(top_m_escalations / total_n, 4),
         "sibling_tie_recall_global": round(sibling_tie_recalled_global / max(1, sibling_tie_count), 4),
         "sibling_tie_recall_top_m": round(sibling_tie_recalled_top_m / max(1, sibling_tie_count), 4),
-        "mcnemar_p_value": round(float(mcnemar_stats.p_two_sided), 6),
+        "mcnemar_p_value": float(f"{float(mcnemar_stats.p_two_sided):.6g}"),
     }
 
 
@@ -343,7 +343,7 @@ def run_pillar3_polytope_and_sinkhorn_experiment(typed_rows: Sequence[Mapping[st
         "facet_bound_verified_all_100": max_violated_score <= (13.0 / 27.0) + 1e-9,
         "naive_marginal_trie_accuracy": round(sum(marginal_correct) / total_n, 4),
         "sinkhorn_dealiased_trie_accuracy": round(sum(sinkhorn_correct) / total_n, 4),
-        "mcnemar_p_value": round(float(mcnemar_stats.p_two_sided), 6),
+        "mcnemar_p_value": float(f"{float(mcnemar_stats.p_two_sided):.6g}"),
     }
 
 
@@ -437,8 +437,17 @@ def run_pillar4_combined_shift_conformal_experiment(mdm_rows: Sequence[Mapping[s
         "combined_shift_overall_coverage": round(sum(combined_all_covered) / total_n, 4),
         "unweighted_tail_coverage": round(sum(unweighted_tail_covered) / max(1, tail_n), 4),
         "combined_shift_tail_coverage": round(sum(combined_tail_covered) / max(1, tail_n), 4),
-        "mcnemar_p_value_vs_unweighted": round(float(mcnemar_stats.p_two_sided), 6),
+        "mcnemar_p_value_vs_unweighted": float(f"{float(mcnemar_stats.p_two_sided):.6g}"),
     }
+
+
+def _fmt_p_value(p_value: float) -> str:
+    """Format p-values without collapsing small positive values to exact zero."""
+    if p_value <= 0.0:
+        return "< 10^{-300}"
+    if p_value < 1e-4:
+        return f"= {p_value:.2e}"
+    return f"= {p_value:.6f}"
 
 
 def render_markdown_report(results: Mapping[str, Any]) -> str:
@@ -456,7 +465,10 @@ def render_markdown_report(results: Mapping[str, Any]) -> str:
     p4 = results["pillar4_combined_shift_conformal"]
 
     lines = [
-        "# Formal Propositions v0.9.0 Benchmark Report ($N = 400$ Real Decision Receipts)",
+        f"# Formal Propositions v0.9.0 Benchmark Report ($N = {results['total_instances']}$ Mixed Receipt and Stress Instances)",
+        "",
+        "Pillars 2, 3, and 4 evaluate committed `DecisionBench` and `MDM-Bench` probability receipts; "
+        "Pillar 1 injects controlled $K=100$ sibling-tie probes derived from committed receipts to stress-test Lemma 1.",
         "",
         "| Pillar | Proposition / Mechanism | Baseline Metric | Proposed Metric | Exact Guarantee / $p$-Value |",
         "| :--- | :--- | :---: | :---: | :---: |",
@@ -465,7 +477,7 @@ def render_markdown_report(results: Mapping[str, Any]) -> str:
             f"Lemma 1 (`effective_top_m_entropy`) | "
             f"`{p1['global_entropy_accuracy']:.4f}` acc (`{p1['sibling_tie_recall_global']:.2%}` tie recall) | "
             f"**`{p1['top_m_entropy_accuracy']:.4f}`** acc (**`{p1['sibling_tie_recall_top_m']:.2%}`** tie recall) | "
-            f"$p = {p1['mcnemar_p_value']:.6f}$ |"
+            f"$p {_fmt_p_value(float(p1['mcnemar_p_value']))}$ |"
         ),
         (
             f"| **2. Hint-Conditioned Cascade Risk (`N={p2['n']}`)** | "
@@ -479,14 +491,14 @@ def render_markdown_report(results: Mapping[str, Any]) -> str:
             f"Propositions 2 & 3 (`cut_polytope_triangle_consistency_score`, `sinkhorn_dealiased_trie_decode`) | "
             f"`{p3['naive_marginal_trie_accuracy']:.4f}` marginal trie acc | "
             f"**`{p3['sinkhorn_dealiased_trie_accuracy']:.4f}`** Sinkhorn trie acc | "
-            f"Max violated facet `{p3['max_violated_facet_score']:.6f}` $\\le 13/27$, $p = {p3['mcnemar_p_value']:.6f}$ |"
+            f"Max violated facet `{p3['max_violated_facet_score']:.6f}` $\\le 13/27$, $p {_fmt_p_value(float(p3['mcnemar_p_value']))}$ |"
         ),
         (
             f"| **4. Combined Label + Covariate Shift (`N={p4['n']}`)** | "
             f"Proposition 4 (`label_shift_weighted_conformal_prediction_set`) | "
             f"`{p4['unweighted_overall_coverage']:.4f}` overall (`{p4['unweighted_tail_coverage']:.4f}` tail) | "
             f"**`{p4['combined_shift_overall_coverage']:.4f}`** overall (**`{p4['combined_shift_tail_coverage']:.4f}`** tail) | "
-            f"Target $\\ge {p4['target_coverage']:.2f}$, $p = {p4['mcnemar_p_value_vs_unweighted']:.6f}$ |"
+            f"Target $\\ge {p4['target_coverage']:.2f}$, $p {_fmt_p_value(float(p4['mcnemar_p_value_vs_unweighted']))}$ |"
         ),
         "",
     ]
@@ -501,13 +513,17 @@ def main() -> int:
     """
     typed_rows = load_typed_receipts(TYPED_RECEIPTS_PATH)
     mdm_rows = load_typed_receipts(MDM_BENCH_RECEIPTS_PATH)
+    pillar1 = run_pillar1_top_m_entropy_experiment(typed_rows)
+    pillar2 = run_pillar2_cascade_risk_bound_experiment(typed_rows)
+    pillar3 = run_pillar3_polytope_and_sinkhorn_experiment(typed_rows)
+    pillar4 = run_pillar4_combined_shift_conformal_experiment(mdm_rows)
     results = {
         "suite": "formal_propositions_v090",
-        "total_instances": 380,
-        "pillar1_top_m_entropy": run_pillar1_top_m_entropy_experiment(typed_rows),
-        "pillar2_cascade_risk_bound": run_pillar2_cascade_risk_bound_experiment(typed_rows),
-        "pillar3_polytope_and_sinkhorn": run_pillar3_polytope_and_sinkhorn_experiment(typed_rows),
-        "pillar4_combined_shift_conformal": run_pillar4_combined_shift_conformal_experiment(mdm_rows),
+        "total_instances": int(pillar1["n"]) + int(pillar2["n"]) + int(pillar3["n"]) + int(pillar4["n"]),
+        "pillar1_top_m_entropy": pillar1,
+        "pillar2_cascade_risk_bound": pillar2,
+        "pillar3_polytope_and_sinkhorn": pillar3,
+        "pillar4_combined_shift_conformal": pillar4,
     }
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

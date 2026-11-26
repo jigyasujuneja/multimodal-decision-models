@@ -18,23 +18,26 @@ Run via:
     python3 -m multimodal_decision_models.mcp_server
 
 Supports both standard MCP newline-delimited JSON-RPC 2.0 messages and LSP-style
-`Content-Length: <N>\\r\\n\\r\\n` framed messages over `stdin` / `stdout`, exposing four tools:
+`Content-Length: <N>\\r\\n\\r\\n` framed messages over `stdin` / `stdout`, exposing six tools:
   1. `shortlist_candidates`
   2. `evaluate_conformal_decision`
   3. `prune_context_blocks`
   4. `compile_contact_sheet`
+  5. `audit_untrusted_candidates`
+  6. `evaluate_trajectory_guard`
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Collection, Mapping, Sequence
 import copy
 import json
 import math
 import re
 import sys
-from typing import Any, BinaryIO, Collection, Mapping, Sequence
+from typing import Any, BinaryIO
 
 from .calibration import VALID_PRIOR_GATE_MODES, effective_top_m_entropy, pre_gated_bayesian_poe_fusion
 from .conformal import DEFAULT_CONFORMAL_ABSTAIN_KEYS, DEFAULT_CONFORMAL_SEED_KEY, calibrate_conformal_quantile, conformal_prediction_set
@@ -51,6 +54,7 @@ SUPPORTED_BACKEND_PARADIGMS: tuple[str, ...] = (
     "dgem_systemone",
     "openai_logprobs",
     "vertex_gemini",
+    "gemini_decisions",
     "blackbox_sampled",
 )
 DEFAULT_MCP_PROTOCOL_VERSION: str = "2024-11-05"
@@ -68,7 +72,11 @@ class _InvalidParamsError(ValueError):
 
 
 class _FramingInvalidRequestError(ValueError):
-    """Raised when LSP Content-Length header bounds or header line limits are violated."""
+    """Raised when frame size, MIME Content-Length, or header line limits are violated."""
+
+    def __init__(self, message: str, *, is_mime: bool = True) -> None:
+        super().__init__(message)
+        self.is_mime = is_mime
 
 
 def _reject_json_constant(token: str) -> Any:
@@ -550,7 +558,7 @@ def _tool_shortlist_candidates(args: Mapping[str, Any]) -> dict[str, Any]:
         if "use_csls" in args and args["use_csls"] is not None
         else False
     )
-    res = idx.query(
+    query_result = idx.query(
         query_vec,
         query_lab_color=q_lab,
         query_aspect_bin=q_aspect or None,
@@ -558,14 +566,14 @@ def _tool_shortlist_candidates(args: Mapping[str, Any]) -> dict[str, Any]:
         use_csls=use_csls,
     )
     return {
-        "shortlist_ids": res.shortlist_ids,
-        "stage2a_energies": res.stage2a_energies,
-        "stage2a_probabilities": res.stage2a_probabilities,
-        "prior_logits": res.prior_logits,
-        "fast_exit": res.fast_exit,
-        "fast_exit_id": res.fast_exit_id,
-        "top1_margin": res.top1_margin,
-        "z_score": res.z_score,
+        "shortlist_ids": query_result.shortlist_ids,
+        "stage2a_energies": query_result.stage2a_energies,
+        "stage2a_probabilities": query_result.stage2a_probabilities,
+        "prior_logits": query_result.prior_logits,
+        "fast_exit": query_result.fast_exit,
+        "fast_exit_id": query_result.fast_exit_id,
+        "top1_margin": query_result.top1_margin,
+        "z_score": query_result.z_score,
     }
 
 
@@ -896,8 +904,8 @@ def _tool_audit_untrusted_candidates(args: Mapping[str, Any]) -> dict[str, Any]:
     envelopes: dict[str, str] = {}
     if wrap_canary:
         for cid in audit.clean_ids:
-            env = wrap_canary_untrusted_envelope(clean_texts[cid], request_id=f"{req_id}:{cid}")
-            envelopes[cid] = env.fenced_text
+            envelope = wrap_canary_untrusted_envelope(clean_texts[cid], request_id=f"{req_id}:{cid}")
+            envelopes[cid] = envelope.fenced_text
     return {
         "quarantined_ids": list(audit.quarantined_ids),
         "clean_ids": list(audit.clean_ids),
@@ -1182,9 +1190,11 @@ def handle_jsonrpc_message(
 def _drain_mime_headers(stream: BinaryIO, max_lines: int = _MAX_DRAIN_HEADER_LINES) -> None:
     """Consume remaining lines of an oversized or malformed MIME header block up to the blank separator."""
     for _ in range(max_lines):
-        hdr_line = stream.readline()
+        hdr_line = stream.readline(MAX_FRAME_BYTES + 1)
         if not hdr_line or hdr_line in (b"\r\n", b"\n"):
             break
+        if len(hdr_line) > MAX_FRAME_BYTES and not hdr_line.endswith(b"\n"):
+            _drain_unterminated_line(stream)
 
 
 def _read_exact_bytes(stream: BinaryIO, n: int) -> bytes | None:
@@ -1223,10 +1233,10 @@ def _parse_content_length_value(raw_len_text: bytes | None) -> int:
 
 
 def _drain_unterminated_line(stream: BinaryIO, chunk_size: int = 65536) -> None:
-    """Drain remaining bytes of an oversized single line without unbounded memory growth."""
+    """Drain remaining bytes of an oversized single line without crossing into the next frame."""
     while True:
-        chunk = stream.read(chunk_size)
-        if not chunk or b"\n" in chunk:
+        chunk = stream.readline(chunk_size)
+        if not chunk or chunk.endswith(b"\n"):
             break
 
 
@@ -1246,7 +1256,8 @@ def _read_next_frame(
             if resync_to_mime:
                 continue
             raise _FramingInvalidRequestError(
-                f"unframed line exceeds MAX_FRAME_BYTES ({MAX_FRAME_BYTES})"
+                f"unframed line exceeds MAX_FRAME_BYTES ({MAX_FRAME_BYTES})",
+                is_mime=False,
             )
         stripped = line.strip()
         if not stripped:
@@ -1346,8 +1357,8 @@ def serve_stdio(
                 "id": None,
                 "error": {"code": -32600, "message": f"Invalid Request: {exc}"},
             }
-            _write_frame(out_stream, error_response, True)
-            resync_to_mime = True
+            _write_frame(out_stream, error_response, exc.is_mime)
+            resync_to_mime = exc.is_mime
             continue
         except ValueError as exc:
             error_response = {

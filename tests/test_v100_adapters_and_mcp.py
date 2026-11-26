@@ -141,7 +141,7 @@ class V100AdaptersAndDynamicMcpTest(unittest.TestCase):
         async def async_runner() -> None:
             return None
 
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"runner must be a synchronous"):
             mdm.create_adk_before_tool_guard(async_runner)  # type: ignore[arg-type]
 
         def failing_backend_fn(
@@ -283,7 +283,7 @@ class V100AdaptersAndDynamicMcpTest(unittest.TestCase):
             ["dgem_systemone", "vertex_gemini"],
         )
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"unsupported backend paradigm 'unknown_paradigm';"):
             mdm.build_mcp_tool_schemas(configured_backends=["unknown_paradigm"])
 
         # Disabled tool is also rejected on tools/call (fail-closed capability gate).

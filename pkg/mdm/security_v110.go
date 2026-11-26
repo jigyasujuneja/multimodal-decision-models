@@ -110,30 +110,124 @@ var (
 	}
 )
 
+var mathLetterlikeHoles = map[rune]rune{
+	0x2102: 'C', // Double-Struck Capital C
+	0x210A: 'g', // Script Small g
+	0x210B: 'H', // Script Capital H
+	0x210C: 'H', // Black-Letter Capital H
+	0x210D: 'H', // Double-Struck Capital H
+	0x210E: 'h', // Planck Constant (Italic Small h)
+	0x2110: 'I', // Script Capital I
+	0x2111: 'I', // Black-Letter Capital I
+	0x2112: 'L', // Script Capital L
+	0x2113: 'l', // Script Small l
+	0x2115: 'N', // Double-Struck Capital N
+	0x2119: 'P', // Double-Struck Capital P
+	0x211A: 'Q', // Double-Struck Capital Q
+	0x211B: 'R', // Script Capital R
+	0x211C: 'R', // Black-Letter Capital R
+	0x211D: 'R', // Double-Struck Capital R
+	0x2124: 'Z', // Double-Struck Capital Z
+	0x2128: 'Z', // Black-Letter Capital Z
+	0x212C: 'B', // Script Capital B
+	0x212D: 'C', // Black-Letter Capital C
+	0x212F: 'e', // Script Small e
+	0x2130: 'E', // Script Capital E
+	0x2131: 'F', // Script Capital F
+	0x2133: 'M', // Script Capital M
+	0x2134: 'o', // Script Small o
+}
+
 func foldMathAlphanumericRune(r rune) (rune, bool) {
+	if mapped, ok := mathLetterlikeHoles[r]; ok {
+		return mapped, true
+	}
 	switch {
+	// Mathematical Bold
 	case r >= 0x1D400 && r <= 0x1D419:
 		return 'A' + (r - 0x1D400), true
 	case r >= 0x1D41A && r <= 0x1D433:
 		return 'a' + (r - 0x1D41A), true
+	// Mathematical Italic (hole at U+1D455 -> U+210E)
 	case r >= 0x1D434 && r <= 0x1D44D:
 		return 'A' + (r - 0x1D434), true
-	case r >= 0x1D44E && r <= 0x1D467:
+	case r >= 0x1D44E && r <= 0x1D454:
 		return 'a' + (r - 0x1D44E), true
+	case r >= 0x1D456 && r <= 0x1D467:
+		return 'a' + (r - 0x1D44E), true
+	// Mathematical Bold Italic
+	case r >= 0x1D468 && r <= 0x1D481:
+		return 'A' + (r - 0x1D468), true
+	case r >= 0x1D482 && r <= 0x1D49B:
+		return 'a' + (r - 0x1D482), true
+	// Mathematical Script (holes in Letterlike Symbols)
+	case r == 0x1D49C,
+		r >= 0x1D49E && r <= 0x1D49F,
+		r == 0x1D4A2,
+		r >= 0x1D4A5 && r <= 0x1D4A6,
+		r >= 0x1D4A9 && r <= 0x1D4AC,
+		r >= 0x1D4AE && r <= 0x1D4B5:
+		return 'A' + (r - 0x1D49C), true
+	case r >= 0x1D4B6 && r <= 0x1D4B9,
+		r == 0x1D4BB,
+		r >= 0x1D4BD && r <= 0x1D4C3,
+		r >= 0x1D4C5 && r <= 0x1D4CF:
+		return 'a' + (r - 0x1D4B6), true
+	// Mathematical Bold Script
+	case r >= 0x1D4D0 && r <= 0x1D4E9:
+		return 'A' + (r - 0x1D4D0), true
+	case r >= 0x1D4EA && r <= 0x1D503:
+		return 'a' + (r - 0x1D4EA), true
+	// Mathematical Fraktur (holes in Letterlike Symbols)
+	case r >= 0x1D504 && r <= 0x1D505,
+		r >= 0x1D507 && r <= 0x1D50A,
+		r >= 0x1D50D && r <= 0x1D514,
+		r >= 0x1D516 && r <= 0x1D51C:
+		return 'A' + (r - 0x1D504), true
+	case r >= 0x1D51E && r <= 0x1D537:
+		return 'a' + (r - 0x1D51E), true
+	// Mathematical Double-Struck (holes in Letterlike Symbols)
+	case r >= 0x1D538 && r <= 0x1D539,
+		r >= 0x1D53B && r <= 0x1D53E,
+		r >= 0x1D540 && r <= 0x1D544,
+		r == 0x1D546,
+		r >= 0x1D54A && r <= 0x1D550:
+		return 'A' + (r - 0x1D538), true
+	case r >= 0x1D552 && r <= 0x1D56B:
+		return 'a' + (r - 0x1D552), true
+	// Mathematical Bold Fraktur
+	case r >= 0x1D56C && r <= 0x1D585:
+		return 'A' + (r - 0x1D56C), true
+	case r >= 0x1D586 && r <= 0x1D59F:
+		return 'a' + (r - 0x1D586), true
+	// Mathematical Sans-Serif
 	case r >= 0x1D5A0 && r <= 0x1D5B9:
 		return 'A' + (r - 0x1D5A0), true
 	case r >= 0x1D5BA && r <= 0x1D5D3:
 		return 'a' + (r - 0x1D5BA), true
+	// Mathematical Sans-Serif Bold
 	case r >= 0x1D5D4 && r <= 0x1D5ED:
 		return 'A' + (r - 0x1D5D4), true
 	case r >= 0x1D5EE && r <= 0x1D607:
 		return 'a' + (r - 0x1D5EE), true
+	// Mathematical Sans-Serif Italic
+	case r >= 0x1D608 && r <= 0x1D621:
+		return 'A' + (r - 0x1D608), true
+	case r >= 0x1D622 && r <= 0x1D63B:
+		return 'a' + (r - 0x1D622), true
+	// Mathematical Sans-Serif Bold Italic
+	case r >= 0x1D63C && r <= 0x1D655:
+		return 'A' + (r - 0x1D63C), true
+	case r >= 0x1D656 && r <= 0x1D66F:
+		return 'a' + (r - 0x1D656), true
+	// Mathematical Monospace
 	case r >= 0x1D670 && r <= 0x1D689:
 		return 'A' + (r - 0x1D670), true
 	case r >= 0x1D68A && r <= 0x1D6A3:
 		return 'a' + (r - 0x1D68A), true
-	case r >= 0x1D7CE && r <= 0x1D7D7:
-		return '0' + (r - 0x1D7CE), true
+	// Mathematical Digits (Bold, Double-Struck, Sans-Serif, Sans-Serif Bold, Monospace)
+	case r >= 0x1D7CE && r <= 0x1D7FF:
+		return '0' + (r-0x1D7CE)%10, true
 	default:
 		return r, false
 	}
@@ -238,6 +332,43 @@ func truncateRunes(input string, maxChars int) string {
 	return b.String()
 }
 
+// toLowerASCII lowercases only ASCII bytes ('A'..'Z') so byte length and offsets stay strictly 1:1 on all UTF-8 input.
+func toLowerASCII(s string) string {
+	buf := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		buf[i] = b
+	}
+	return string(buf)
+}
+
+// replaceASCIICaseInsensitive replaces every ASCII case-insensitive occurrence of needle in text in O(N) time.
+func replaceASCIICaseInsensitive(text, needle, replacement string) string {
+	if needle == "" || len(text) < len(needle) {
+		return text
+	}
+	lowerText := toLowerASCII(text)
+	lowerNeedle := toLowerASCII(needle)
+	var out strings.Builder
+	out.Grow(len(text))
+	start := 0
+	for {
+		idx := strings.Index(lowerText[start:], lowerNeedle)
+		if idx < 0 {
+			out.WriteString(text[start:])
+			break
+		}
+		matchStart := start + idx
+		out.WriteString(text[start:matchStart])
+		out.WriteString(replacement)
+		start = matchStart + len(lowerNeedle)
+	}
+	return out.String()
+}
+
 // WrapCanaryUntrustedEnvelope wraps untrusted text in an unpredictable per-request HMAC-salted XML canary boundary.
 // Pass seedKey == "" to use DefaultConformalSeedKey and maxChars <= 0 to default to 16384 characters.
 func WrapCanaryUntrustedEnvelope(
@@ -268,8 +399,7 @@ func WrapCanaryUntrustedEnvelope(
 
 	normalized, audit := AuditAndNormalizeUntrustedText(rawText)
 	escapedTags := canaryTagFamilyRE.ReplaceAllString(normalized, "[escaped_untrusted_tag]")
-	canaryRE := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(canaryHex))
-	escapedCanary := canaryRE.ReplaceAllString(escapedTags, "[escaped_canary]")
+	escapedCanary := replaceASCIICaseInsensitive(escapedTags, canaryHex, "[escaped_canary]")
 	neutralized := injectionAnyRE.ReplaceAllString(escapedCanary, "[neutralized_directive]")
 	clipped := truncateRunes(neutralized, maxChars)
 
@@ -303,7 +433,7 @@ func DetectComparativeUnderminingAttack(candidateTexts map[string]string) (Compa
 	}
 	sort.Strings(orderedIDs)
 
-	quarantined := make([]string, 0)
+	var quarantined []string
 	clean := make([]string, 0, len(orderedIDs))
 	reasonsByID := make(map[string][]string, len(orderedIDs))
 	smugglingCounts := make(map[string]int, len(orderedIDs))
@@ -312,7 +442,7 @@ func DetectComparativeUnderminingAttack(candidateTexts map[string]string) (Compa
 		rawText := candidateTexts[id]
 		normalized, audit := AuditAndNormalizeUntrustedText(rawText)
 		smugglingCounts[id] = audit.TotalSuspiciousChars()
-		reasons := make([]string, 0)
+		var reasons []string
 
 		if audit.UnicodeTagChars > 0 {
 			reasons = append(reasons, "unicode_tag_smuggling")
@@ -329,16 +459,7 @@ func DetectComparativeUnderminingAttack(candidateTexts map[string]string) (Compa
 			}
 		}
 		if audit.FullwidthHomoglyphs >= 2 && (suspiciousXMLTagRE.MatchString(normalized) || len(reasons) > 0) {
-			hasFW := false
-			for _, existing := range reasons {
-				if existing == "fullwidth_homoglyph_evasion" {
-					hasFW = true
-					break
-				}
-			}
-			if !hasFW {
-				reasons = append(reasons, "fullwidth_homoglyph_evasion")
-			}
+			reasons = append(reasons, "fullwidth_homoglyph_evasion")
 		}
 
 		if len(reasons) > 0 {

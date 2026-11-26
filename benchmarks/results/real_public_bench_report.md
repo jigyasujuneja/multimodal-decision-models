@@ -1,4 +1,4 @@
-# Real-Data Benchmark Report: DecisionBench 1.0, TypedDecisions, arXiv:2610.03935, and arXiv:2610.21412v1
+# Real-Data Benchmark Report for DecisionBench 1.0, TypedDecisions, arXiv:2610.03935, and arXiv:2610.21412v1
 
 ## 1. Real 7-Model Evaluation on Multi-Slot TypedDecisions (`N = 500` Real Questions, `250` Held-Out Test)
 
@@ -25,13 +25,13 @@
    - **Simultaneous Max-Score Joint Conformal (Ours)**: **`0.9792`** (mean set size `1.971`)
    - **Simultaneous Bonferroni Joint Conformal (Ours)**: **`1.0000`** (mean set size `2.404`)
 
-## 2. Exp A: Universal 256-Code Bijection & Think Guard
+## 2. Exp A Universal 256-Code Bijection & Think Guard
 
 - **Universal Single-Token Code Inventory**: `256` codes (`['A', 'B', 'C', 'D', 'E', 'F'] ... ['PP', 'PR', 'PS', 'PT']`)
 - **Contains Rare BPE-Split Two-Letter Pairs (`BQ, CJ, FQ, GZ, ...`)**: `False`
 - **Unstripped `<think>` First-Token Leakage Guard Triggered (`LogprobAlignmentError`)**: `True`
 
-## 3. Exp B: Reasoning-to-Readout Distillation (`N = 300`)
+## 3. Exp B Reasoning-to-Readout Distillation (`N = 300`)
 
 | Readout / Distillation Arm | Held-Out Accuracy | Multiclass Brier | ECE | NLL | KL to Human Soft Consensus | Ordinal Score MAE |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -40,7 +40,7 @@
 | 3. `Qwen3.8-27B` Clean Readout (`enable_thinking=False`) | `0.6800` | `0.4421` | `0.0992` | `0.8383` | `0.5822` | `0.4583` |
 | 4. **Eq. (12) Distilled Posterior (`27B Teacher + Kev-4B KL Anchor`)** | `0.7000` | `0.4027` | `0.0882` | `0.7336` | `0.2499` | `0.3761` |
 
-## 4. Exp C: `AgentDecisionBench` (`N = 600` States)
+## 4. Exp C `AgentDecisionBench` (`N = 600` States)
 
 ### 4.1 `L2` Acceptable-Set Accuracy & `must_ask` Errors
 
@@ -76,5 +76,5 @@
 
 ## 5. Key Takeaways, Trade-Offs, & Limitations
 
-- **Operational Takeaway**: Pre-gated Product-of-Experts (`Pre-Gated PoE + Temperature Scaling`) outperforms Naive 5-Model Mean (`82.08%` vs `78.75%` accuracy, `0.2449` vs `0.3125` Brier) because uncalibrated models (`laya`, `julia-onnx`) degrade unweighted ensembles.
+- **Operational Takeaway**: Pre-gated Product-of-Experts (`Pre-Gated PoE + Temperature Scaling`) outperforms Naive 5-Model Mean (`81.67%` vs `80.42%` accuracy, `0.2775` vs `0.3288` Brier) because uncalibrated models (`laya`, `julia-onnx`) degrade unweighted ensembles.
 - **Limitations & Scope Boundaries**: Scalar Proposition 1 confidence deferral fails under candidate-set expansion (`69 -> 129` tools on `DecisionGym-Shift`), requiring explicit action-stakes separation ($V_{\text{irrev}} = 5.0$ vs $V_{\text{rev}} = 0.15$) and secondary anchor consensus before executing state-mutating calls.

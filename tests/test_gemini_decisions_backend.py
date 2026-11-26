@@ -66,7 +66,10 @@ class _LocalDecisionsServer:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
-                self.wfile.write(encoded)
+                try:
+                    self.wfile.write(encoded)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
             def log_message(self, format_str: str, *args: object) -> None:
                 del format_str, args
@@ -114,33 +117,33 @@ class GeminiDecisionsBackendTests(unittest.TestCase):
             self.assertEqual(vertex_client.model, model_id)
             self.assertIn(model_id, vertex_client.endpoint_url())
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"preset_model must be one of"):
             VertexGeminiBackend.from_ga_preset("gemini-unknown-preview", project="demo-project-01")
 
     def test_https_enforcement_and_query_credential_leak_rejection(self) -> None:
         """Reject non-loopback HTTP URLs, embedded URL API keys, and invalid parameters."""
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"cleartext http:// is restricted to loopback hosts"):
             GeminiDecisionsBackend(
                 api_key="test-key",
                 base_url="http://generativelanguage.googleapis.com/v1beta/decisions",
             )
 
         for leaked_param in ("key", "api_key", "apikey", "access_token", "token", "secret"):
-            with self.assertRaises(SchemaContractViolationError):
+            with self.assertRaisesRegex(SchemaContractViolationError, r"API credentials must be passed via x-goog-api-key"):
                 GeminiDecisionsBackend(
                     api_key="test-key",
                     base_url=f"https://generativelanguage.googleapis.com/v1beta/decisions?{leaked_param}=abc",
                 )
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"temperature must be > 0"):
             GeminiDecisionsBackend(api_key="test-key", temperature=0.0)
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"temperature must be > 0"):
             GeminiDecisionsBackend(api_key="test-key", temperature=-1.0)
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"timeout_seconds must be > 0"):
             GeminiDecisionsBackend(api_key="test-key", timeout_seconds=0.0)
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"execution_mode must be one of"):
             GeminiDecisionsBackend(api_key="test-key", execution_mode="INVALID_MODE")
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"api_key must not contain control characters"):
             GeminiDecisionsBackend(api_key="bad\r\nheader-injection")
 
     def test_noul_choice_and_score_round_trip_with_extreme_logspace_stability(self) -> None:
@@ -368,7 +371,7 @@ class GeminiDecisionsBackendTests(unittest.TestCase):
                 max_retries=1,
                 base_backoff_sec=0.005,
             )
-            with self.assertRaises(UpstreamTransientError):
+            with self.assertRaisesRegex(UpstreamTransientError, r"transient upstream HTTP 503"):
                 backend.score_questions("invoice #44", {"payout": question})
 
             orchestrator = CascadeDecisionOrchestrator(
@@ -403,7 +406,7 @@ class GeminiDecisionsBackendTests(unittest.TestCase):
                 timeout_seconds=0.05,
                 max_retries=0,
             )
-            with self.assertRaises(UpstreamTransientError):
+            with self.assertRaisesRegex(UpstreamTransientError, r"upstream timeout or transport error: timed out"):
                 timeout_backend.score_questions("invoice #45", {"payout": question})
 
     def test_malformed_and_misaligned_logprobs_fail_closed(self) -> None:
@@ -457,7 +460,7 @@ class GeminiDecisionsBackendTests(unittest.TestCase):
                     base_url=bad_server.base_url,
                     max_retries=0,
                 )
-                with self.assertRaises(expected_exc):
+                with self.assertRaisesRegex(expected_exc, r"choice\['route'\] log_likelihoods length 2 does not|choice\['route'\] missing or malformed|non-finite JSON constant 'NaN' in sampler output|non-retryable upstream HTTP 400"):
                     backend.score_questions("state", {"route": question})
 
 

@@ -62,7 +62,12 @@ def _normalize_prune_probs(block_id: str, dist: Mapping[str, float]) -> tuple[fl
     vals: dict[str, float] = {}
     tot = 0.0
     for act in _PRUNE_ACTIONS:
-        raw_v = float(dist.get(act, 0.0))
+        raw_entry = dist.get(act, 0.0)
+        if isinstance(raw_entry, bool) or not isinstance(raw_entry, (int, float)):
+            raise ValueError(
+                f"invalid probability for block {block_id!r} action {act!r}: {raw_entry!r}"
+            )
+        raw_v = float(raw_entry)
         if not math.isfinite(raw_v) or raw_v < 0.0:
             raise ValueError(f"invalid probability for block {block_id!r} action {act!r}: {raw_v!r}")
         vals[act] = raw_v
@@ -142,8 +147,8 @@ def prune_agent_context_blocks(
     so near-duplicate logs or stack traces do not crowd out orthogonal trajectory evidence.
     When `redundancy_penalty_weight == 0.0` (default), solves the exact additive MCKP DP.
     """
-    if token_budget < 0:
-        raise ValueError(f"token_budget must be >= 0, got {token_budget}")
+    if isinstance(token_budget, bool) or not isinstance(token_budget, int) or token_budget < 0:
+        raise ValueError(f"token_budget must be a non-boolean integer >= 0, got {token_budget!r}")
     if (
         isinstance(redundancy_penalty_weight, bool)
         or not isinstance(redundancy_penalty_weight, (int, float))
