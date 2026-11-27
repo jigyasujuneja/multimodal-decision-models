@@ -454,11 +454,18 @@ class DatasetSplitLock:
         serialized = json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
         target.write_text(serialized, encoding="utf-8")
 
+    @staticmethod
+    def _reject_nonfinite_lock_constant(token: str) -> object:
+        raise SchemaContractViolationError(f"non-finite JSON constant {token!r} in dataset lockfile")
+
     @classmethod
     def load_json(cls, path: str | Path) -> DatasetSplitLock:
         """Load and cryptographically verify a JSON lockfile from ``path``."""
         target = Path(path)
-        raw_obj = json.loads(target.read_text(encoding="utf-8"))
+        raw_obj = json.loads(
+            target.read_text(encoding="utf-8"),
+            parse_constant=cls._reject_nonfinite_lock_constant,
+        )
         return cls.from_dict(raw_obj)
 
 
@@ -915,7 +922,10 @@ class MatchedRateEntropyControl:
         if target_escalation_rate is not None:
             rate = float(target_escalation_rate)
         else:
-            assert target_episode_cost_usd is not None
+            if target_episode_cost_usd is None:
+                raise SchemaContractViolationError(
+                    "provide either target_escalation_rate or target_episode_cost_usd"
+                )
             if stage2_incremental_cost_usd <= 0.0:
                 raise SchemaContractViolationError("stage2_incremental_cost_usd must be > 0")
             rate = (float(target_episode_cost_usd) - float(stage1_cost_usd)) / float(

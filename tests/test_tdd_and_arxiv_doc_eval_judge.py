@@ -61,7 +61,7 @@ class TestTddAndArxivDocEvalJudge(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bad_doc = Path(tmpdir) / "bad_slop_tdd.md"
             bad_doc.write_text(
-                "# Why does our legacy L8 GDM system delve into a rich tapestry?\n\n"
+                "# Why does our legacy L8 Principal system delve into a rich tapestry?\n\n"
                 "User Request: Step 1.1: We utilize and leverage a pivotal, groundbreaking paradigm shift, "
                 "highlighting our holistic synergy — a true testament — across Claude-3.7-Sonnet-Dirichlet-M5.\n\n"
                 "TODO: fix [broken link](missing_file.md) and citation [?] with unbalanced math $x + y.\n\n"
@@ -74,7 +74,7 @@ class TestTddAndArxivDocEvalJudge(unittest.TestCase):
             self.assertEqual(res["overall_binary_score"], 0)
             gates = res["gates"]
             self.assertEqual(gates["G1_taste_terminology_and_anonymity"]["score"], 0)
-            self.assertEqual(gates["G3_writing_zero_claudeisms_and_ai_slop"]["score"], 0)
+            self.assertEqual(gates["G3_writing_zero_llm_tics_and_puffery"]["score"], 0)
             self.assertEqual(gates["G4_writing_punctuation_and_active_voice"]["score"], 0)
             self.assertEqual(gates["G6_factuality_model_and_metric_consistency"]["score"], 0)
             self.assertEqual(gates["G7_groundedness_claim_to_proof_and_zero_placeholders"]["score"], 0)
@@ -83,7 +83,7 @@ class TestTddAndArxivDocEvalJudge(unittest.TestCase):
             self.assertEqual(gates["G11_formatting_tables_and_math_hygiene"]["score"], 0)
             self.assertEqual(gates["G12_formatting_publication_visuals_and_zero_ascii_art"]["score"], 0)
             self.assertEqual(gates["G13_polish_three_persona_llm_judge"]["score"], 0)
-            self.assertEqual(gates["G14_polish_goldfish_self_containment_and_firewall"]["score"], 0)
+            self.assertEqual(gates["G14_polish_self_containment_and_abstraction_firewall"]["score"], 0)
 
 
 if __name__ == "__main__":

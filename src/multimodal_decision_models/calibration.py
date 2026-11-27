@@ -989,7 +989,7 @@ def calibrate_ltt_funnel_gates(
         brier = brier_sum / float(n_items)
         satisfied = ucb <= target_risk_bound + 1e-12
 
-        res = LTTFunnelCalibrationResult(
+        candidate_result = LTTFunnelCalibrationResult(
             selected_config=cfg,
             empirical_risk=emp_risk,
             ucb_risk=ucb,
@@ -1001,29 +1001,29 @@ def calibrate_ltt_funnel_gates(
             num_valid_candidates=0,
             satisfied_bound=satisfied,
         )
-        all_results.append(res)
+        all_results.append(candidate_result)
         if satisfied:
-            valid_results.append(res)
+            valid_results.append(candidate_result)
+
+    def _valid_ltt_sort_key(result: LTTFunnelCalibrationResult) -> tuple[float, float, float]:
+        return (
+            round(result.non_escalated_coverage, 12),
+            -round(result.brier_score, 12),
+            -round(result.ucb_risk, 12),
+        )
+
+    def _fallback_ltt_sort_key(result: LTTFunnelCalibrationResult) -> tuple[float, float, float]:
+        return (
+            round(result.ucb_risk, 12),
+            round(result.brier_score, 12),
+            -round(result.non_escalated_coverage, 12),
+        )
 
     num_valid = len(valid_results)
     if valid_results:
-        best = max(
-            valid_results,
-            key=lambda r: (
-                round(r.non_escalated_coverage, 12),
-                -round(r.brier_score, 12),
-                -round(r.ucb_risk, 12),
-            ),
-        )
+        best = max(valid_results, key=_valid_ltt_sort_key)
     else:
-        best = min(
-            all_results,
-            key=lambda r: (
-                round(r.ucb_risk, 12),
-                round(r.brier_score, 12),
-                -round(r.non_escalated_coverage, 12),
-            ),
-        )
+        best = min(all_results, key=_fallback_ltt_sort_key)
 
     return LTTFunnelCalibrationResult(
         selected_config=best.selected_config,

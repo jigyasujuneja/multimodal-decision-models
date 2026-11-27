@@ -163,7 +163,7 @@ variable "invoker_members" {
   validation {
     condition = alltrue([
       for member in var.invoker_members :
-      !contains(["allUsers", "allAuthenticatedUsers"], trimspace(member))
+      !contains(["allusers", "allauthenticatedusers"], lower(trimspace(member)))
     ])
     error_message = "Public unauthenticated invokers (allUsers, allAuthenticatedUsers) are prohibited on MDM decision services."
   }

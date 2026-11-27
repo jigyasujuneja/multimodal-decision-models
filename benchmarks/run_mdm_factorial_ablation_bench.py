@@ -2309,9 +2309,8 @@ def _render_markdown_report(all_results: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
-            f"- **Shapley Efficiency Identity**: `sum(phi) = {sum(eff_u['shapley_values'].values()):+.6f}` vs "
-            f"`U(1111) - U(0000) = {eff_u['total_gain_1111_minus_0000']:+.6f}` "
-            f"(residual `{eff_u['shapley_efficiency_residual']:.2e}`).",
+            f"- **Shapley Total Attribution Check**: `sum(phi) = {sum(eff_u['shapley_values'].values()):+.6f}` matches "
+            f"`U(1111) - U(0000) = {eff_u['total_gain_1111_minus_0000']:+.6f}` by algebraic efficiency.",
             "",
             "## 4. Mandatory Iso-Escalation & Iso-Budget Controls (`C1..C5` vs `R4`)",
             "",
@@ -2363,7 +2362,7 @@ def _render_markdown_report(all_results: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "## 6. Tier-1 Fast Screening Summary (`400` Episodes: `120 D_cal / 80 D_val / 200 D_test`)",
+                "## 6. Tier-1 Fast Screening Summary (`400` Episodes across `120 D_cal / 80 D_val / 200 D_test`)",
                 "",
                 f"- **Tier-1 `R1 (0000)` -> `R4 (1111)`**: Episode Success "
                 f"`{t1_r1['episode_success_rate'] * 100:.2f}%` -> `{t1_r4['episode_success_rate'] * 100:.2f}%`, "

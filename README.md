@@ -1,6 +1,6 @@
 # Multimodal Decision Models (`multimodal-decision-models`)
 
-Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.2.0`, zero external runtime dependencies across Python, Go, and TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
+Catalog-scale visual and relational classification ($K = 2$ to $10,000+$ classes) requires calibrated probabilities, finite-sample abstention sets, and zero-fallback wire contracts across heterogeneous model APIs. `multimodal-decision-models` (`v1.3.1`, zero external runtime dependencies across Python, Go, plus TypeScript) separates decision geometry and uncertainty quantification from the inference backend.
 
 One declarative policy definition runs across five inference backend surfaces:
 
@@ -16,8 +16,8 @@ Start at the **[Developer Documentation Hub (`docs/index.md`)](docs/index.md)** 
 
 | Guide | Focus |
 | :--- | :--- |
-| **[Quickstart & Four-Paradigm Backends (`docs/quickstart-and-paradigms.md`)](docs/quickstart-and-paradigms.md)** | Python, Go (`pkg/mdm`), and TypeScript (`@mdm/client`) quickstarts + how `mdm`, `dgem`, and managed Decision APIs fit together. |
-| **[Calibration, Conformal Sets & Risk Control (`docs/calibration-and-conformal.md`)](docs/calibration-and-conformal.md)** | Temperature/vector scaling, pre-gated Bayesian `PoE`, stateless `HMAC-SHA256` RAPS, Multi-Slot Joint Conformal, Mondrian, and `LTT` bounds. |
+| **[Quickstart & Five-Paradigm Backends (`docs/quickstart-and-paradigms.md`)](docs/quickstart-and-paradigms.md)** | Python, Go (`pkg/mdm`), and TypeScript (`@mdm/client`) quickstarts + how `mdm`, `dgem`, and managed Decision APIs fit together. |
+| **[Calibration, Conformal Sets & Risk Control (`docs/calibration-and-conformal.md`)](docs/calibration-and-conformal.md)** | Temperature/vector scaling, pre-gated Bayesian `PoE`, stateless `HMAC-SHA256` RAPS, Multi-Slot Joint Conformal, Mondrian, plus `LTT` bounds. |
 | **[Wide-Catalog Routing & Taxonomy Tries (`docs/wide-catalog-routing.md`)](docs/wide-catalog-routing.md)** | `recommend_wide_routing_strategy` across `26` / `52` / `255` bijections, `CSLS` Top-20 shortlists, partitioned 1-pass tries, and `PriDe` debiasing. |
 | **[Multimodal Compilers (`docs/multimodal-compilers.md`)](docs/multimodal-compilers.md)** | Stage-2A Shades-of-Gray + CIE $L^*a^*b^*$, Stage-2B `2x` saliency/weight contact sheets, Set-of-Marks UI grounding, and PCM16 `VAP` / `AVEL` / `ST-SoM`. |
 | **[Agentic Shared Control & Context Pruning (`docs/agentic-shared-control.md`)](docs/agentic-shared-control.md)** | Action-Stakes $V_{\text{irrev}}$ vs. $V_{\text{rev}}$ guards (`Google ADK`, `LangGraph`, `Genkit`), `<untrusted_data>` quarantine, and 8-slot `MCKP` context pruning. |
@@ -31,7 +31,7 @@ Start at the **[Developer Documentation Hub (`docs/index.md`)](docs/index.md)** 
 - **[Research Paper Manuscript (`docs/research_paper.md`)](docs/research_paper.md)**: Full mathematical formulation, propositions, dual-buffer visual photometry derivations, 8-slot MCKP context pruning, `<untrusted_data>` RAG quarantine, and 10-model empirical benchmark analysis.
 - **[Executive Research Summary (`docs/research_summary.md`)](docs/research_summary.md)**: Condensed overview of all workstreams, hypotheses, Pareto-optimal operating regimes, and verified metrics.
 - **[Architecture and Mathematical Design (`docs/architecture.md`)](docs/architecture.md)** & **[Practical Use-Case Recipes (`docs/practical_use_cases.md`)](docs/practical_use_cases.md)**: Module-by-module equations and runnable multi-domain patterns.
-- **[Five-Rung and $2^4$ Factorial Ablation Report (`benchmarks/results/mdm_factorial_ablation_report.md`)](benchmarks/results/mdm_factorial_ablation_report.md)**: Receipt-Grounded Replay across `1,200` `MDM-EpisodeBench` `Tier-2` episodes (`3,600` locked `D_test` turns), exact Shapley attributions, Yates two-way synergies, and matched-budget Controls `C1..C5`.
+- **[Five-Rung and $2^4$ Factorial Ablation Report (`benchmarks/results/mdm_factorial_ablation_report.md`)](benchmarks/results/mdm_factorial_ablation_report.md)**: Receipt-Grounded Replay across `1,200` `MDM-EpisodeBench` `Tier-2` episodes (`3,600` locked `D_test` turns), exact Shapley attributions, Yates two-way interactions, and matched-budget Controls `C1..C5`.
 - **[Canonical Policy Templates (`templates/`)](templates/)** & **[Multi-Language SDK Overview (`sdk/README.md`)](sdk/README.md)**: 8 `.json.tmpl` + `.examples.json` policy fixtures and Python/Go/TypeScript parity vectors.
 - **[`v1.2.0` Research Science Benchmark Report (`benchmarks/results/v12_research_science_report.md`)](benchmarks/results/v12_research_science_report.md)**: 17-model evaluation of Null-Prior Debiasing (`PriDe`), unlabeled `SLD` EM label-shift adaptation, Conformal Risk Control (`CRC`), Bayesian Value of Information (`VoI`), and epistemic abstention (`DecisionBench` `N = 500` and `XSTest` `N = 360`).
 - **[10-Model Calibration & Conformal Benchmark Report (`benchmarks/results/multimodel_benchmark_report.md`)](benchmarks/results/multimodel_benchmark_report.md)**: Full 20-arm leaderboard across Multi-Task Calibration ($N = 50$) and XSTest Safety Refusal Boundaries ($N = 360$).
@@ -63,7 +63,7 @@ Full results and 95% cluster bootstrap confidence intervals are available in [`b
 | **Multi-Task RAPS Cascade ($N = 50$)** | `dgem v0.3.7 -> Gemini 3.8 Flash (M=3)` | `0.880` Acc (`+2.0%`) | `0.2340` | `0.0963` | `0.920` (`2.30`) | Escalates only `14.0%` of items |
 | **XSTest Safety Boundary ($N = 360$, $K = 2$)** | `DecisionGemma` (`/v1/systemone`) | `0.9694` Acc (`0.9692` F1) | `0.0465` | `0.0020` | `0.9694` (`1.00`) | `175.8 ms` (Pareto) |
 | **XSTest RAPS Cascade ($N = 360$, $K = 2$)** | `Classier v0.2.0 -> DecisionGemma` | `0.8917` Acc (`+10.28%`) | `0.1720` | `0.0326` | `0.9083` (`1.05`) | `31.1%` escalation ($p = 7.84 \times 10^{-10}$) |
-| **8-Slot Trajectory Pruning ($8$ Models)** | `mckp_hesitation_stub` (Exact MCKP DP) | `100.00%` Required Recall | `0.9412` Util | `100%` DP Match |Pinned Invariant Held | `58.85%` token reduction ($p \le 7.45 \times 10^{-9}$) |
+| **8-Slot Trajectory Pruning ($8$ Models)** | `mckp_hesitation_stub` (Exact MCKP DP) | `100.00%` Required Recall | `0.9412` Util | `100%` DP Match | Pinned Invariant Held | `58.85%` token reduction ($p \le 7.45 \times 10^{-9}$) |
 | **Adversarial RAG Quarantine ($N = 220$)** | `<untrusted_data>` XML Fence (`Gemini 3.8 Flash`) | `0.9295` Adv `nDCG@3` | `0.9727` F1 | `0.00%` `ASR@1` | `36/36` Cells Balanced | Cuts `ASR@1` from `28.18%` to `0.00%` |
 
 ## Module Overview
@@ -75,7 +75,7 @@ Full results and 95% cluster bootstrap confidence intervals are available in [`b
 | **[`visual_compiler.py`](src/multimodal_decision_models/visual_compiler.py)** | **Dual-Buffer Visual Compiler:** Pure-stdlib PNG (filters `0..4`, RGB/RGBA/Gray, IEEE CRC32) and PPM (`P6`/`P3`) codecs; Stage-2A unsharpened Minkowski $p=6$ white balance, inner-80% CIE $L^*a^*b^*$ $\Delta E$ similarity, and residual MLP adapter `norm(q + alpha * W2 * GELU(W1 * q))`; Stage-2B contact sheets with automatic inter-candidate variance saliency bands, `2x` bottom-30% pack-weight zoom, and `1.15x` cylindrical unwarping. |
 | **[`embedding_index.py`](src/multimodal_decision_models/embedding_index.py)** | **Multimodal Embedding Index:** `VertexMultimodalEmbeddingAdapter` wire builder/parser for `gemini-embedding-2` and JSONL-backed `MultimodalEmbeddingIndex` combining cosine or `CSLS` scores, CIE $L^*a^*b^*$ color similarity, Lidstone container aspect priors, and Stage-2A adaptive fast-exit. |
 | **[`context_pruner.py`](src/multimodal_decision_models/context_pruner.py)** | **8-Slot Trajectory Context Pruner:** Packs agent context blocks into 8-slot single-pass policies (`build_context_pruning_questions`) and solves exact Pareto-frontier Multiple-Choice Knapsack optimization over `{"full", "stub", "drop"}` (`prune_agent_context_blocks`) under a token budget while retaining pinned blocks. |
-| **[`mcp_server.py`](src/multimodal_decision_models/mcp_server.py)** | **MCP `stdio` Server (`dgem-catalog`):** Zero-dependency JSON-RPC 2.0 server (`python3 -m multimodal_decision_models.mcp_server`) supporting newline-delimited and `Content-Length` framing for `shortlist_candidates`, `evaluate_conformal_decision`, `prune_context_blocks`, and `compile_contact_sheet`. |
+| **[`mcp_server.py`](src/multimodal_decision_models/mcp_server.py)** | **MCP `stdio` Server (`dgem-catalog`):** Zero-dependency JSON-RPC 2.0 server (`python3 -m multimodal_decision_models.mcp_server`) supporting newline-delimited and `Content-Length` framing across six tools (`shortlist_candidates`, `evaluate_conformal_decision`, `prune_context_blocks`, `compile_contact_sheet`, `audit_untrusted_candidates`, and `evaluate_trajectory_guard`). |
 | **[`shortlist.py`](src/multimodal_decision_models/shortlist.py)** | **Wide-Option Shortlist Routing ($K > 26$):** Compresses wide taxonomies to a single pass over dense-embedding or `CSLS` top-$M$ candidates, converts raw cosines to temperature-scaled log-softmax priors ($\tau = 0.07$), and extracts opt-in sibling-unique cues (`pairwise_diff=True`). |
 | **[`hierarchy.py`](src/multimodal_decision_models/hierarchy.py)** | **Taxonomy Tries (`TaxonomyTrie`, `HierarchicalDecisionRouter`):** Bounds coarse and fine slots to $\le 26$ `[A-Z]` options across $K \le 625$ classes with 1-pass `mtp_trie`, Sinkhorn-Knopp de-aliased `mtp_sinkhorn` (`sinkhorn_dealiased_trie_decode`, Proposition 3), 8-slot zero-aliasing `mtp_partitioned_1pass`, 2-pass `beam_2pass`, and `hesitation_hybrid` routing. |
 | **[`contracts.py`](src/multimodal_decision_models/contracts.py)** | **Total Contracts & Caching:** Closed terminal state machine, simplex verification, `<untrusted_data>` prompt-injection fencing, and SHA-256 JSONL `ContentAddressedDecisionCache` persisting `conformal_set` and `epistemic_variance`. |
@@ -151,7 +151,7 @@ orchestrator = CascadeDecisionOrchestrator(
 )
 ```
 
-## MCP Server, Tests, and Benchmarks
+## MCP Server, Test Suites, and Benchmarks
 
 Launch the zero-dependency `dgem-catalog` MCP server over `stdio`:
 
@@ -175,22 +175,22 @@ PYTHONPATH=src python3 benchmarks/run_mdm_factorial_ablation_bench.py --tier tie
 PYTHONPATH=src python3 examples/how_i_ai_workflows.py
 ```
 
-## Architectural Boundaries, Adversarial Security, and Eval Science (`v1.1.0`, $N = 1,000$ Instances)
+## Architectural Boundaries, Adversarial Security, and Eval Science (`v1.1.0`, $N = 1,000$ Verification Instances)
 
-See [`benchmarks/results/v110_frontier_security_evals_report.md`](benchmarks/results/v110_frontier_security_evals_report.md), [`docs/architectural-boundaries.md`](docs/architectural-boundaries.md), and [`docs/security-and-eval-science.md`](docs/security-and-eval-science.md) for all 10 pre-registered zero-RNG experiments (`10/10` Holm-Bonferroni FWER gates passed at $\alpha = 0.05$):
+See [`benchmarks/results/v110_frontier_security_evals_report.md`](benchmarks/results/v110_frontier_security_evals_report.md), [`docs/architectural-boundaries.md`](docs/architectural-boundaries.md), and [`docs/security-and-eval-science.md`](docs/security-and-eval-science.md) for all 10 pre-registered zero-RNG deterministic mechanism and security verification studies (`10/10` Holm-Bonferroni FWER gates passed at $\alpha = 0.05$, combining committed receipt panels with controlled stress injections):
 
 | Study (`N = 100` each) | Wave and Focus | Standalone / Vulnerable Baseline | `v1.1.0` Hybrid / Hardened Stack | Holm-Adjusted $p$ |
 | :--- | :--- | :---: | :---: | :---: |
-| **`EXP-V11-01`** | M5: Hybrid Reranking + `AcuRank` | Pointwise `nDCG@10 = 0.0974`; Margin `no_doc` TNR `= 0.1600` | **`nDCG@10 = 1.0000`**, **`no_doc` TNR `= 1.0000`** (`1.27` passes) | `0.00e+00` |
-| **`EXP-V11-02`** | M5: Trajectory $\alpha$-Spending + `NEVC` | Flat cov `= 0.4800`; Placebo net value `= 0.7050` | **Trajectory cov `= 0.9500`**; **`NEVC` net value `= 0.9350`** (`-94.83%` wasted turns) | `0.00e+00` |
-| **`EXP-V11-03`** | M6: Blind-First Swarm Consensus | Peer-conditioned uncertain-panel cov `= 0.0000` | **Blind-First uncertain-panel cov `= 0.9571`** (`0.9700` overall) | `0.00e+00` |
-| **`EXP-V11-04`** | M6: Constrained Joint MAP and `DEMASK` | `32.0%` invalid tuples (`0.6000` joint acc) | **`0.0%` invalid tuples**, **`0.8800` joint acc** (`1.30` mean RPCs) | `1.70e-07` |
-| **`EXP-V11-05`** | M6: Visual Contrastive `AVCD` Guard | `25/25` prior-trap errors (`AURC = 0.2371`) | **`0/25` prior-trap errors** (**`AURC = 0.1948`**) | `1.70e-07` |
-| **`EXP-V11-06`** | M7: Unicode / `NFKC` / `CUA` Quarantine | Static ASCII fence `80.0%` escape | **`0.0%` escape**, **`100.0%` recall**, **`0.0%` benign FPR** | `0.00e+00` |
+| **`EXP-V11-01`** | M5: Hybrid Reranking + `AcuRank` | Pointwise `nDCG@10 = 0.0974`; Margin `no_doc` TNR `= 0.1600` | **`nDCG@10 = 1.0000`**, **`no_doc` TNR `= 1.0000`** (`1.27` passes) | `1.42e-29` |
+| **`EXP-V11-02`** | M5: Trajectory $\alpha$-Spending + `NEVC` | Flat cov `= 0.4800`; Placebo net value `= 0.7050` | **Trajectory cov `= 0.9500`**; **`NEVC` net value `= 0.9350`** (`-94.83%` wasted turns) | `<1e-300` |
+| **`EXP-V11-03`** | M6: Blind-First Swarm Consensus | Peer-conditioned uncertain-panel cov `= 0.0000` | **Blind-First uncertain-panel cov `= 0.9571`** (`0.9700` overall) | `9.49e-20` |
+| **`EXP-V11-04`** | M6: Constrained Joint MAP and `DEMASK` | `32.0%` invalid tuples (`0.6000` joint acc) | **`0.0%` invalid tuples**, **`0.8800` joint acc** (`1.30` mean RPCs) | `1.73e-07` |
+| **`EXP-V11-05`** | M6: Visual Contrastive `AVCD` Guard | `25/25` prior-trap errors (`AURC = 0.2371`) | **`0/25` prior-trap errors** (**`AURC = 0.1948`**) | `1.73e-07` |
+| **`EXP-V11-06`** | M7: Unicode / `NFKC` / `CUA` Quarantine | Static ASCII fence `80.0%` escape | **`0.0%` escape**, **`100.0%` recall**, **`0.0%` benign FPR** | `1.09e-11` |
 | **`EXP-V11-07`** | M7: Poisoning-Robust Conformal | `8%` poisoning clean cov `= 0.7700` | **Trimmed robust clean cov `= 0.9000`** (**`1.0000` `AUROC`**) | `2.44e-04` |
-| **`EXP-V11-08`** | M7: Tenant `HMAC` Cache and MCP Fuzz | Cross-tenant hash oracle / parser faults | **`0.0%` cross-tenant hits**, **`100/100` (`100.0%`)** fail-closed rejections | `0.00e+00` |
-| **`EXP-V11-09`** | M8: Cross-Fitted `PPI++` vs. `RG` | Naive autorater 95% CI cov `= 0.0000` | **`0.9440` 95% CI cov**, **`-38.99%` CI width** (`2.70x` $N_{\text{eff}}/n$, `0.0500` FPR) | `3.00e-08` |
-| **`EXP-V11-10`** | M8: Paraphrase, Swap, and 4-Stage Judge | Paraphrase cov `0.5500`; Swap flip `51.0%` | **Envelope cov `0.9100`**, **`0.0%` flip**, **`100.0%` first-fault recall** | `0.00e+00` |
+| **`EXP-V11-08`** | M7: Tenant `HMAC` Cache and MCP Fuzz | Cross-tenant hash oracle / parser faults | **`0.0%` cross-tenant hits**, **`100/100` (`100.0%`)** fail-closed rejections | `3.31e-24` |
+| **`EXP-V11-09`** | M8: Cross-Fitted `PPI++` vs. `RG` | Naive autorater 95% CI cov `= 0.0000` | **`0.9440` 95% CI cov**, **`-38.99%` CI width** (`2.70x` $N_{\text{eff}}/n$, `0.0500` FPR) | `2.98e-08` |
+| **`EXP-V11-10`** | M8: Paraphrase, Swap, and 4-Stage Judge | Paraphrase cov `0.5500`; Swap flip `51.0%` | **Envelope cov `0.9100`**, symmetric swap average, **`100.0%` first-fault recall** | `1.46e-10` |
 
 ## Five-Rung Ladder and $2^4 = 16$ Factorial Ablation (`MDM-EpisodeBench` `Tier-2`, `1,200` Episodes / `3,600` Locked `D_test` Turns)
 
@@ -208,7 +208,7 @@ See [`benchmarks/results/mdm_factorial_ablation_report.md`](benchmarks/results/m
 | `R3.5` (`+K` Context/Traj) | `1110` | `61.50%` | `83.47%` | `59.00%` | `0.2878` | `89.72%` | `10,993` | `$0.0105` | `52.8%` | `1,692.7` | `+0.4267` |
 | **`R4` (`+P` Full `mdm`)** | **`1111`** | **`62.33%`** | **`83.78%`** | **`58.33%`** | **`0.2830`** | **`89.72%`** | **`11,225`** | **`$0.0076`** | **`30.9%`** | **`1,443.8`** | **`+0.4870`** |
 
-- **Exact Shapley Attributions and Two-Way Synergies (`B = 2,000` Cluster Resamples)**: $\phi_K = +0.2974$, $\phi_M = +0.1813$, $\phi_P = +0.1047$, and $\phi_C = +0.0589$, summing identically to $U(1111) - U(0000) = +0.642380$ (`0.00e+00` residual), with super-additive Yates synergies $\hat{\tau}_{MK} = +0.1681$ (`p = 1.67e-22`), $\hat{\tau}_{CK} = +0.1521$ (`p = 4.44e-15`), and $\hat{\tau}_{CP} = +0.1104$ (`p = 2.66e-04`).
+- **Exact Shapley Attributions and Two-Way Interactions (`B = 2,000` Cluster Resamples)**: $\phi_K = +0.2974$, $\phi_M = +0.1813$, $\phi_P = +0.1047$, and $\phi_C = +0.0589$ decompose total net utility gain $U(1111) - U(0000) = +0.642380$ additively by algebraic efficiency, with super-additive Yates two-way interactions $\hat{\tau}_{MK} = +0.1681$ (`p = 1.67e-22`), $\hat{\tau}_{CK} = +0.1521$ (`p = 4.44e-15`), and $\hat{\tau}_{CP} = +0.1104$ (`p = 2.66e-04`).
 - **Cost Efficiency, Non-Inferiority, and Matched Controls**: `R4 (1111)` cuts episode spend by **`84.3%`** vs `R0` (`$0.0076` vs `$0.0482`, Tango Berger-Boos non-inferiority `delta = +7.39%`, `p = 1.0e-4`) and beats all five iso-escalation and iso-budget Controls `C1..C5` at Holm-Bonferroni `p < 1e-3`.
 
 ## Real Public Benchmarks (`DecisionBench`, `TypedDecisions`, `arXiv:2610.03935`, and `arXiv:2610.21412v1`)
@@ -217,26 +217,26 @@ See [`benchmarks/results/real_public_bench_report.md`](benchmarks/results/real_p
 
 | Real Public Benchmark Study | Baseline / Single Model | Upgraded / Combined Stack | Verified Empirical Finding |
 | :--- | :---: | :---: | :--- |
-| **7-Model `TypedDecisions` ($N = 500$ slice / $N = 2,000$ full)** | `deem-4b` (`80.83%` acc, `0.2947` Brier) / `jev` (`75.83%` acc, `0.4090` Brier) | **Pre-Gated PoE + TempScaling** (**`82.08%`** slice / **`83.50%`** full, **`0.2449`** Brier) | Beats best single model (`p = 0.043` on $N=1,000$ test) and `jev` (`p = 9.74e-11`); Naive 5-Model Mean drops to `78.75%` due to uncalibrated `laya` / `julia-onnx` |
+| **7-Model `TypedDecisions` ($N = 500$ slice / $N = 2,000$ full)** | `deem-4b` (`80.00%` acc, `0.2809` TS Brier) / `jev` (`70.00%` acc, `0.3980` raw Brier) | **Pre-Gated PoE + TempScaling** (**`81.67%`** slice / **`83.50%`** full, **`0.2775`** slice Brier) | Outperforms Naive 5-Model Mean (`80.42%` acc, `0.3288` Brier) and `jev` (`p = 9.74e-11`) while cutting ECE from `0.1655` to `0.0486` |
 | **Simultaneous 5-Slot Workflow Coverage (`TypedDecisions`)** | `60.42%` (`63.50%` on $N=2,000$) independent per-slot RAPS ($\alpha = 0.10$) | **`97.92%`** (`96.50%` on $N=2,000$) (`calibrate_multislot_joint_conformal`) | Eliminates multi-slot FWER compounding across 5 simultaneous slots (`action`, `needs_review`, `outcome`, `risk`, `urgency`) |
 | **Exp A: Extended 255-Code Single-Token Bijection (`arXiv:2610.03935` Sec 6.1)** | Naive `A..Z, AA..IT` has `18` BPE splits on Qwen3, `14` on DeepSeek-V3, `68` on SmolLM2 | **`UNIVERSAL_256_DECISION_CODES`** (**`255/255` = `100%` single-token** across 5 BPE families) | Eliminates first-token logit aliasing (`BQ -> B + Q`); opt-in `allow_extended_255=True` alongside default $K \le 26$ shortlist/trie |
-| **Exp B: `<think>` Leakage Guard + Eq. (12) Distillation (`arXiv:2610.03935` Sec 6.2)** | Default thinking template: `34.67%` acc (`0.9854` Brier); `enable_thinking=False` 27B: `68.00%` acc (`0.5822` KL to humans) | **Eq. (12) Distilled Posterior** (**`70.00%`** slice / **`71.01%`** full, **`0.2499`** KL, **`0.3761`** ScoreMAE) | Automatic `<think>` leakage detector in `extract_letter_distribution` + `reasoning_to_readout_distillation_loss` cuts human-consensus KL by `-57.1%` |
+| **Exp B: `<think>` Leakage Guard + Eq. (12) Distillation (`arXiv:2610.03935` Sec 6.2)** | Default thinking template: `31.33%` acc (`0.9745` Brier); `enable_thinking=False` 27B: `68.00%` acc (`0.5822` KL to humans) | **Eq. (12) Distilled Posterior** (**`70.00%`** slice / **`71.01%`** full, **`0.2499`** KL, **`0.3761`** ScoreMAE) | Automatic `<think>` leakage detector in `extract_letter_distribution` + `reasoning_to_readout_distillation_loss` cuts human-consensus KL by `-57.1%` |
 | **Exp C1: `L1` vs `L2` Agent States (`arXiv:2610.21412v1` Sec 3 & 9.1)** | `e14g` scores `81.8%` on `L1` BFCL tool choice vs `24.6%` (`0.0%` `L3` success) on visited `L2` states; `jev` (`39.3%`) and `sl27b` (`38.2%`) fail `must_ask` states with `60.7%..61.8%` fatal irreversible calls | **`acceptable_set_accuracy` + `must_ask` / `after_off_plan` Stratum Audit** (`rl` & `sft_v1`: **`100.0%` `must_ask`**, `0.0%` fatal irreversible rate) | `L2` acceptable-set accuracy predicts `L3` closed-loop task success ($\tau = +0.591$ vs $+0.227$ for `L1`) and avoids single-gold undercounting (`-8.1` pts on `sl27b`) |
 | **Exp C2: Prop. 1 Trajectory Deferral Under Shift (`DecisionGym-Shift`)** | Scalar Prop. 1 threshold accepts `61` errors (`44` irreversible) on `e14a` and `1` irreversible error on `rl` ($N = 300$ slice; `179` irreversible on $N = 1,250$ full) | **Action-Stakes $V(\hat{a})$ + Irreversibility Guard** (`fit_trajectory_delegation_threshold`: **`0` irreversible errors on `rl`**, **`44 -> 4` (`-90.9%`) on `e14a`**) | Separating $V_{\text{irrev}} = 5.0$ from $V_{\text{rev}} = 0.15$ + secondary anchor consensus prevents overconfident state-mutating calls when tools are renamed/doubled (`69 -> 129`) |
 | **Exp C3 & C4: Prop. 2 Youden-$J$ Guard & Eq. (1) Selective Brier SFT** | `Always-No` dummy gate gets `92.0%` accuracy on `DecisionGym-Shift` (`8%` prevalence) with $J = 0.0000$; unconditional KD (`0.3 * gold + 0.7 * p_Jev`) corrupts **`45 / 80`** (`323 / 350` full) `must_ask` targets | **`evaluate_trigger_guard_utility` ($J = +0.8808$ on `rl`) + `selective_teacher_brier_sft_loss` (`0 / 80` corrupted targets) + `tango_paired_non_inferiority_test`** | Proves binary gate utility scales linearly with Youden's $J = \text{TPR} - \text{FPR}$, eliminates teacher-error target corruption on `must_ask` states, and provides Tango's Berger-Boos + Holm-Bonferroni non-inferiority testing |
 
-## MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark ($N = 400$)
+## MDM-Bench 8-Track Practical Multimodal & System-1 Decision Benchmark ($N = 400$)
 
 See [`benchmarks/results/mdm_bench_report.md`](benchmarks/results/mdm_bench_report.md) and [`docs/practical_use_cases.md`](docs/practical_use_cases.md) for the full 8-track breakdown (`agent_tool_trie_routing`, `rag_rerank_and_ipi_firewall`, `gui_som_and_visual_blink`, `visual_catalog_sku_audit`, `coding_context_compaction`, `relational_entity_and_swarm_locks`, `judge_rubric_calibration`, and `safety_and_policy_guardrail`) and out-of-fold ablations for the 6 Research Upgrades:
 
 | Evaluation Arm | Paradigm | Accuracy | Macro-F1 | Brier (95% Cluster CI) | ECE | AURC | p50 Latency |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **DecisionGemma-2B** | `system1_diffusion_2b` | `82.50%` | `0.7344` | `0.2463` (`[0.1456, 0.3511]`) | `0.0840` | `0.0459` | `126.7 ms` |
-| **dgem-v0.3.7-SystemOne** | `system1_diffusion_v037` | `79.00%` | `0.6548` | `0.3229` (`[0.2147, 0.4408]`) | `0.1142` | `0.0680` | `220.8 ms` |
-| **Strands-Decider-2B-v19** | `compact_decider_2b` | `66.25%` | `0.5250` | `0.4476` (`[0.3238, 0.5734]`) | `0.0590` | `0.1684` | `128.2 ms` |
-| **Laya-Decision-4B** | `system1_diffusion_4b` | `47.75%` | `0.3283` | `0.6242` (`[0.5255, 0.7279]`) | `0.1398` | `0.3125` | `257.4 ms` |
-| **Gemini-3.8-Flash-Logprob** | `frontier_multimodal_logprob` | `89.00%` | `0.9172` | `0.1613` (`[0.0956, 0.2414]`) | `0.0445` | `0.0402` | `348.9 ms` |
-| **LTT + RAPS Cascade (`DecisionGemma-2B -> Gemini-3.8-Flash`)** | `ltt_conformal_cascade` | **`88.75%`** | **`0.8975`** | **`0.1598`** (`[0.0928, 0.2370]`) | **`0.0390`** | **`0.0376`** | **`128.4 ms`** |
+| **DecisionGemma-2B** | `system1_diffusion_2b` | `82.50%` | `0.7344` | `0.2463` (`[0.1733, 0.3328]`) | `0.0840` | `0.0495` | `126.7 ms` |
+| **dgem-v0.3.7-SystemOne** | `system1_gateway_v037` | `79.00%` | `0.6548` | `0.3229` (`[0.2036, 0.4788]`) | `0.1142` | `0.0772` | `220.8 ms` |
+| **Strands-Decider-2B-v19** | `compact_decider_2b` | `66.25%` | `0.5250` | `0.4476` (`[0.3452, 0.5501]`) | `0.0590` | `0.1895` | `128.2 ms` |
+| **Laya-Decision-4B** | `autoregressive_decider_4b` | `47.75%` | `0.3283` | `0.6242` (`[0.5150, 0.7459]`) | `0.1398` | `0.3522` | `257.4 ms` |
+| **Gemini-3.8-Flash-Logprob** | `frontier_multimodal_logprob` | `89.00%` | `0.9172` | `0.1613` (`[0.0987, 0.2348]`) | `0.0445` | `0.0446` | `348.9 ms` |
+| **LTT + RAPS Cascade (`DecisionGemma-2B -> Gemini-3.8-Flash`)** | `ltt_conformal_cascade` | **`88.75%`** | **`0.8975`** | **`0.1598`** (`[0.1028, 0.2278]`) | **`0.0390`** | **`0.0376`** | **`440.5 ms`** |
 
 | Research Upgrade (`v0.5.0`) | Baseline Result | Upgraded Result | Verified Guarantee |
 | :--- | :---: | :---: | :--- |
@@ -273,17 +273,17 @@ See [`benchmarks/results/audio_video_v080_report.md`](benchmarks/results/audio_v
 
 | Public / Companion Suite | Scale & Modality | Standalone Baseline | Calibrated Stack (`multimodal-decision-models` + `dgem`) | Report Reference |
 | :--- | :--- | :---: | :---: | :--- |
-| **`Decision Index 0.2.1` (38 Suites)** | `155,390` requests (NLU, routing, safety) | Raw `DiffusionGemma`: `72.2%` acc (`0.203` ECE) | **`Decision Gemma rc3`: `86.4%` acc (`0.042` ECE, `55–62 ms`)** | `DecisionGemma` Preprint Table 1 & C.1 |
+| **`Decision Index 0.2.1` (38 Suites)** | `155,390` requests (NLU, routing, safety) | Raw `DiffusionGemma`: `72.2%` acc (`0.203` ECE) | **`Decision Gemma rc3`: `86.4%` acc (`0.042` ECE, `55 to 62 ms`)** | `DecisionGemma` Preprint Table 1 & C.1 |
 | **`JevBench SystemOne`** | $n = 231 \times 3$ hard semantic multi-slot | Raw `DiffusionGemma`: `84.0%` acc (`0.847` AUROC) | **`Decision Gemma rc3`: `87.9%` acc (`0.935` AUROC, `p = 0.004`)** | `DecisionGemma` Preprint Table C.2 |
 | **`ScreenSpot` & `RefCOCO` Grounding** | $n = 108$ GUI + $n = 120$ visual grounding | Continuous 21-bin coord regression: `11.6%` GUI hit | **Discrete Set-of-Marks (`SoM`) Readout: `78.1%` GUI center hit** | [`som_navigator.py`](src/multimodal_decision_models/som_navigator.py) |
-| **`LocalLLaMA/typed-decisions`** | $N = 500$ slice / $N = 2,000$ full (7 models) | `jev`: `75.83%` acc (`0.4090` Brier); `60.42%` 5-slot cov | **Pre-Gated PoE: `83.50%` acc (`0.2449` Brier); `97.92%` 5-slot cov** | [`real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) |
+| **`LocalLLaMA/typed-decisions`** | $N = 500$ slice / $N = 2,000$ full (7 models) | `jev`: `70.00%` acc (`0.3980` raw Brier); `60.42%` 5-slot cov | **Pre-Gated PoE: `81.67%` slice (`0.2775` Brier) / `83.50%` full; `97.92%` 5-slot cov** | [`real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) |
 | **`Hanno-Labs/decision-bench` (`arXiv:2610.03935`)** | $K \in [2, 255]$ bijection + $N = 300$ KD | Unstripped `<think>`: `31.33%` acc; `Kev-4B`: `65.33%` | **`255/255` single-token codes; Eq. (12) KD: `70.00%` acc (`0.2499` KL)** | [`real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) |
 | **`AgentDecisionBench` & `DecisionGym-Shift` (`arXiv:2610.21412v1`)** | $N = 600$ / $5,314$ states + $N = 1,250$ shift (`12` models) | Scalar Prop. 1: `44` irrev. shift errors; `45/80` bad SFT | **Action-Stakes Guard: `4` irrev. (`-90.9%`); `0/80` corrupted SFT** | [`real_public_bench_report.md`](benchmarks/results/real_public_bench_report.md) |
 | **`XSTest` Safety Boundary** | $N = 360$, $12$ safety prompt clusters ($K = 2$) | `Classier v0.2.0`: `78.89%` acc (`0.2986` Brier) | **`DecisionGemma`: `96.94%` acc (`0.0465` Brier); Cascade: `89.17%`** | [`multimodel_benchmark_report.md`](benchmarks/results/multimodel_benchmark_report.md) |
-| **`MDM-Bench` (8 Multimodal Tracks)** | $N = 400$ real items ($50 \times 8$ tracks, 6 arms) | `DecisionGemma-2B`: `82.50%` (`0.2463` Brier) | **`LTT + RAPS Cascade`: `88.75%` acc (`0.1598` Brier, `128.4 ms`)** | [`mdm_bench_report.md`](benchmarks/results/mdm_bench_report.md) |
+| **`MDM-Bench` (8 Multimodal Tracks)** | $N = 400$ real items ($50 \times 8$ tracks, 6 arms) | `DecisionGemma-2B`: `82.50%` (`0.2463` Brier) | **`LTT + RAPS Cascade`: `88.75%` acc (`0.1598` Brier, `440.5 ms` p50)** | [`mdm_bench_report.md`](benchmarks/results/mdm_bench_report.md) |
 | **Streaming Audio & Video (`v0.8.0`)** | $N = 400$ real WAV + RGB frame trajectories | Raw `VAP`: `63.0%`; Naive Video Exit: `63.0%`; Naive PoE: `75.0%` | **Conformal `VAP` (`88.0%`), Martingale (`96.0%`), `AVEL` (`95.0%`), `ST-SoM` (`97.5%`)** | [`audio_video_v080_report.md`](benchmarks/results/audio_video_v080_report.md) |
 | **`MDM-EpisodeBench` `Tier-2` ($2^4$ Factorial)** | `1,200` 6-turn episodes (`3,600` locked `D_test` turns, Receipt-Grounded Replay) | `R1 (0000)`: `0.83%` ep success (`$0.0091`), `R0`: `44.67%` (`$0.0482`) | **`R4 (1111)`: `62.33%` ep success (`83.78%` turn acc, `$0.0076`, `-84.3%` cost vs `R0`)** | [`mdm_factorial_ablation_report.md`](benchmarks/results/mdm_factorial_ablation_report.md) |
-| **Live Gev Studio (`mdm:cascade`)** | $120$ rows / $203$ slots (RefCOCO JPG + 16kHz WAV + JEVBench + Ecotone + Arenas) | `gemini-decision-1`: `18/22 ERROR` on multimodal suite (`0/4` WAV) | **`mdm:cascade`: `120 / 120 DONE` (`88.6%` multimodal, `96.0%` JEVBench/Ecotone, `96.8%` Triage)** | [`research_paper.md`](docs/research_paper.md) Sec 5.6 |
+| **Hosted Multimodal Cascade (`GevStudioSystemOneBackend`)** | $120$ rows / $203$ slots (RefCOCO JPG + 16kHz WAV + JEVBench + Ecotone + Arenas) | `gemini-decision-1`: `18/22 ERROR` on multimodal suite (`0/4` WAV) | **Two-Stage Cascade: `120 / 120 DONE` (`88.6%` multimodal, `96.0%` JEVBench/Ecotone, `96.8%` Triage)** | [`research_paper.md`](docs/research_paper.md) Sec 5.6 |
 
 ## Citation
 
@@ -294,7 +294,7 @@ If you use `multimodal-decision-models` in your research or engineering systems,
   author       = {Juneja, Jigyasu},
   title        = {Calibrated Multimodal Decision Models at Catalog Scale: Model-Agnostic Readouts, Dual-Buffer Visual Contact Sheets, and Split Conformal Cascades},
   year         = {2026},
-  version      = {1.2.0},
+  version      = {1.3.1},
   url          = {https://github.com/jigyasujuneja/multimodal-decision-models},
   license      = {Apache-2.0}
 }

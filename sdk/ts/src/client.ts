@@ -14,10 +14,22 @@
  * limitations under the License.
  */
 
-import { applyTemperature, normalizedEntropy } from "./calibration.js";
+import {
+  MAX_TEMPERATURE,
+  MIN_TEMPERATURE,
+  applyTemperature,
+  normalizedEntropy,
+} from "./calibration.js";
+import {
+  cancelStreamQuietly,
+  formatUnknownError,
+  getQuestionOptionKeys,
+  isPlainRecord,
+  nullProtoRecord,
+  throwIfSignalAborted,
+} from "./internal.js";
 import {
   type ChatLogprobDecideRequest,
-  type DecisionQuestion,
   type DecisionResponse,
   MDMHTTPError,
   MDMTransportError,
@@ -39,16 +51,16 @@ const DEFAULT_CREDENTIAL_HEADER_NAMES = new Set([
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const ASCII_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/** Default upper bound in bytes for buffered HTTP response bodies (8 MiB). */
 export const MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024;
 
-function nullProtoRecord<T>(): Record<string, T> {
-  return Object.create(null) as Record<string, T>;
-}
-
+/** Supplies a dynamic bearer token for each outbound HTTP request URL. */
 export type TokenProvider = (
   targetUrl: string,
 ) => string | undefined | Promise<string | undefined>;
 
+/** Configures endpoint routing, credentials, redirect policy, and timeouts for `MDMClient`. */
 export interface MDMClientOptions {
   readonly baseUrl: string;
   readonly bearerToken?: string;
@@ -62,6 +74,7 @@ export interface MDMClientOptions {
   readonly fetchImpl?: typeof fetch;
 }
 
+/** Removes trailing ASCII `/` characters from a URL or path string. */
 export function stripTrailingSlashes(input: string): string {
   let end = input.length;
   while (end > 0 && input.charCodeAt(end - 1) === 47) {
@@ -70,6 +83,7 @@ export function stripTrailingSlashes(input: string): string {
   return input.slice(0, end);
 }
 
+/** Validates an HTTP or HTTPS URL and returns its canonical `protocol//host:port` origin. */
 export function parseUrlOrigin(rawUrl: string, allowInsecureHttp = false): string {
   if (
     typeof rawUrl !== "string" ||
@@ -83,7 +97,10 @@ export function parseUrlOrigin(rawUrl: string, allowInsecureHttp = false): strin
   try {
     parsed = new URL(rawUrl.trim());
   } catch (err) {
-    throw new MDMValidationError(`invalid URL ${JSON.stringify(rawUrl)}: ${String(err)}`);
+    throw new MDMValidationError(
+      `invalid URL ${JSON.stringify(rawUrl)}: ${formatUnknownError(err)}`,
+      { cause: err },
+    );
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new MDMValidationError(
@@ -113,6 +130,7 @@ export function parseUrlOrigin(rawUrl: string, allowInsecureHttp = false): strin
   return `${parsed.protocol}//${hostLower}:${effectivePort}`;
 }
 
+/** Returns true when `rawUrl` targets a Vertex AI `:rawPredict` or `:predict` route. */
 export function isRawPredictEndpoint(rawUrl: string): boolean {
   let parsed: URL;
   try {
@@ -122,6 +140,19 @@ export function isRawPredictEndpoint(rawUrl: string): boolean {
   }
   const cleanPath = stripTrailingSlashes(parsed.pathname);
   return cleanPath.endsWith(":rawPredict") || cleanPath.endsWith(":predict");
+}
+
+function validateTemperatureParam(temperature: number): void {
+  if (
+    typeof temperature !== "number" ||
+    !Number.isFinite(temperature) ||
+    temperature < MIN_TEMPERATURE ||
+    temperature > MAX_TEMPERATURE
+  ) {
+    throw new MDMValidationError(
+      `temperature must lie in [${MIN_TEMPERATURE}, ${MAX_TEMPERATURE}] (got ${String(temperature)})`,
+    );
+  }
 }
 
 function validateHeaderValue(name: string, value: string): string {
@@ -163,7 +194,7 @@ async function readBoundedResponseText(
   if (rawContentLength !== null && rawContentLength.trim() !== "") {
     const declaredBytes = Number(rawContentLength);
     if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-      await response.body?.cancel().catch(() => undefined);
+      await cancelStreamQuietly(response.body);
       throw new MDMValidationError(
         `HTTP response Content-Length (${declaredBytes}) exceeds maxResponseBytes (${maxBytes})`,
       );
@@ -183,7 +214,7 @@ async function readBoundedResponseText(
         if (value) {
           totalBytes += value.byteLength;
           if (totalBytes > maxBytes) {
-            await reader.cancel().catch(() => undefined);
+            await cancelStreamQuietly(reader);
             throw new MDMValidationError(
               `HTTP response body exceeded maxResponseBytes (${maxBytes})`,
             );
@@ -191,8 +222,10 @@ async function readBoundedResponseText(
           try {
             parts.push(decoder.decode(value, { stream: true }));
           } catch (err) {
+            await cancelStreamQuietly(reader);
             throw new MDMValidationError(
-              `HTTP response is not valid UTF-8: ${String(err)}`,
+              `HTTP response is not valid UTF-8: ${formatUnknownError(err)}`,
+              { cause: err },
             );
           }
         }
@@ -200,7 +233,10 @@ async function readBoundedResponseText(
       try {
         parts.push(decoder.decode());
       } catch (err) {
-        throw new MDMValidationError(`HTTP response is not valid UTF-8: ${String(err)}`);
+        throw new MDMValidationError(
+          `HTTP response is not valid UTF-8: ${formatUnknownError(err)}`,
+          { cause: err },
+        );
       }
       return parts.join("");
     } finally {
@@ -216,32 +252,7 @@ async function readBoundedResponseText(
   return textBody;
 }
 
-function getQuestionOptionKeys(question: DecisionQuestion): string[] {
-  if (question.type === "score") {
-    return question.levels ? [...question.levels] : [];
-  }
-  const criteria = question.criteria;
-  const descriptions = question.optionDescriptions;
-  if (question.order && question.order.length > 0) {
-    return question.order.filter(
-      (key) =>
-        (criteria !== undefined && Object.hasOwn(criteria, key)) ||
-        (descriptions !== undefined && Object.hasOwn(descriptions, key)),
-    );
-  }
-  if (criteria !== undefined && Object.keys(criteria).length > 0) {
-    return Object.keys(criteria);
-  }
-  return descriptions ? Object.keys(descriptions) : [];
-}
-
-function throwIfSignalAborted(signal?: AbortSignal): void {
-  if (!signal || !signal.aborted) {
-    return;
-  }
-  throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
-}
-
+/** HTTP client for `/v1/systemone`, Vertex `:rawPredict`, and `/v1/chat/completions` logprob backends. */
 export class MDMClient {
   private readonly baseUrl: string;
   private readonly bearerToken?: string;
@@ -359,12 +370,16 @@ export class MDMClient {
           if (externalSignal?.aborted && !timedOut) {
             throw externalSignal.reason ?? err;
           }
-          throw new MDMTransportError(`HTTP transport failed: ${String(err)}`, true);
+          throw new MDMTransportError(
+            `HTTP transport failed: ${formatUnknownError(err)}`,
+            true,
+            { cause: err },
+          );
         }
 
         if (REDIRECT_STATUS_CODES.has(response.status)) {
           isRedirect = true;
-          await response.body?.cancel().catch(() => undefined);
+          await cancelStreamQuietly(response.body);
         } else {
           try {
             textBody = await readBoundedResponseText(response, this.maxResponseBytes);
@@ -375,7 +390,11 @@ export class MDMClient {
             if (err instanceof MDMValidationError) {
               throw err;
             }
-            throw new MDMTransportError(`HTTP body stream failed: ${String(err)}`, true);
+            throw new MDMTransportError(
+              `HTTP body stream failed: ${formatUnknownError(err)}`,
+              true,
+              { cause: err },
+            );
           }
         }
       } finally {
@@ -391,6 +410,15 @@ export class MDMClient {
             false,
           );
         }
+        if (
+          locationHeader.includes("\r") ||
+          locationHeader.includes("\n") ||
+          locationHeader.includes("\0")
+        ) {
+          throw new MDMValidationError(
+            "redirect Location header must not contain NUL, CR, or LF characters",
+          );
+        }
         if (hop === this.maxRedirects) {
           throw new MDMTransportError(
             `exceeded maxRedirects (${this.maxRedirects})`,
@@ -398,9 +426,17 @@ export class MDMClient {
           );
         }
         const currentProtocol = new URL(currentUrl).protocol;
-        const resolvedNext = new URL(locationHeader, currentUrl).toString();
-        const nextProtocol = new URL(resolvedNext).protocol;
-        if (currentProtocol === "https:" && nextProtocol === "http:") {
+        let nextUrlObj: URL;
+        try {
+          nextUrlObj = new URL(locationHeader, currentUrl);
+        } catch (err) {
+          throw new MDMValidationError(
+            `malformed redirect Location ${JSON.stringify(locationHeader)}: ${formatUnknownError(err)}`,
+            { cause: err },
+          );
+        }
+        const resolvedNext = nextUrlObj.toString();
+        if (currentProtocol === "https:" && nextUrlObj.protocol === "http:") {
           throw new MDMValidationError(
             `blocked HTTPS -> HTTP downgrade redirect (${response.status}) to ${JSON.stringify(resolvedNext)}`,
           );
@@ -432,17 +468,22 @@ export class MDMClient {
       try {
         parsedJson = textBody ? JSON.parse(textBody) : {};
       } catch (err) {
-        throw new MDMTransportError(`invalid JSON response: ${String(err)}`, false);
+        throw new MDMTransportError(
+          `invalid JSON response: ${formatUnknownError(err)}`,
+          false,
+          { cause: err },
+        );
       }
-      if (!parsedJson || typeof parsedJson !== "object" || Array.isArray(parsedJson)) {
+      if (!isPlainRecord(parsedJson)) {
         throw new MDMValidationError("expected JSON object response");
       }
-      return parsedJson as Record<string, unknown>;
+      return parsedJson;
     }
 
     throw new MDMTransportError("redirect loop exhausted", false);
   }
 
+  /** Probes backend liveness via Vertex `:rawPredict` health POST or `/health` -> `/healthz` GET fallback. */
   async checkHealth(): Promise<Record<string, unknown>> {
     if (isRawPredictEndpoint(this.baseUrl)) {
       return this.requestJson("POST", this.baseUrl, { health: true });
@@ -467,8 +508,11 @@ export class MDMClient {
     }
   }
 
+  /** Evaluates one or more decision slots in a single `/v1/systemone` or Vertex `:rawPredict` request. */
   async decideSystemOne(request: SystemOneDecideRequest): Promise<DecisionResponse> {
     const startedAt = performance.now();
+    const temperature = request.temperature ?? 1.0;
+    validateTemperatureParam(temperature);
     const questionEntries = Object.entries(request.questions);
     if (questionEntries.length === 0) {
       throw new MDMValidationError("questions must contain at least one slot");
@@ -528,7 +572,7 @@ export class MDMClient {
               ...(question.order ? { order: [...question.order] } : {}),
             };
       if (hasPriorLogits) {
-        wireEntry["prior_logits"] = mergedPriorLogits;
+        wireEntry["prior_logits"] = { ...mergedPriorLogits };
       }
       wireQuestions[slotId] = wireEntry;
     }
@@ -547,57 +591,51 @@ export class MDMClient {
 
     const payload: Record<string, unknown> = {
       state: request.state,
-      questions: wireQuestions,
+      questions: { ...wireQuestions },
       ...(request.images && request.images.length > 0 ? { images: [...request.images] } : {}),
     };
     const responseJson = await this.requestJson("POST", endpoint, payload, request.signal);
-    const unwrapped =
-      Array.isArray(responseJson["predictions"]) &&
-      responseJson["predictions"][0] &&
-      typeof responseJson["predictions"][0] === "object"
-        ? (responseJson["predictions"][0] as Record<string, unknown>)
-        : responseJson;
+    const predictionsCandidate = responseJson["predictions"];
+    const firstPrediction =
+      Array.isArray(predictionsCandidate) && predictionsCandidate.length > 0
+        ? predictionsCandidate[0]
+        : undefined;
+    const unwrapped: Record<string, unknown> = isPlainRecord(firstPrediction)
+      ? firstPrediction
+      : responseJson;
     const rawAnswersCandidate =
       (Object.hasOwn(unwrapped, "answers") ? unwrapped["answers"] : undefined) ??
       (Object.hasOwn(unwrapped, "slots") ? unwrapped["slots"] : undefined) ??
       unwrapped;
-    if (!rawAnswersCandidate || typeof rawAnswersCandidate !== "object") {
+    if (!isPlainRecord(rawAnswersCandidate)) {
       throw new MDMValidationError("upstream response missing answers object");
     }
-    const rawAnswers = rawAnswersCandidate as Record<string, unknown>;
 
-    const temperature = request.temperature ?? 1.0;
     const slots = nullProtoRecord<SlotReadout>();
     for (const [slotId, question] of questionEntries) {
-      const entry = Object.hasOwn(rawAnswers, slotId) ? rawAnswers[slotId] : undefined;
-      if (!entry || typeof entry !== "object") {
+      const entry = Object.hasOwn(rawAnswersCandidate, slotId)
+        ? rawAnswersCandidate[slotId]
+        : undefined;
+      if (!isPlainRecord(entry)) {
         throw new MDMValidationError(
           `upstream response missing slot ${JSON.stringify(slotId)}`,
         );
       }
-      const entryRecord = entry as Record<string, unknown>;
       const rawDistCandidate =
-        (Object.hasOwn(entryRecord, "probabilities")
-          ? entryRecord["probabilities"]
-          : undefined) ??
-        (Object.hasOwn(entryRecord, "scores") ? entryRecord["scores"] : undefined) ??
-        entryRecord;
-      if (!rawDistCandidate || typeof rawDistCandidate !== "object") {
+        (Object.hasOwn(entry, "probabilities") ? entry["probabilities"] : undefined) ??
+        (Object.hasOwn(entry, "scores") ? entry["scores"] : undefined) ??
+        entry;
+      if (!isPlainRecord(rawDistCandidate)) {
         throw new MDMValidationError(
           `slot ${JSON.stringify(slotId)} missing probabilities object`,
         );
       }
-      const rawDist = rawDistCandidate as Record<string, unknown>;
       const optionKeys = getQuestionOptionKeys(question);
       const mappedDist = nullProtoRecord<unknown>();
       if (question.type === "score") {
-        const legend =
-          Object.hasOwn(entryRecord, "legend") &&
-          entryRecord["legend"] &&
-          typeof entryRecord["legend"] === "object"
-            ? (entryRecord["legend"] as Record<string, unknown>)
-            : undefined;
-        for (const [idxKey, probVal] of Object.entries(rawDist)) {
+        const rawLegend = Object.hasOwn(entry, "legend") ? entry["legend"] : undefined;
+        const legend = isPlainRecord(rawLegend) ? rawLegend : undefined;
+        for (const [idxKey, probVal] of Object.entries(rawDistCandidate)) {
           if (legend && Object.hasOwn(legend, idxKey)) {
             mappedDist[String(legend[idxKey])] = probVal;
           } else if (/^\d+$/.test(idxKey) && Number(idxKey) < optionKeys.length) {
@@ -610,7 +648,7 @@ export class MDMClient {
           }
         }
       } else {
-        for (const [optKey, probVal] of Object.entries(rawDist)) {
+        for (const [optKey, probVal] of Object.entries(rawDistCandidate)) {
           mappedDist[optKey] = probVal;
         }
       }
@@ -643,12 +681,12 @@ export class MDMClient {
         probabilities: scaledProbs,
         rawProbabilities: applyTemperature(rawProbs, 1.0),
         hRaw,
-        confidence: bestProb,
+        confidence: 1.0 - hRaw,
       };
     }
 
     return {
-      slots,
+      slots: { ...slots },
       latencyMs: performance.now() - startedAt,
       backendName: isRawPredictEndpoint(this.baseUrl)
         ? "vertex_raw_predict"
@@ -656,34 +694,49 @@ export class MDMClient {
     };
   }
 
+  /** Evaluates decision slots via OpenAI-compatible `/v1/chat/completions` single-token `[A..Z]` logprobs. */
   async decideChatLogprobs(request: ChatLogprobDecideRequest): Promise<DecisionResponse> {
     const startedAt = performance.now();
+    if (typeof request.model !== "string" || request.model.trim() === "") {
+      throw new MDMValidationError("decideChatLogprobs requires a non-empty model name");
+    }
+    const topLogprobs = request.topLogprobs ?? 20;
+    if (typeof topLogprobs !== "number" || !Number.isInteger(topLogprobs) || topLogprobs <= 0) {
+      throw new MDMValidationError("topLogprobs must be a positive integer");
+    }
+    const temperature = request.temperature ?? 1.0;
+    validateTemperatureParam(temperature);
+
     const questionEntries = Object.entries(request.questions);
     if (questionEntries.length === 0) {
       throw new MDMValidationError("questions must contain at least one slot");
     }
-    const endpoint = this.baseUrl.endsWith("/v1/chat/completions")
-      ? this.baseUrl
-      : `${this.baseUrl}/v1/chat/completions`;
-    const topLogprobs = request.topLogprobs ?? 20;
-    const temperature = request.temperature ?? 1.0;
-    const stateText =
-      typeof request.state === "string" ? request.state : JSON.stringify(request.state);
-
-    const slots = nullProtoRecord<SlotReadout>();
-    for (const [slotId, question] of questionEntries) {
+    for (const [, question] of questionEntries) {
       const optionKeys = getQuestionOptionKeys(question);
       if (optionKeys.length < 2 || optionKeys.length > ASCII_LETTERS.length) {
         throw new MDMValidationError(
           `decideChatLogprobs supports 2..26 options per slot (got ${optionKeys.length})`,
         );
       }
-      const codeMap = nullProtoRecord<string>();
+    }
+
+    const endpoint = this.baseUrl.endsWith("/v1/chat/completions")
+      ? this.baseUrl
+      : this.baseUrl.endsWith("/v1")
+        ? `${this.baseUrl}/chat/completions`
+        : `${this.baseUrl}/v1/chat/completions`;
+    const stateText =
+      typeof request.state === "string" ? request.state : JSON.stringify(request.state);
+
+    const slots = nullProtoRecord<SlotReadout>();
+    for (const [slotId, question] of questionEntries) {
+      const optionKeys = getQuestionOptionKeys(question);
+      const codeMap = new Map<string, string>();
       const optionLines: string[] = [];
       for (let idx = 0; idx < optionKeys.length; idx += 1) {
         const letter = ASCII_LETTERS[idx] ?? "A";
         const key = optionKeys[idx] ?? "";
-        codeMap[letter] = key;
+        codeMap.set(letter, key);
         const desc =
           question.optionDescriptions && Object.hasOwn(question.optionDescriptions, key)
             ? question.optionDescriptions[key]
@@ -715,75 +768,64 @@ export class MDMClient {
       );
 
       const choices = responseJson["choices"];
-      const firstChoice =
-        Array.isArray(choices) && choices[0] && typeof choices[0] === "object"
-          ? (choices[0] as Record<string, unknown>)
-          : undefined;
-      const logprobsObj =
-        firstChoice?.["logprobs"] && typeof firstChoice["logprobs"] === "object"
-          ? (firstChoice["logprobs"] as Record<string, unknown>)
-          : undefined;
-      const contentArr = logprobsObj?.["content"];
-      const firstTokenEntry =
-        Array.isArray(contentArr) && contentArr[0] && typeof contentArr[0] === "object"
-          ? (contentArr[0] as Record<string, unknown>)
-          : undefined;
-      const topCandidates = firstTokenEntry?.["top_logprobs"];
+      const firstChoiceRaw = Array.isArray(choices) ? choices[0] : undefined;
+      const firstChoice = isPlainRecord(firstChoiceRaw) ? firstChoiceRaw : undefined;
+      const logprobsRaw = firstChoice ? firstChoice["logprobs"] : undefined;
+      const logprobsObj = isPlainRecord(logprobsRaw) ? logprobsRaw : undefined;
+      const contentArr = logprobsObj ? logprobsObj["content"] : undefined;
+      const firstTokenRaw = Array.isArray(contentArr) ? contentArr[0] : undefined;
+      const firstTokenEntry = isPlainRecord(firstTokenRaw) ? firstTokenRaw : undefined;
+      const topCandidates = firstTokenEntry ? firstTokenEntry["top_logprobs"] : undefined;
       if (!Array.isArray(topCandidates) || topCandidates.length === 0) {
         throw new MDMValidationError(
           `chat/completions response missing top_logprobs for slot ${JSON.stringify(slotId)}`,
         );
       }
 
-      const exactTokenLogprobs = nullProtoRecord<number>();
+      const exactTokenLogprobs = new Map<string, number>();
       for (const cand of topCandidates) {
-        if (!cand || typeof cand !== "object") {
+        if (!isPlainRecord(cand)) {
           continue;
         }
-        const candObj = cand as Record<string, unknown>;
-        const unstrippedTok = typeof candObj["token"] === "string" ? candObj["token"] : "";
+        const unstrippedTok = typeof cand["token"] === "string" ? cand["token"] : "";
         const trimmedTok = unstrippedTok.trim();
-        const lp = candObj["logprob"];
-        if (
-          Object.hasOwn(codeMap, trimmedTok) &&
-          typeof lp === "number" &&
-          Number.isFinite(lp) &&
-          (!Object.hasOwn(exactTokenLogprobs, unstrippedTok) ||
-            lp > (exactTokenLogprobs[unstrippedTok] as number))
-        ) {
-          exactTokenLogprobs[unstrippedTok] = lp;
+        const lp = cand["logprob"];
+        if (codeMap.has(trimmedTok) && typeof lp === "number" && Number.isFinite(lp)) {
+          const prevExact = exactTokenLogprobs.get(unstrippedTok);
+          if (prevExact === undefined || lp > prevExact) {
+            exactTokenLogprobs.set(unstrippedTok, lp);
+          }
         }
       }
-      const letterLogprobs = nullProtoRecord<number>();
-      for (const [unstrippedTok, lp] of Object.entries(exactTokenLogprobs)) {
+      const letterLogprobs = new Map<string, number>();
+      for (const [unstrippedTok, lp] of exactTokenLogprobs.entries()) {
         const rawTok = unstrippedTok.trim();
-        if (!Object.hasOwn(letterLogprobs, rawTok)) {
-          letterLogprobs[rawTok] = lp;
+        const prevLp = letterLogprobs.get(rawTok);
+        if (prevLp === undefined) {
+          letterLogprobs.set(rawTok, lp);
         } else {
-          const prevLp = letterLogprobs[rawTok] as number;
           const hi = Math.max(prevLp, lp);
           const lo = Math.min(prevLp, lp);
-          letterLogprobs[rawTok] = hi + Math.log1p(Math.exp(lo - hi));
+          letterLogprobs.set(rawTok, hi + Math.log1p(Math.exp(lo - hi)));
         }
       }
-      if (Object.keys(letterLogprobs).length === 0) {
+      if (letterLogprobs.size === 0) {
         throw new MDMValidationError(
           `no aligned single-token [A..Z] logprobs found for slot ${JSON.stringify(slotId)}`,
         );
       }
 
       let maxLp = -Infinity;
-      for (const val of Object.values(letterLogprobs)) {
+      for (const val of letterLogprobs.values()) {
         if (val > maxLp) {
           maxLp = val;
         }
       }
       const rawProbs = nullProtoRecord<number>();
       let sumExp = 0.0;
-      for (const [letter, optKey] of Object.entries(codeMap)) {
-        const lp = Object.hasOwn(letterLogprobs, letter)
-          ? (letterLogprobs[letter] as number)
-          : maxLp - 20.0;
+      for (const [letter, optKey] of codeMap.entries()) {
+        const matchedLp = letterLogprobs.get(letter);
+        const lp = matchedLp !== undefined ? matchedLp : maxLp - 20.0;
         const mass = Math.exp(lp - maxLp);
         rawProbs[optKey] = mass;
         sumExp += mass;
@@ -805,14 +847,14 @@ export class MDMClient {
         slotId,
         predicted: bestKey,
         probabilities: scaledProbs,
-        rawProbabilities: rawProbs,
+        rawProbabilities: { ...rawProbs },
         hRaw,
-        confidence: bestProb,
+        confidence: 1.0 - hRaw,
       };
     }
 
     return {
-      slots,
+      slots: { ...slots },
       latencyMs: performance.now() - startedAt,
       backendName: "openai_logprobs",
     };

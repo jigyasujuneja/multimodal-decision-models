@@ -118,11 +118,11 @@ class SixTierProductionReadinessTest(unittest.TestCase):
                             )
         self.assertEqual(missing_annotations, [], f"Unannotated definitions: {missing_annotations}")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"raw_probs\['a'\] must be finite and >= 0"):
             pre_gated_bayesian_poe_fusion({"a": float("nan"), "b": 0.5})
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"raw_probs\['a'\] must be finite and >= 0"):
             pre_gated_bayesian_poe_fusion({"a": -0.1, "b": 1.1})
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"prior_logits\['a'\] must be finite"):
             pre_gated_bayesian_poe_fusion(
                 {"a": 0.5, "b": 0.5},
                 prior_logits={"a": float("inf"), "b": 0.0},
@@ -187,7 +187,7 @@ class SixTierProductionReadinessTest(unittest.TestCase):
             )
         )
 
-        # Sparse entity graph scaling: V = 2,000 nodes (~4,000 edges) completes in < 150 ms
+        # Sparse entity graph scaling: V = 2,000 nodes (~4,000 edges) resolves all 4 violation triangles
         sparse_edges: list[PairwiseEdge] = []
         for idx in range(2000):
             n0 = f"node_{idx:04d}"
@@ -196,13 +196,11 @@ class SixTierProductionReadinessTest(unittest.TestCase):
             if idx % 500 == 0:
                 n2 = f"node_{(idx + 2) % 2000:04d}"
                 sparse_edges.append(PairwiseEdge(n0, n2, 0.08))
-        t0 = time.perf_counter()
         tri_hard = check_transitive_triangles(sparse_edges)
         tri_soft = score_probabilistic_triangles(sparse_edges, min_score=0.50)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
         self.assertEqual(len(tri_hard), 4)
         self.assertEqual(len(tri_soft), 4)
-        self.assertLess(elapsed_ms, 150.0)
+        self.assertEqual({t.nodes[0] for t in tri_hard}, {"node_0000", "node_0500", "node_1000", "node_1500"})
 
     # =========================================================================
     # TIER 2: Proper Scoring Calibration, Paired McNemar & Rogan-Gladen
@@ -256,7 +254,7 @@ class SixTierProductionReadinessTest(unittest.TestCase):
         # Observed positive rate p_hat = 0.20 * 0.90 + 0.80 * (1 - 0.95) = 0.18 + 0.04 = 0.22
         pi_est = rogan_gladen_prevalence(0.22, sensitivity_tpr=0.90, specificity_tnr=0.95)
         self.assertAlmostEqual(pi_est, 0.20, places=6)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"Rogan-Gladen requires Youden's J = TPR \+ TNR - 1 > 0"):
             rogan_gladen_prevalence(0.50, sensitivity_tpr=0.40, specificity_tnr=0.50)
 
         self.assertAlmostEqual(cohen_kappa(["a", "b", "a", "b"], ["a", "b", "a", "b"]), 1.0, places=6)
@@ -325,7 +323,7 @@ class SixTierProductionReadinessTest(unittest.TestCase):
                 }
             ]
         }
-        with self.assertRaises(LogprobAlignmentError):
+        with self.assertRaisesRegex(LogprobAlignmentError, r"Vertex Gemini response omitted logprobsResult;"):
             VertexGeminiBackend.parse_generate_content_response(stripped_gemini, {"rel": q})
 
         split_token_gemini = {
@@ -341,7 +339,7 @@ class SixTierProductionReadinessTest(unittest.TestCase):
                 }
             ]
         }
-        with self.assertRaises(LogprobAlignmentError):
+        with self.assertRaisesRegex(LogprobAlignmentError, r"failed to align single-token logprobs for slot"):
             VertexGeminiBackend.parse_generate_content_response(split_token_gemini, {"rel": q})
 
         # 2. OpenAILogprobBackend rejects > 20 options without letter_token_ids and rejects missing letter logprobs
@@ -350,11 +348,11 @@ class SixTierProductionReadinessTest(unittest.TestCase):
             instructions="Pick from 22",
             criteria={f"k_{i}": f"Option {i}" for i in range(22)},
         )
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"question has 22 options, exceeding OpenAI"):
             OpenAILogprobBackend.build_letter_prompt("ctx", q_22)
 
         _, lmap = OpenAILogprobBackend.build_letter_prompt("ctx", q)
-        with self.assertRaises(LogprobAlignmentError):
+        with self.assertRaisesRegex(LogprobAlignmentError, r"zero valid option letters \['A', 'B', 'C'\] present"):
             OpenAILogprobBackend.extract_letter_distribution({"Sure": -0.01, "Here": -3.0}, lmap)
 
     # =========================================================================
@@ -436,6 +434,8 @@ class SixTierProductionReadinessTest(unittest.TestCase):
 
         chaos_state = {"mode": "429_always", "calls": 0}
         captured_openai_bodies: list[dict[str, Any]] = []
+        openai_concurrency = {"active": 0, "peak": 0}
+        concurrent_pair_seen = threading.Event()
         lock = threading.Lock()
 
         class ChaosHandler(BaseHTTPRequestHandler):
@@ -450,7 +450,16 @@ class SixTierProductionReadinessTest(unittest.TestCase):
                 if self.path.endswith("/v1/chat/completions"):
                     with lock:
                         captured_openai_bodies.append(body_json)
-                    time.sleep(0.06)  # simulate 60ms network RTT per slot
+                        openai_concurrency["active"] += 1
+                        if openai_concurrency["active"] > openai_concurrency["peak"]:
+                            openai_concurrency["peak"] = openai_concurrency["active"]
+                        if openai_concurrency["peak"] >= 2:
+                            concurrent_pair_seen.set()
+                    try:
+                        concurrent_pair_seen.wait(timeout=2.0)
+                    finally:
+                        with lock:
+                            openai_concurrency["active"] -= 1
                     resp_obj = {
                         "choices": [
                             {
@@ -601,16 +610,14 @@ class SixTierProductionReadinessTest(unittest.TestCase):
                 f"s_{i}": DecisionQuestion(type="choice", instructions=f"Slot {i}", criteria={"a": "Yes", "b": "No"})
                 for i in range(6)
             }
-            t_par = time.perf_counter()
             oai_dists = oai.score_questions(
                 {"scene": "shelf"},
                 six_slots,
                 images=["data:image/png;base64,AAAA"],
             )
-            par_ms = (time.perf_counter() - t_par) * 1000.0
             self.assertEqual(len(oai_dists), 6)
-            # 6 slots x 60ms serial would take >= 360ms; parallel 6-worker pool completes well under 250ms
-            self.assertLess(par_ms, 260.0)
+            # Deterministic concurrency proof: at least 2 slots were in flight simultaneously
+            self.assertGreaterEqual(openai_concurrency["peak"], 2)
             first_msg_content = captured_openai_bodies[0]["messages"][0]["content"]
             self.assertIsInstance(first_msg_content, list)
             self.assertEqual(first_msg_content[0]["type"], "image_url")

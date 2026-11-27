@@ -100,7 +100,7 @@
         ]
       },
       "gemini-decision-1?hc=true (raw)": {
-        "target": "beyond-decision:/models/gemini-decision-1?hc=true",
+        "target": "decision:/models/gemini-decision-1?hc=true",
         "matched": 46,
         "total": 48,
         "accuracy": 0.9583333333333334,
@@ -363,8 +363,8 @@
           }
         ]
       },
-      "saturn-moe-3p8b-fst (raw)": {
-        "target": "saturn-moe-3p8b-qat-v0-fst-genmedia",
+      "diffusion-3.8b-fst (raw)": {
+        "target": "diffusion-3.8b-fst",
         "matched": 46,
         "total": 48,
         "accuracy": 0.9583333333333334,
@@ -593,7 +593,7 @@
           }
         }
       },
-      "dgem:vertex (DGemma 26B-A4B NVFP4 raw)": {
+      "vertex-systemone-26b (SystemOne 26B-A4B NVFP4 raw)": {
         "matched_slots": 78,
         "total_slots": 95,
         "slot_accuracy": 0.8211,

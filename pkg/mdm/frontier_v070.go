@@ -175,7 +175,8 @@ func (t *OnlineBCACITracker) ObserveAndUpdate(
 
 	t.scoreWindow = append(t.scoreWindow, scoreT)
 	if len(t.scoreWindow) > t.WindowSize {
-		t.scoreWindow = t.scoreWindow[1:]
+		copy(t.scoreWindow, t.scoreWindow[1:])
+		t.scoreWindow = t.scoreWindow[:t.WindowSize]
 	}
 	return setRes, covered, t.AlphaT, nil
 }
@@ -305,7 +306,7 @@ type PrimalDualParetoBanditRouter struct {
 	duelW             map[string][]float64
 }
 
-func solveSPDLinearSystemGo(matrix [][]float64, rhs []float64) []float64 {
+func solveSPDLinearSystem(matrix [][]float64, rhs []float64) []float64 {
 	d := len(rhs)
 	aug := make([][]float64, d)
 	for i := 0; i < d; i++ {
@@ -371,14 +372,20 @@ func NewPrimalDualParetoBanditRouter(
 	if contextDim < 1 {
 		return nil, fmt.Errorf("mdm: contextDim must be >= 1, got %d", contextDim)
 	}
-	if budgetPerQueryUSD <= 0 || math.IsNaN(budgetPerQueryUSD) {
-		return nil, fmt.Errorf("mdm: budgetPerQueryUSD must be > 0, got %v", budgetPerQueryUSD)
+	if math.IsNaN(budgetPerQueryUSD) || math.IsInf(budgetPerQueryUSD, 0) || budgetPerQueryUSD <= 0 {
+		return nil, fmt.Errorf("mdm: budgetPerQueryUSD must be finite and > 0, got %v", budgetPerQueryUSD)
 	}
-	if rhoDiscount <= 0 || rhoDiscount > 1 || math.IsNaN(rhoDiscount) {
-		return nil, fmt.Errorf("mdm: rhoDiscount must lie in (0, 1], got %v", rhoDiscount)
+	if math.IsNaN(alphaUCB) || math.IsInf(alphaUCB, 0) || alphaUCB < 0 {
+		return nil, fmt.Errorf("mdm: alphaUCB must be finite and >= 0, got %v", alphaUCB)
 	}
-	if ridgeLambda <= 0 || math.IsNaN(ridgeLambda) {
-		return nil, fmt.Errorf("mdm: ridgeLambda must be > 0, got %v", ridgeLambda)
+	if math.IsNaN(rhoDiscount) || math.IsInf(rhoDiscount, 0) || rhoDiscount <= 0 || rhoDiscount > 1 {
+		return nil, fmt.Errorf("mdm: rhoDiscount must be finite and lie in (0, 1], got %v", rhoDiscount)
+	}
+	if math.IsNaN(ridgeLambda) || math.IsInf(ridgeLambda, 0) || ridgeLambda <= 0 {
+		return nil, fmt.Errorf("mdm: ridgeLambda must be finite and > 0, got %v", ridgeLambda)
+	}
+	if math.IsNaN(etaDualCost) || math.IsInf(etaDualCost, 0) || etaDualCost < 0 {
+		return nil, fmt.Errorf("mdm: etaDualCost must be finite and >= 0, got %v", etaDualCost)
 	}
 
 	armMap := make(map[string]ModelArmSpec, len(arms))
@@ -386,6 +393,15 @@ func NewPrimalDualParetoBanditRouter(
 	for _, a := range arms {
 		if strings.TrimSpace(a.ArmID) == "" {
 			return nil, errors.New("mdm: ArmID must be non-empty")
+		}
+		if _, dup := armMap[a.ArmID]; dup {
+			return nil, fmt.Errorf("mdm: duplicate ArmID %q", a.ArmID)
+		}
+		if math.IsNaN(a.CostUSD) || math.IsInf(a.CostUSD, 0) || a.CostUSD < 0 {
+			return nil, fmt.Errorf("mdm: costUSD for arm %q must be finite and >= 0, got %v", a.ArmID, a.CostUSD)
+		}
+		if math.IsNaN(a.LatencyMs) || math.IsInf(a.LatencyMs, 0) || a.LatencyMs < 0 {
+			return nil, fmt.Errorf("mdm: latencyMs for arm %q must be finite and >= 0, got %v", a.ArmID, a.LatencyMs)
 		}
 		armMap[a.ArmID] = a
 		order = append(order, a.ArmID)
@@ -431,14 +447,17 @@ func (r *PrimalDualParetoBanditRouter) SelectArm(context []float64) (BanditRouti
 	if len(context) != r.ContextDim {
 		return BanditRoutingDecision{}, fmt.Errorf("mdm: expected context len %d, got %d", r.ContextDim, len(context))
 	}
+	if !allFinite(context...) {
+		return BanditRoutingDecision{}, errors.New("mdm: context vector must contain only finite values")
+	}
 	ucbScores := make(map[string]float64, len(r.ArmOrder))
 	bestArm := ""
 	bestAcq := math.Inf(-1)
 
 	for _, id := range r.ArmOrder {
 		spec := r.Arms[id]
-		theta := solveSPDLinearSystemGo(r.covA[id], r.vecB[id])
-		z := solveSPDLinearSystemGo(r.covA[id], context)
+		theta := solveSPDLinearSystem(r.covA[id], r.vecB[id])
+		z := solveSPDLinearSystem(r.covA[id], context)
 		meanEst := 0.0
 		quad := 0.0
 		duelTerm := 0.0
@@ -476,6 +495,12 @@ func (r *PrimalDualParetoBanditRouter) Update(chosenArm string, context []float6
 	}
 	if len(context) != r.ContextDim {
 		return r.DualLambda, fmt.Errorf("mdm: expected context len %d, got %d", r.ContextDim, len(context))
+	}
+	if !allFinite(context...) {
+		return r.DualLambda, errors.New("mdm: context vector must contain only finite values")
+	}
+	if !allFinite(reward) {
+		return r.DualLambda, fmt.Errorf("mdm: reward must be finite, got %v", reward)
 	}
 	rho := r.RhoDiscount
 	priorDiag := (1.0 - rho) * r.RidgeLambda
@@ -515,6 +540,9 @@ func (r *PrimalDualParetoBanditRouter) UpdateDuelingPreference(winnerArm string,
 	}
 	if len(context) != r.ContextDim {
 		return fmt.Errorf("mdm: expected context len %d, got %d", r.ContextDim, len(context))
+	}
+	if !allFinite(context...) {
+		return errors.New("mdm: context vector must contain only finite values")
 	}
 	if winnerArm == loserArm {
 		return nil
@@ -565,8 +593,8 @@ func ScorePRMRubricDistribution(rubricProbs map[string]float64, horizonDiscount 
 	if len(rubricProbs) == 0 {
 		return 0, 0, errors.New("mdm: rubricProbs must be non-empty")
 	}
-	if horizonDiscount <= 0 || math.IsNaN(horizonDiscount) {
-		return 0, 0, fmt.Errorf("mdm: horizonDiscount must be > 0, got %v", horizonDiscount)
+	if math.IsNaN(horizonDiscount) || math.IsInf(horizonDiscount, 0) || horizonDiscount <= 0 {
+		return 0, 0, fmt.Errorf("mdm: horizonDiscount must be finite and > 0, got %v", horizonDiscount)
 	}
 	totalP := 0.0
 	maxGrade := 3.0
@@ -618,9 +646,50 @@ func RunCalibratedPRMPUCTSearch(
 	if len(nodes) == 0 {
 		return PRMTreeSearchResult{}, errors.New("mdm: nodes must be non-empty")
 	}
+	if math.IsNaN(conformalZ) || math.IsInf(conformalZ, 0) || conformalZ < 0 {
+		return PRMTreeSearchResult{}, fmt.Errorf("mdm: conformalZ must be finite and >= 0, got %v", conformalZ)
+	}
+	if math.IsNaN(cPUCT) || math.IsInf(cPUCT, 0) || cPUCT < 0 {
+		return PRMTreeSearchResult{}, fmt.Errorf("mdm: cPUCT must be finite and >= 0, got %v", cPUCT)
+	}
+	nodeMap := make(map[string]PRMBranchNode, len(nodes))
 	childrenMap := make(map[string][]PRMBranchNode)
 	for _, n := range nodes {
+		if strings.TrimSpace(n.NodeID) == "" {
+			return PRMTreeSearchResult{}, errors.New("mdm: node NodeID must be non-empty")
+		}
+		if _, dup := nodeMap[n.NodeID]; dup {
+			return PRMTreeSearchResult{}, fmt.Errorf("mdm: duplicate NodeID %q", n.NodeID)
+		}
+		nodeMap[n.NodeID] = n
 		childrenMap[n.ParentID] = append(childrenMap[n.ParentID], n)
+	}
+	// Detect cycles in ParentID edges before traversing the tree.
+	visitState := make(map[string]int, len(nodeMap))
+	for nid := range nodeMap {
+		if visitState[nid] != 0 {
+			continue
+		}
+		var chain []string
+		cur := nid
+		for cur != "" {
+			node, exists := nodeMap[cur]
+			if !exists {
+				break
+			}
+			if visitState[cur] == 1 {
+				return PRMTreeSearchResult{}, fmt.Errorf("mdm: cycle detected in reasoning tree involving node %q", cur)
+			}
+			if visitState[cur] == 2 {
+				break
+			}
+			visitState[cur] = 1
+			chain = append(chain, cur)
+			cur = node.ParentID
+		}
+		for _, visitedID := range chain {
+			visitState[visitedID] = 2
+		}
 	}
 	for k := range childrenMap {
 		list := childrenMap[k]
@@ -637,6 +706,108 @@ func RunCalibratedPRMPUCTSearch(
 		return PRMTreeSearchResult{}, errors.New("mdm: tree must have at least one root node with empty ParentID")
 	}
 
+	effectiveStepDiscount := func(depth int) float64 {
+		raw := 1.0
+		if horizonDiscounts != nil {
+			if d, ok := horizonDiscounts[depth]; ok {
+				raw = d
+			}
+		}
+		return math.Min(1.5, math.Max(0.05, raw))
+	}
+
+	type subtreeDepthBound struct {
+		dEffSum float64
+		dMax    float64
+	}
+	// Precompute bottom-up remaining-depth discount bounds on the validated acyclic tree
+	// so branch-and-bound pruning is mathematically admissible for arbitrary tree depths.
+	var bfsOrder []PRMBranchNode
+	bfsOrder = append(bfsOrder, roots...)
+	for head := 0; head < len(bfsOrder); head++ {
+		cur := bfsOrder[head]
+		bfsOrder = append(bfsOrder, childrenMap[cur.NodeID]...)
+	}
+	remBounds := make(map[string]map[int]subtreeDepthBound, len(bfsOrder))
+	for i := len(bfsOrder) - 1; i >= 0; i-- {
+		cur := bfsOrder[i]
+		chList := childrenMap[cur.NodeID]
+		if cur.IsTerminal || len(chList) == 0 {
+			remBounds[cur.NodeID] = map[int]subtreeDepthBound{0: {}}
+			continue
+		}
+		bounds := make(map[int]subtreeDepthBound)
+		for _, ch := range chList {
+			dRaw := effectiveStepDiscount(ch.Depth)
+			dEff := math.Min(1.0, dRaw)
+			for rChild, cb := range remBounds[ch.NodeID] {
+				r := rChild + 1
+				cand := subtreeDepthBound{
+					dEffSum: dEff + cb.dEffSum,
+					dMax:    math.Max(dRaw, cb.dMax),
+				}
+				if prev, ok := bounds[r]; ok {
+					cand.dEffSum = math.Max(prev.dEffSum, cand.dEffSum)
+					cand.dMax = math.Max(prev.dMax, cand.dMax)
+				}
+				bounds[r] = cand
+			}
+		}
+		remBounds[cur.NodeID] = bounds
+	}
+
+	// bhatiaDavisLeafUCB returns a sound upper bound on any leaf UCB reachable in r remaining
+	// steps using the Bhatia-Davis + Jensen bound on [0, 1] rubric distributions.
+	bhatiaDavisLeafUCB := func(valSum, varSum, steps float64, rem int, b subtreeDepthBound) float64 {
+		totSteps := steps + float64(rem)
+		if rem <= 0 || b.dMax <= 0 || b.dEffSum <= 0 {
+			return math.Min(1.0, (valSum+conformalZ*math.Sqrt(math.Max(0.0, varSum)))/totSteps)
+		}
+		rf := float64(rem)
+		muCap := math.Min(1.0, b.dEffSum/(b.dMax*rf))
+		muHi := math.Max(0.5, muCap)
+		candHi := b.dEffSum + conformalZ*math.Sqrt(math.Max(0.0, varSum+rf*muHi*(1.0-muHi)))
+		denom := conformalZ*conformalZ + rf*b.dMax*b.dMax
+		tStar := 1.0
+		if denom > 0 {
+			tStar = math.Min(1.0, b.dMax*math.Sqrt((4.0*varSum+rf)/denom))
+		}
+		muStar := 0.5 * (1.0 + tStar)
+		muLo := math.Min(muCap, math.Max(0.5, muStar))
+		candLo := b.dMax*rf*muLo + conformalZ*math.Sqrt(math.Max(0.0, varSum+rf*muLo*(1.0-muLo)))
+		bestH := math.Max(candLo, candHi)
+		return math.Min(1.0, (valSum+bestH)/totSteps)
+	}
+
+	subtreeMaxUCB := func(nodeID string, valSum, varSum, steps float64) float64 {
+		best := -1.0
+		for r, b := range remBounds[nodeID] {
+			if r <= 0 {
+				continue
+			}
+			if u := bhatiaDavisLeafUCB(valSum, varSum, steps, r, b); u > best {
+				best = u
+			}
+		}
+		return best
+	}
+
+	childSubtreeMaxUCB := func(ch PRMBranchNode, valSum, varSum, steps float64) float64 {
+		dRaw := effectiveStepDiscount(ch.Depth)
+		dEff := math.Min(1.0, dRaw)
+		best := -1.0
+		for rChild, cb := range remBounds[ch.NodeID] {
+			b := subtreeDepthBound{
+				dEffSum: dEff + cb.dEffSum,
+				dMax:    math.Max(dRaw, cb.dMax),
+			}
+			if u := bhatiaDavisLeafUCB(valSum, varSum, steps, rChild+1, b); u > best {
+				best = u
+			}
+		}
+		return best
+	}
+
 	evaluatedIDs := make(map[string]bool)
 	prunedIDs := make(map[string]bool)
 
@@ -650,13 +821,17 @@ func RunCalibratedPRMPUCTSearch(
 	var countDescendants func(nid string) []string
 	countDescendants = func(nid string) []string {
 		desc := []string{nid}
+		seenDesc := map[string]bool{nid: true}
 		stack := []string{nid}
 		for len(stack) > 0 {
 			cur := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			for _, ch := range childrenMap[cur] {
-				desc = append(desc, ch.NodeID)
-				stack = append(stack, ch.NodeID)
+				if !seenDesc[ch.NodeID] {
+					seenDesc[ch.NodeID] = true
+					desc = append(desc, ch.NodeID)
+					stack = append(stack, ch.NodeID)
+				}
 			}
 		}
 		return desc
@@ -688,7 +863,7 @@ func RunCalibratedPRMPUCTSearch(
 		chList := childrenMap[node.NodeID]
 		isLeaf := node.IsTerminal || len(chList) == 0
 		if enableConformalPruning && !isLeaf && bestLeaf != nil {
-			if nodeUCB+0.02*puctBonus < bestLCB {
+			if subtreeMaxUCB(node.NodeID, newVal, newVar, steps) < bestLCB {
 				for _, ch := range chList {
 					for _, dID := range countDescendants(ch.NodeID) {
 						if !evaluatedIDs[dID] {
@@ -717,8 +892,7 @@ func RunCalibratedPRMPUCTSearch(
 
 		for rIdx, ch := range chList {
 			if enableConformalPruning && bestLeaf != nil {
-				optChildUCB := (newVal+math.Min(1.0, 0.65+0.35*ch.PriorProb))/(steps+1.0) + conformalZ*pathStd
-				if optChildUCB < bestLCB {
+				if childSubtreeMaxUCB(ch, newVal, newVar, steps) < bestLCB {
 					for _, dID := range countDescendants(ch.NodeID) {
 						if !evaluatedIDs[dID] {
 							prunedIDs[dID] = true
@@ -780,7 +954,7 @@ type CorrelatedEnsembleCalibrationResult struct {
 	ShrinkageDelta          float64
 }
 
-func computeMurphySkillGo(seq []map[string]float64, labels []string) (float64, float64) {
+func computeMurphySkill(seq []map[string]float64, labels []string) (float64, float64) {
 	n := len(labels)
 	if n == 0 {
 		return 0.0, 0.05
@@ -868,7 +1042,7 @@ func CalibrateCorrelatedEnsembleWeights(
 		if len(seq) != n {
 			return CorrelatedEnsembleCalibrationResult{}, fmt.Errorf("mdm: agent %q length mismatch", aid)
 		}
-		resTerm, relTerm := computeMurphySkillGo(seq, calibLabels)
+		resTerm, relTerm := computeMurphySkill(seq, calibLabels)
 		accHits := 0.0
 		resList := make([]float64, n)
 		for idx, dist := range seq {
@@ -964,7 +1138,7 @@ func CalibrateCorrelatedEnsembleWeights(
 			}
 		}
 	}
-	rawU := solveSPDLinearSystemGo(rReg, skillVec)
+	rawU := solveSPDLinearSystem(rReg, skillVec)
 	uSum := 0.0
 	for i := range rawU {
 		if rawU[i] < 0 {
@@ -1004,8 +1178,8 @@ func CovarianceDiscountedLogitPool(
 	if len(agentProbs) == 0 {
 		return nil, errors.New("mdm: agentProbs must be non-empty")
 	}
-	if temperature <= 0 || math.IsNaN(temperature) {
-		return nil, fmt.Errorf("mdm: temperature must be > 0, got %v", temperature)
+	if math.IsNaN(temperature) || math.IsInf(temperature, 0) || temperature <= 0 {
+		return nil, fmt.Errorf("mdm: temperature must be finite and > 0, got %v", temperature)
 	}
 	agentIDs := make([]string, 0, len(agentProbs))
 	for aid := range agentProbs {
@@ -1049,9 +1223,11 @@ func CovarianceDiscountedLogitPool(
 		wM := wMap[aid]
 		tot := 0.0
 		for _, k := range optKeys {
-			if dist[k] > 0 {
-				tot += dist[k]
+			v := dist[k]
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+				return nil, fmt.Errorf("mdm: agent %q has invalid probability %v for key %q", aid, v, k)
 			}
+			tot += v
 		}
 		if tot <= 0 {
 			return nil, fmt.Errorf("mdm: agent %q distribution sum must be > 0", aid)

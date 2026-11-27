@@ -208,7 +208,7 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
             num_samples=5,
             prior_alpha=0.5,
         )
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"unrecognized option token 'unknown_hallucination'"):
             hallucinated.score_questions({}, questions)
 
         # Live local ThreadingHTTPServer /v1/chat/completions without top_logprobs
@@ -401,25 +401,44 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
         self.assertTrue(full_set.contains_abstain)
         self.assertTrue(full_set.should_escalate)
 
-        # Singleton abstain option escalates only when opted in via abstain_keys
-        abstain_default = mdm.conformal_prediction_set(
-            {"none_of_the_above": 0.96, "sku_a": 0.04},
-            q_hat=0.10,
-            method="lac",
-        )
-        self.assertTrue(abstain_default.singleton)
-        self.assertFalse(abstain_default.contains_abstain)
-        self.assertFalse(abstain_default.should_escalate)
+        # Singleton abstain options escalate only when opted in via abstain_keys (case/whitespace-insensitive)
+        expected_abstain_keys = {
+            "0",
+            "abstain",
+            "insufficient_evidence",
+            "none",
+            "none_of_the_above",
+            "none_visible",
+            "oos",
+            "uncertain",
+            "unknown",
+        }
+        self.assertEqual(set(mdm.DEFAULT_CONFORMAL_ABSTAIN_KEYS), set())
+        self.assertEqual(set(mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS), expected_abstain_keys)
+        for key in [*sorted(expected_abstain_keys), " OOS ", "ABSTAIN", " Uncertain "]:
+            res_def = mdm.conformal_prediction_set({key: 0.96, "sku_a": 0.04}, 0.20, method="lac")
+            self.assertTrue(res_def.singleton)
+            self.assertFalse(res_def.contains_abstain, msg=f"key={key!r}")
+            self.assertFalse(res_def.should_escalate, msg=f"key={key!r}")
 
-        abstain_singleton = mdm.conformal_prediction_set(
-            {"none_of_the_above": 0.96, "sku_a": 0.04},
-            q_hat=0.10,
-            method="lac",
-            abstain_keys=mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS,
-        )
-        self.assertTrue(abstain_singleton.singleton)
-        self.assertTrue(abstain_singleton.contains_abstain)
-        self.assertTrue(abstain_singleton.should_escalate)
+            res_none = mdm.conformal_prediction_set(
+                {key: 0.96, "sku_a": 0.04},
+                0.20,
+                method="lac",
+                abstain_keys=None,
+            )
+            self.assertFalse(res_none.contains_abstain)
+            self.assertFalse(res_none.should_escalate)
+
+            res_opt_in = mdm.conformal_prediction_set(
+                {key: 0.96, "sku_a": 0.04},
+                0.20,
+                method="lac",
+                abstain_keys=mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS,
+            )
+            self.assertTrue(res_opt_in.singleton)
+            self.assertTrue(res_opt_in.contains_abstain, msg=f"key={key!r}")
+            self.assertTrue(res_opt_in.should_escalate, msg=f"key={key!r}")
 
     def test_pre_fusion_conformal_cascade_gate_and_cache_roundtrip(self) -> None:
         q = mdm.DecisionQuestion(
@@ -632,7 +651,7 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
         # Corrupt CRC32 must fail closed with ValueError
         corrupted = bytearray(rt_png)
         corrupted[-6] ^= 0x01
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"PNG CRC32 mismatch on chunk b'IEOD': expected"):
             mdm.decode_png(bytes(corrupted))
 
         # RGBA (color_type=6) and Grayscale (color_type=0)
@@ -802,7 +821,7 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
             aspect_bin="tall_cylinder",
             pack_size=180,
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"item_id 'sku_blue_180' already exists; call"):
             idx.add("sku_blue_180", [0.98, 0.20, 0.0, 0.0])
 
         idx.upsert(
@@ -919,7 +938,7 @@ class V040ConformalVisualAndMcpTest(unittest.TestCase):
         self.assertAlmostEqual(pruned.expected_utility, best_bf_util, places=9)
 
         # Budget below sum of pinned stub tokens (70 + 90 = 160) must raise ValueError
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"token_budget \(150\) is below minimum pinned stub"):
             mdm.prune_agent_context_blocks(blocks, slot_probs, token_budget=150)
 
     def test_mcp_stdio_server_end_to_end_subprocess_and_content_length_framing(self) -> None:
@@ -1648,7 +1667,7 @@ class TestIter2AdversarialContractsAndRegressions(unittest.TestCase):
                 prior_alpha=0.5,
                 name=f"bb_bad_{idx}",
             )
-            with self.assertRaises(mdm.SchemaContractViolationError) as err_ctx:
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"unsupported sampler draw type: int") as err_ctx:
                 bb.score_questions({"case": idx}, {"slot": q})
             self.assertIsInstance(err_ctx.exception, ValueError)
 
@@ -1668,17 +1687,17 @@ class TestIter2AdversarialContractsAndRegressions(unittest.TestCase):
         self.assertGreater(dist_a["A"]["sku_a"], dist_a["A"]["sku_b"])
 
         # DgemSystemOneBackend, OpenAILogprobBackend, VertexGeminiBackend, and MockCallableBackend guards
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"missing prediction probabilities for 'slot'"):
             mdm.DgemSystemOneBackend.parse_response(
                 {"results": {"slot": {"probabilities": {"sku_a": True, "sku_b": False, "oos": 0.0}}}},
                 {"slot": q},
             )
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"non-numeric logprob encountered on token 'A': True"):
             mdm.OpenAILogprobBackend.extract_letter_distribution(
                 {"A": True, "B": -1.2},  # type: ignore[dict-item]
                 {"A": "sku_a", "B": "sku_b"},
             )
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"Vertex Gemini response contained zero or invalid"):
             mdm.VertexGeminiBackend.parse_generate_content_response(
                 {"candidates": ["not_an_object"]},
                 {"slot": q},
@@ -1736,25 +1755,25 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             {"predictions": [{"embedding": [None, 1.0]}]},
             {"predictions": [{"embedding": [0.0, 0.0]}]},
         ):
-            with self.assertRaises(mdm.SchemaContractViolationError) as ctx:
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"Vertex embedding response omitted non-empty numeric|Vertex embedding response vector L2 norm must be > 0|Vertex embedding\[0\] must be a finite int or float") as ctx:
                 mdm.VertexMultimodalEmbeddingAdapter.parse_predict_response(bad_resp)
             self.assertIsInstance(ctx.exception, ValueError)
 
         idx_chk = mdm.MultimodalEmbeddingIndex()
         for bad_vec in ("123", b"123", [True, False], [None, 1.0], [0.0, 0.0], [float("nan"), 1.0]):
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"embedding\[bad\] L2 norm must be > 0|embedding\[bad\] contains non-finite value nan|embedding\[bad\] must be a finite int or float|embedding\[bad\] must be a non-empty numeric sequence"):
                 idx_chk.upsert("bad", bad_vec)  # type: ignore[arg-type]
 
         idx_chk.add("valid_sku", [0.6, 0.8])
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"lab_color\[bad_lab\] must be a finite 3-element"):
             idx_chk.add("bad_lab", [0.6, 0.8], lab_color="abc")  # type: ignore[arg-type]
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"query_lab_color must be a finite 3-element numeric"):
             idx_chk.query([0.6, 0.8], query_lab_color="abc")  # type: ignore[arg-type]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bad_jsonl = pathlib.Path(tmpdir) / "bad_str_emb.jsonl"
             bad_jsonl.write_text(json.dumps({"id": "s1", "embedding": "123"}) + "\n", encoding="utf-8")
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"embedding\[s1\] must be a non-empty numeric sequence"):
                 mdm.MultimodalEmbeddingIndex.load_jsonl(bad_jsonl)
 
     def test_mcp_unordered_mime_headers_and_framing_error_recovery(self) -> None:
@@ -1803,45 +1822,6 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
         self.assertEqual(mdm.serve_stdio(io.BytesIO(b"{not valid json\n"), nd_out), 0)
         nd_resp = json.loads(nd_out.getvalue().decode("utf-8").strip())
         self.assertEqual(nd_resp["error"]["code"], -32700)
-
-    def test_nine_key_case_insensitive_conformal_abstain_union(self) -> None:
-        expected_9 = {
-            "0",
-            "abstain",
-            "insufficient_evidence",
-            "none",
-            "none_of_the_above",
-            "none_visible",
-            "oos",
-            "uncertain",
-            "unknown",
-        }
-        self.assertEqual(set(mdm.DEFAULT_CONFORMAL_ABSTAIN_KEYS), set())
-        self.assertEqual(set(mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS), expected_9)
-        for key in [*sorted(expected_9), " OOS ", "ABSTAIN", " Uncertain "]:
-            res_def = mdm.conformal_prediction_set({key: 0.96, "sku_1": 0.04}, 0.20, method="lac")
-            self.assertTrue(res_def.singleton)
-            self.assertFalse(res_def.contains_abstain, msg=f"key={key!r}")
-            self.assertFalse(res_def.should_escalate, msg=f"key={key!r}")
-
-            res_none = mdm.conformal_prediction_set(
-                {key: 0.96, "sku_1": 0.04},
-                0.20,
-                method="lac",
-                abstain_keys=None,
-            )
-            self.assertFalse(res_none.contains_abstain)
-            self.assertFalse(res_none.should_escalate)
-
-            res_opt_in = mdm.conformal_prediction_set(
-                {key: 0.96, "sku_1": 0.04},
-                0.20,
-                method="lac",
-                abstain_keys=mdm.STANDARD_CONFORMAL_ABSTAIN_KEYS,
-            )
-            self.assertTrue(res_opt_in.singleton)
-            self.assertTrue(res_opt_in.contains_abstain, msg=f"key={key!r}")
-            self.assertTrue(res_opt_in.should_escalate, msg=f"key={key!r}")
 
     def test_iter4_positive_allowlist_draw_grammar_and_constructor_contracts(self) -> None:
         q_open = {
@@ -1896,7 +1876,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
                     sampler=lambda _s, _qs, _im=None, _p=payload: _p,
                     num_samples=1,
                 )
-                with self.assertRaises(mdm.SchemaContractViolationError, msg=f"payload={payload!r}"):
+                with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"unsupported sampler draw type: int", msg=f"payload={payload!r}"):
                     bb.score_questions({"x": idx}, q_schema)
                 env = mdm.CascadeDecisionOrchestrator(
                     stage1_backend=bb, total_contract_mode=True
@@ -1934,7 +1914,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
                 sampler=lambda _s, _qs, _im=None, _mb=multi_bad: _mb,
                 num_samples=1,
             )
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"unsupported sampler draw type: int"):
                 bb_m.score_questions({"x": 1}, q_multi)
 
         bb_flat_ok = mdm.BlackBoxSampledBackend(
@@ -1972,7 +1952,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             lambda: mdm.CascadeDecisionOrchestrator(s1_valid, conformal_k_reg=False),
         ]
         for ctor in bad_ctors:
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"boolean"):
                 ctor()
 
     def test_iter4_prior_gate_modes_fast_exit_closure_and_cache_bijection(self) -> None:
@@ -2119,7 +2099,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             extra_config={"__mdm_type__": "user_tag", "conformal_q_hat": float("inf")},
         )
         self.assertEqual(len(key_inf), 64)
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"infinite float inf is not permitted in decision"):
             mdm.compute_decision_cache_key(
                 "s1->none",
                 {"x": 1},
@@ -2128,8 +2108,6 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             )
 
     def test_mcp_evaluate_conformal_decision_small_calib_qhat_inf_rfc8259_and_roundtrip(self) -> None:
-        from multimodal_decision_models.mcp_server import handle_jsonrpc_message, serve_stdio
-
         def _reject_const(tok: str) -> None:
             raise ValueError(f"Non-RFC-8259 JSON token: {tok}")
 
@@ -2151,7 +2129,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             }
             in_buf = io.BytesIO((json.dumps(req, allow_nan=False) + "\n").encode("utf-8"))
             out_buf = io.BytesIO()
-            self.assertEqual(serve_stdio(in_buf, out_buf), 0)
+            self.assertEqual(mdm.serve_stdio(in_buf, out_buf), 0)
             wire_text = out_buf.getvalue().decode("utf-8")
             self.assertNotIn("Infinity", wire_text)
             outer = json.loads(wire_text, parse_constant=_reject_const)
@@ -2161,7 +2139,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             self.assertEqual(inner["prediction_set"], ["a", "b"])
             self.assertTrue(inner["should_escalate"])
 
-            rt = handle_jsonrpc_message(
+            rt = mdm.handle_jsonrpc_message(
                 {
                     "jsonrpc": "2.0",
                     "id": 100 + n_cal,
@@ -2177,7 +2155,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
                     },
                 }
             )
-            assert rt is not None
+            self.assertIsNotNone(rt)
             rt_inner = json.loads(rt["result"]["content"][0]["text"], parse_constant=_reject_const)
             self.assertEqual(rt_inner, inner)
 
@@ -2186,7 +2164,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
             {"probabilities": {"a": 0.9, "b": 0.1}, "q_hat": None, "q_hat_infinite": False},
             {"probabilities": {"a": 0.9, "b": 0.1}, "q_hat": None},
         ):
-            err = handle_jsonrpc_message(
+            err = mdm.handle_jsonrpc_message(
                 {
                     "jsonrpc": "2.0",
                     "id": 99,
@@ -2194,7 +2172,7 @@ class TestIter3EmbeddingAndMcpMimeContracts(unittest.TestCase):
                     "params": {"name": "evaluate_conformal_decision", "arguments": bad_args},
                 }
             )
-            assert err is not None
+            self.assertIsNotNone(err)
             self.assertEqual(err["error"]["code"], -32602)
 
     def test_subword_logaddexp_aggregation_and_opt_in_abstain_contracts(self) -> None:

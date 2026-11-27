@@ -26,9 +26,9 @@ Implements online non-stationary multi-LLM routing grounded in:
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+import math
 
 
 @dataclass(frozen=True)
@@ -150,6 +150,27 @@ class PrimalDualParetoBanditRouter:
         if isinstance(ridge_lambda, bool) or not isinstance(ridge_lambda, (int, float)) or not math.isfinite(float(ridge_lambda)) or float(ridge_lambda) <= 0.0:
             raise ValueError(f"ridge_lambda must be finite and > 0, got {ridge_lambda!r}")
 
+        if latency_sla_ms is not None and (
+            isinstance(latency_sla_ms, bool)
+            or not isinstance(latency_sla_ms, (int, float))
+            or not math.isfinite(float(latency_sla_ms))
+            or float(latency_sla_ms) <= 0.0
+        ):
+            raise ValueError(f"latency_sla_ms must be finite and > 0 when provided, got {latency_sla_ms!r}")
+        for param_name, param_val in (
+            ("eta_dual_cost", eta_dual_cost),
+            ("eta_dual_latency", eta_dual_latency),
+            ("dueling_lr", dueling_lr),
+            ("dueling_weight", dueling_weight),
+        ):
+            if (
+                isinstance(param_val, bool)
+                or not isinstance(param_val, (int, float))
+                or not math.isfinite(float(param_val))
+                or float(param_val) < 0.0
+            ):
+                raise ValueError(f"{param_name} must be finite and >= 0, got {param_val!r}")
+
         self.context_dim: int = int(context_dim)
         self.budget_per_query_usd: float = float(budget_per_query_usd)
         self.latency_sla_ms: float | None = None if latency_sla_ms is None else float(latency_sla_ms)
@@ -165,10 +186,20 @@ class PrimalDualParetoBanditRouter:
         for spec in arms:
             if not spec.arm_id or not spec.arm_id.strip():
                 raise ValueError("ModelArmSpec.arm_id must be non-empty")
-            if not math.isfinite(spec.cost_usd) or spec.cost_usd < 0.0:
-                raise ValueError(f"cost_usd for {spec.arm_id!r} must be >= 0")
-            if not math.isfinite(spec.latency_ms) or spec.latency_ms < 0.0:
-                raise ValueError(f"latency_ms for {spec.arm_id!r} must be >= 0")
+            if spec.arm_id in self.arms:
+                raise ValueError(f"duplicate ModelArmSpec.arm_id {spec.arm_id!r}")
+            if (
+                isinstance(spec.cost_usd, bool)
+                or not math.isfinite(spec.cost_usd)
+                or spec.cost_usd < 0.0
+            ):
+                raise ValueError(f"cost_usd for {spec.arm_id!r} must be finite and >= 0")
+            if (
+                isinstance(spec.latency_ms, bool)
+                or not math.isfinite(spec.latency_ms)
+                or spec.latency_ms < 0.0
+            ):
+                raise ValueError(f"latency_ms for {spec.arm_id!r} must be finite and >= 0")
             self.arms[spec.arm_id] = spec
 
         self.arm_order: tuple[str, ...] = tuple(sorted(self.arms.keys()))
@@ -253,6 +284,25 @@ class PrimalDualParetoBanditRouter:
             raise ValueError(f"expected context_dim={self.context_dim}, got {len(phi)}")
         if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(float(reward)):
             raise ValueError(f"reward must be a finite number, got {reward!r}")
+
+        if incurred_cost_usd is not None and (
+            isinstance(incurred_cost_usd, bool)
+            or not isinstance(incurred_cost_usd, (int, float))
+            or not math.isfinite(float(incurred_cost_usd))
+            or float(incurred_cost_usd) < 0.0
+        ):
+            raise ValueError(
+                f"incurred_cost_usd must be finite and >= 0 when provided, got {incurred_cost_usd!r}"
+            )
+        if incurred_latency_ms is not None and (
+            isinstance(incurred_latency_ms, bool)
+            or not isinstance(incurred_latency_ms, (int, float))
+            or not math.isfinite(float(incurred_latency_ms))
+            or float(incurred_latency_ms) < 0.0
+        ):
+            raise ValueError(
+                f"incurred_latency_ms must be finite and >= 0 when provided, got {incurred_latency_ms!r}"
+            )
 
         r_val = float(reward)
         spec = self.arms[chosen_arm]

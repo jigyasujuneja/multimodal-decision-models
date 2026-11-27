@@ -74,7 +74,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         )
         self.assertTrue(typed_profile.is_negative_transfer())
 
-        # Vector 3: Aegis v2 (K=2)
+        # Vector 3: Safety v2 (K=2)
         v3_w1, v3_w2 = mdm.compute_dawid_skene_poe_weights(
             stage1_accuracy=0.88,
             stage2_accuracy=0.84,
@@ -287,17 +287,17 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
             stage2_brier=2.0,
         )
         self.assertFalse(valid_boundary.is_negative_transfer(margin=0.0, brier_degradation_ratio=1.0001))
-        with self.assertRaises(FrozenInstanceError):
+        with self.assertRaisesRegex(FrozenInstanceError, r"cannot assign to field 'stage1_accuracy'"):
             valid_boundary.stage1_accuracy = 0.5  # type: ignore[misc]
 
         for bad_acc in (True, False, -0.001, 1.001, float("nan"), float("inf"), float("-inf")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"stage1_accuracy must be a finite non-boolean number"):
                 mdm.DomainCompetenceProfile(stage1_accuracy=bad_acc, stage2_accuracy=0.8)  # type: ignore[arg-type]
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"stage2_accuracy must be a finite non-boolean number"):
                 mdm.DomainCompetenceProfile(stage1_accuracy=0.8, stage2_accuracy=bad_acc)  # type: ignore[arg-type]
 
         for bad_k in (True, False, 1, 0, -2, 2.5):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"num_options must be an integer >= 2"):
                 mdm.DomainCompetenceProfile(
                     stage1_accuracy=0.8,
                     stage2_accuracy=0.8,
@@ -305,7 +305,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
                 )
 
         for bad_delta in (True, False, -1.5):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"paired_escalation_delta must be a non-boolean"):
                 mdm.DomainCompetenceProfile(
                     stage1_accuracy=0.8,
                     stage2_accuracy=0.8,
@@ -313,7 +313,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
                 )
 
         for bad_count in (True, False, -1, 3.0):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"sample_count must be an integer >= 0"):
                 mdm.DomainCompetenceProfile(
                     stage1_accuracy=0.8,
                     stage2_accuracy=0.8,
@@ -321,13 +321,13 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
                 )
 
         for bad_brier in (True, False, -0.0001, 2.0001, float("nan"), float("inf"), float("-inf")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"stage1_brier must be None or a finite non-boolean"):
                 mdm.DomainCompetenceProfile(
                     stage1_accuracy=0.8,
                     stage2_accuracy=0.8,
                     stage1_brier=bad_brier,  # type: ignore[arg-type]
                 )
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"stage2_brier must be None or a finite non-boolean"):
                 mdm.DomainCompetenceProfile(
                     stage1_accuracy=0.8,
                     stage2_accuracy=0.8,
@@ -336,10 +336,10 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
 
         base_profile = mdm.DomainCompetenceProfile(stage1_accuracy=0.8, stage2_accuracy=0.8)
         for bad_margin in (True, False, -1e-6, float("nan"), float("inf"), float("-inf")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"margin must be a finite non-boolean float >= 0"):
                 base_profile.is_negative_transfer(margin=bad_margin)  # type: ignore[arg-type]
         for bad_min_hurt in (True, False, -2.5, 1, 2, 5):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"min_delta_hurt must be <= 0|min_delta_hurt must be a non-boolean integer"):
                 base_profile.is_negative_transfer(min_delta_hurt=bad_min_hurt)  # type: ignore[arg-type]
         high_delta_profile = mdm.DomainCompetenceProfile(
             stage1_accuracy=0.80,
@@ -358,7 +358,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         )
         self.assertTrue(zero_delta_higher_s2.is_negative_transfer(min_delta_hurt=0))
         for bad_ratio in (True, False, 1.0, 0.99, -1.0, float("nan"), float("inf")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"brier_degradation_ratio must be a finite"):
                 base_profile.is_negative_transfer(brier_degradation_ratio=bad_ratio)  # type: ignore[arg-type]
 
     def test_dawid_skene_weights_boundaries_and_validation(self) -> None:
@@ -404,21 +404,21 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         self.assertEqual(high_floor_w2, 0.0)
 
         for bad_val in (True, False, -0.01, 1.01, float("nan"), float("inf")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"stage1_accuracy must be a finite non-boolean number"):
                 mdm.compute_dawid_skene_poe_weights(bad_val, 0.8)  # type: ignore[arg-type]
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"stage2_accuracy must be a finite non-boolean number"):
                 mdm.compute_dawid_skene_poe_weights(0.8, bad_val)  # type: ignore[arg-type]
 
         for bad_k in (True, False, 1, 0, -3, 2.5):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"num_options must be an integer >= 2"):
                 mdm.compute_dawid_skene_poe_weights(0.8, 0.8, num_options=bad_k)  # type: ignore[arg-type]
 
         for bad_floor in (True, False, 0.0, -1e-4, 0.25, 0.5, float("nan"), float("inf")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"floor_accuracy must be a finite non-boolean float"):
                 mdm.compute_dawid_skene_poe_weights(0.8, 0.8, floor_accuracy=bad_floor)  # type: ignore[arg-type]
 
     def test_pareto_bandit_router_selects_within_budget(self) -> None:
-        """Verify primal-dual Pareto bandit selects a valid registered arm."""
+        """Verify primal-dual Pareto bandit raises dual price on budget overrun and converges to cheap arm."""
         arms = (
             mdm.ModelArmSpec(
                 arm_id="decisions_fast",
@@ -436,9 +436,52 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
             context_dim=3,
             budget_per_query_usd=0.0010,
             latency_sla_ms=600.0,
+            eta_dual_cost=50_000.0,
+            eta_dual_latency=0.5,
         )
-        decision = router.select_arm([1.0, 0.25, 0.0])
-        self.assertIn(decision.chosen_arm, {"decisions_fast", "flash_verifier"})
+        context = [1.0, 0.25, 0.0]
+        # Observing over-budget costly runs must strictly increase the dual cost/latency prices.
+        initial_dual_lambda = router.dual_lambda
+        initial_dual_mu = router.dual_mu
+        for _ in range(8):
+            router.update(
+                "flash_verifier",
+                context,
+                reward=0.92,
+                incurred_cost_usd=0.0022,
+                incurred_latency_ms=950.0,
+            )
+        self.assertGreater(router.dual_lambda, initial_dual_lambda)
+        self.assertGreater(router.dual_mu, initial_dual_mu)
+
+        for _ in range(4):
+            router.update(
+                "decisions_fast",
+                context,
+                reward=0.88,
+                incurred_cost_usd=0.000012,
+                incurred_latency_ms=120.0,
+            )
+
+        # Under primal-dual pacing, realized average cost must stay within the per-query budget.
+        chosen_arms: list[str] = []
+        realized_costs: list[float] = []
+        for _ in range(20):
+            decision = router.select_arm(context)
+            self.assertIn(decision.chosen_arm, {"decisions_fast", "flash_verifier"})
+            chosen_arms.append(decision.chosen_arm)
+            arm_spec = arms[0] if decision.chosen_arm == "decisions_fast" else arms[1]
+            realized_costs.append(arm_spec.cost_usd)
+            router.update(
+                decision.chosen_arm,
+                context,
+                reward=0.88 if decision.chosen_arm == "decisions_fast" else 0.92,
+                incurred_cost_usd=arm_spec.cost_usd,
+                incurred_latency_ms=arm_spec.latency_ms,
+            )
+        mean_cost = sum(realized_costs) / float(len(realized_costs))
+        self.assertLessEqual(mean_cost, router.budget_per_query_usd)
+        self.assertGreater(chosen_arms.count("decisions_fast"), chosen_arms.count("flash_verifier"))
 
     def test_v131_exports_version_and_orchestrator_competence_wiring(self) -> None:
         """Verify v1.3.1 exports, version, circuit-breaker short-circuit, and PoE fusion."""
@@ -525,13 +568,13 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         self.assertEqual(poe_result.slots["route"].raw_probabilities, {"opt_a": 0.44, "opt_b": 0.56})
 
         # Fail-closed validation when use_dawid_skene_poe_weights=True lacks domain_competence
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"use_dawid_skene_poe_weights=True requires"):
             mdm.CascadeDecisionOrchestrator(
                 stage1_backend=stage1_backend,
                 stage2_backend=stage2_backend,
                 use_dawid_skene_poe_weights=True,
             )
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"domain_competence must be a DomainCompetenceProfile"):
             mdm.CascadeDecisionOrchestrator(
                 stage1_backend=stage1_backend,
                 domain_competence="invalid",  # type: ignore[arg-type]
@@ -573,7 +616,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
             [-0.01, 0.05],
             [0.05, 1.01],
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"index"):
                 mdm.holm_bonferroni_adjust(invalid_p_seq)  # type: ignore[arg-type]
 
         # Non-monotonic raw product step-down: (0.01*4=0.04, 0.014*3=0.042, 0.02*2=0.040 -> 0.042, 0.50*1=0.50)
@@ -621,7 +664,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         self.assertEqual(question.option_descriptions["opt_b"], "Bravo description")
         self.assertEqual(pruned.domain_competence, question.domain_competence)
 
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"top_k must be an integer >= 2"):
             mdm.prune_choice_top_k(question, {"opt_a": 0.5, "opt_b": 0.5}, top_k=1)
 
         seen_stage2_descriptions: dict[str, str] = {}
@@ -874,7 +917,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         )
         preset_event = threading.Event()
         preset_event.set()
-        with self.assertRaises(cf.CancelledError):
+        with self.assertRaisesRegex(cf.CancelledError, r"Decision evaluation cancelled before Stage 1"):
             cancel_orch.evaluate({"req": "pre_cancelled"}, {"act": choice_q}, cancel_event=preset_event)
         self.assertEqual(len(s1_invocations), 0)
 
@@ -897,7 +940,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         timer = threading.Timer(0.03, mid_event.set)
         timer.start()
         try:
-            with self.assertRaises(cf.CancelledError):
+            with self.assertRaisesRegex(cf.CancelledError, r"Decision evaluation cancelled during speculative"):
                 mid_orch.evaluate({"req": "mid_cancel"}, {"act": choice_q}, cancel_event=mid_event)
         finally:
             timer.cancel()
@@ -915,7 +958,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
             self.assertEqual(voi_orch.voi_stage2_expected_accuracy, valid_voi_acc)
 
         for invalid_voi_acc in (True, False, -0.01, 1.01, float("nan"), float("inf")):
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"voi_stage2_expected_accuracy must be a finite|voi_stage2_expected_accuracy must be finite|voi_stage2_expected_accuracy must lie in \[0\.0, 1\.0\]"):
                 mdm.CascadeDecisionOrchestrator(
                     stage1_backend=mdm.MockCallableBackend(
                         "s1_voi",
@@ -975,12 +1018,12 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         )
 
         for invalid_temp in (True, False, 0.0, -0.5, 9.99e-4, 100.01, float("nan"), float("inf")):
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"temperature must lie in \[0\.001, 100\.0\]"):
                 mdm.pre_gated_bayesian_poe_fusion(
                     raw_three,
                     temperature=invalid_temp,  # type: ignore[arg-type]
                 )
-            with self.assertRaises(mdm.SchemaContractViolationError):
+            with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"temperature must be > 0|temperature must be a finite non-boolean number|temperature must be finite|temperature must lie in \[0\.001, 100\.0\]"):
                 mdm.CascadeDecisionOrchestrator(
                     stage1_backend=mdm.MockCallableBackend(
                         "s1_bad_temp",
@@ -997,7 +1040,7 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
             total_contract_mode=False,
         )
         mutated_orch.temperature = 5e-4
-        with self.assertRaises(mdm.SchemaContractViolationError):
+        with self.assertRaisesRegex(mdm.SchemaContractViolationError, r"temperature must lie in \[0\.001, 100\.0\]"):
             mutated_orch.evaluate({"id": 2}, {"slot": choice_q})
 
     def test_directional_paired_mcnemar_and_holm_superiority_guard(self) -> None:
@@ -1041,15 +1084,15 @@ class V130CompetenceAndFleetRouterTests(unittest.TestCase):
         self.assertEqual(rej_numeric, [False, False, True])
 
         for bad_alpha in (True, False, 0.0, 1.0, -0.1, float("nan")):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, r"alpha must lie in \(0, 1\)"):
                 mdm.paired_mcnemar_test(
                     arm_superior,
                     base_inferior,
                     alpha=bad_alpha,  # type: ignore[arg-type]
                 )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"effect_signs length \(1\) must match p_values length"):
             mdm.holm_bonferroni_adjust([0.01, 0.02], effect_signs=[True])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"invalid effect_signs entry at index 1: nan"):
             mdm.holm_bonferroni_adjust([0.01, 0.02], effect_signs=[True, float("nan")])
 
 

@@ -17,21 +17,16 @@
 import { createHmac } from "node:crypto";
 
 import { DEFAULT_CONFORMAL_SEED_KEY } from "./calibration.js";
-import { escapeUntrustedTagVariants } from "./genkit.js";
+import {
+  ANGLE_HOMOGLYPH_MAP,
+  escapeUntrustedTagVariantsInternal,
+  isPlainRecord,
+  isTagWhitespace,
+  nullProtoRecord,
+  replaceAsciiCaseInsensitive,
+  truncateCodePoints,
+} from "./internal.js";
 import { MDMValidationError } from "./types.js";
-
-const ANGLE_HOMOGLYPH_MAP: Readonly<Record<number, string>> = {
-  0x2039: "<",
-  0x203a: ">",
-  0x2329: "<",
-  0x232a: ">",
-  0x27e8: "<",
-  0x27e9: ">",
-  0x3008: "<",
-  0x3009: ">",
-  0xfe64: "<",
-  0xfe65: ">",
-};
 
 const INJECTION_DIRECTIVE_ANYWHERE_RE =
   /(?:^[ \t]*(?:system|developer|assistant)[ \t]*:[ \t]*(?:approve|allow|grant|accept|deny|reject|block|select|choose|pick|output|return|ignore|disregard|forget|override|bypass|assign|rank|you\s+are|do\s+not)\b|\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|above|preceding|system)\s+(?:instructions?|prompts?|rules?|rubrics?|criteria|directives?)\b|\breply\s+with\s+the\s+single\s+uppercase\s+option\s+letter\b)/gim;
@@ -50,18 +45,6 @@ const SUSPICIOUS_XML_TAG_NAMES = new Set<string>([
   "untrusted",
 ]);
 
-function isTagWhitespace(code: number): boolean {
-  return (
-    code === 0x20 ||
-    code === 0x09 ||
-    code === 0x0a ||
-    code === 0x0d ||
-    code === 0x0c ||
-    code === 0x0b ||
-    code === 0xa0
-  );
-}
-
 function isAsciiLetter(code: number): boolean {
   return (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
 }
@@ -75,8 +58,8 @@ function isAsciiWordChar(code: number): boolean {
 }
 
 /**
- * Linear-time O(N) single-pass check for `< ... (system|developer|...|untrusted)\b`
- * without regex backtracking on malformed `<   ...` prefixes.
+ * Returns true when input contains `< ... (system|developer|...|untrusted)\b`
+ * using a linear-time O(N) scan without regex backtracking.
  */
 function hasSuspiciousXmlTag(input: string): boolean {
   const n = input.length;
@@ -119,7 +102,7 @@ function hasUntrustedTagBreakout(normalized: string): boolean {
   if (normalized.toLowerCase().includes("[escaped_untrusted_tag]")) {
     return true;
   }
-  return escapeUntrustedTagVariants(normalized) !== normalized;
+  return escapeUntrustedTagVariantsInternal(normalized) !== normalized;
 }
 
 const CUA_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
@@ -133,7 +116,7 @@ const CUA_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ],
   [
     "forced_probability_spoof",
-    /\b(?:assign|give|set|output)\s+(?:a\s+)?(?:probability|posterior|score|logprob)\s*(?:(?:of|=|:)\s*)?(?:1\.0+|100%)/i,
+    /\b(?:assign|give|set|output)\s+(?:a\s+)?(?:probability|posterior|score|logprob)\s*(?:(?:of|=|:)\s*)?(?:1\.0+\b|100%)/i,
   ],
   [
     "peer_candidate_sabotage",
@@ -145,6 +128,7 @@ const CUA_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ],
 ];
 
+/** Counts invisible Unicode smuggling and homoglyph characters stripped during normalization. */
 export interface InvisibleSmugglingAudit {
   readonly unicodeTagChars: number;
   readonly bidiOverrideChars: number;
@@ -154,6 +138,7 @@ export interface InvisibleSmugglingAudit {
   readonly totalSuspiciousChars: number;
 }
 
+/** Holds an HMAC-salted canary XML envelope and its smuggling audit metadata. */
 export interface CanaryUntrustedEnvelope {
   readonly canaryHex: string;
   readonly openTag: string;
@@ -163,12 +148,14 @@ export interface CanaryUntrustedEnvelope {
   readonly smugglingAudit: InvisibleSmugglingAudit;
 }
 
+/** Configures HMAC canary envelope generation for untrusted payloads. */
 export interface WrapCanaryEnvelopeOptions {
   readonly requestId: string;
   readonly seedKey?: string;
   readonly maxChars?: number;
 }
 
+/** Summarizes comparative undermining and smuggling detections across candidate texts. */
 export interface ComparativeAttackAudit {
   readonly quarantinedIds: readonly string[];
   readonly cleanIds: readonly string[];
@@ -177,6 +164,7 @@ export interface ComparativeAttackAudit {
   readonly anyAttackDetected: boolean;
 }
 
+/** Strips invisible Unicode smuggling characters and folds attack homoglyphs while preserving symbols such as `€50/m²`. */
 export function auditAndNormalizeUntrustedText(rawText: string): {
   readonly normalized: string;
   readonly audit: InvisibleSmugglingAudit;
@@ -250,13 +238,11 @@ export function auditAndNormalizeUntrustedText(rawText: string): {
       out.push(" ");
       continue;
     }
-    if (Object.hasOwn(ANGLE_HOMOGLYPH_MAP, code)) {
-      const mappedAngle = ANGLE_HOMOGLYPH_MAP[code];
-      if (mappedAngle !== undefined) {
-        fullwidthHomoglyphs += 1;
-        out.push(mappedAngle);
-        continue;
-      }
+    const mappedAngle = ANGLE_HOMOGLYPH_MAP.get(code);
+    if (mappedAngle !== undefined) {
+      fullwidthHomoglyphs += 1;
+      out.push(mappedAngle);
+      continue;
     }
     out.push(ch);
   }
@@ -311,10 +297,7 @@ function hasZeroWidthSmuggling(
   return ASCII_EMBEDDED_ZWJ_RE.test(rawText);
 }
 
-function escapeRegExp(literal: string): string {
-  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
+/** Wraps untrusted text inside a per-request HMAC-salted XML canary boundary. */
 export function wrapCanaryUntrustedEnvelope(
   rawText: string,
   options: WrapCanaryEnvelopeOptions,
@@ -323,8 +306,7 @@ export function wrapCanaryUntrustedEnvelope(
     throw new MDMValidationError("rawText must be a string");
   }
   if (
-    options === null ||
-    typeof options !== "object" ||
+    !isPlainRecord(options) ||
     typeof options.requestId !== "string" ||
     options.requestId.trim().length === 0
   ) {
@@ -347,15 +329,17 @@ export function wrapCanaryUntrustedEnvelope(
   const closeTag = `</untrusted_data_${canaryHex}>`;
 
   const { normalized, audit } = auditAndNormalizeUntrustedText(rawText);
-  const escapedTags = escapeUntrustedTagVariants(normalized);
-  const canaryRe = new RegExp(escapeRegExp(canaryHex), "gi");
-  const escapedCanary = escapedTags.replace(canaryRe, "[escaped_canary]");
+  const escapedTags = escapeUntrustedTagVariantsInternal(normalized);
+  const escapedCanary = replaceAsciiCaseInsensitive(
+    escapedTags,
+    canaryHex,
+    "[escaped_canary]",
+  );
   const neutralized = escapedCanary.replace(
     INJECTION_DIRECTIVE_ANYWHERE_RE,
     "[neutralized_directive]",
   );
-  const clipped =
-    neutralized.length > maxChars ? neutralized.slice(0, maxChars) : neutralized;
+  const clipped = truncateCodePoints(neutralized, maxChars);
 
   const lowerClipped = clipped.toLowerCase();
   if (
@@ -375,14 +359,11 @@ export function wrapCanaryUntrustedEnvelope(
   };
 }
 
+/** Audits candidate texts for comparative undermining, judge hijacking, and invisible Unicode smuggling. */
 export function detectComparativeUnderminingAttack(
   candidateTexts: Readonly<Record<string, string>>,
 ): ComparativeAttackAudit {
-  if (
-    candidateTexts === null ||
-    typeof candidateTexts !== "object" ||
-    Array.isArray(candidateTexts)
-  ) {
+  if (!isPlainRecord(candidateTexts)) {
     throw new MDMValidationError("candidateTexts must be a non-empty object");
   }
   const keys = Object.keys(candidateTexts);
@@ -392,8 +373,8 @@ export function detectComparativeUnderminingAttack(
 
   const quarantinedIds: string[] = [];
   const cleanIds: string[] = [];
-  const reasonsById = Object.create(null) as Record<string, readonly string[]>;
-  const smugglingCountsById = Object.create(null) as Record<string, number>;
+  const reasonsById = nullProtoRecord<readonly string[]>();
+  const smugglingCountsById = nullProtoRecord<number>();
 
   for (const rawId of keys) {
     if (rawId.trim().length === 0) {
@@ -433,9 +414,7 @@ export function detectComparativeUnderminingAttack(
       audit.fullwidthHomoglyphs >= 2 &&
       (hasSuspiciousXmlTag(normalized) || reasons.length > 0)
     ) {
-      if (!reasons.includes("fullwidth_homoglyph_evasion")) {
-        reasons.push("fullwidth_homoglyph_evasion");
-      }
+      reasons.push("fullwidth_homoglyph_evasion");
     }
 
     if (reasons.length > 0) {
@@ -449,8 +428,8 @@ export function detectComparativeUnderminingAttack(
   return {
     quarantinedIds,
     cleanIds,
-    reasonsById,
-    smugglingCountsById,
+    reasonsById: { ...reasonsById },
+    smugglingCountsById: { ...smugglingCountsById },
     anyAttackDetected: quarantinedIds.length > 0,
   };
 }

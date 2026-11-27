@@ -11,7 +11,6 @@
 | `mdm_bench_report.md` | `benchmark_report_md` | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **14/14** | **1** |
 | `real_public_bench_report.md` | `benchmark_report_md` | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **14/14** | **1** |
 | `frontier_genai_v070_report.md` | `benchmark_report_md` | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **14/14** | **1** |
-| `paper.typ` | `arxiv_typst` | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **14/14** | **1** |
-| `paper.md` | `arxiv_md` | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **14/14** | **1** |
+| `audio_video_v080_report.md` | `benchmark_report_md` | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **1/1** | **14/14** | **1** |
 
-**Suite Summary**: `11/11` documents achieved a strict **`1` (`14/14` gates passed)**.
+**Suite Summary**: `10/10` documents achieved a strict **`1` (`14/14` gates passed)**.

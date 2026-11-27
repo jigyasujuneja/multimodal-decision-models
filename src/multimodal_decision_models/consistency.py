@@ -25,25 +25,18 @@ import re
 from typing import Mapping, Sequence
 
 from .conformal import conformal_prediction_set
+from .contracts import SchemaContractViolationError
 from .eval_suite import brier_murphy_decomposition
-from .types import (
-    DEFAULT_HESITATION_THRESHOLD,
-    PairwiseEdge,
-    ProbabilisticTriangleScore,
-    SwarmAgentProposal,
-    SwarmLockDecision,
-    TriangleContradiction,
-    UnitMeasure,
-)
+from .types import DEFAULT_HESITATION_THRESHOLD, PairwiseEdge, ProbabilisticTriangleScore, SwarmAgentProposal, SwarmLockDecision, TriangleContradiction, UnitMeasure
 
-_RE_MULTIPACK_PREFIX = re.compile(r"\b(\d+)\s*[x×]\s*\d+", re.IGNORECASE)
-_RE_PACK_OF = re.compile(r"\b(?:pack\s+of|case\s+of|box\s+of)\s+(\d+)\b", re.IGNORECASE)
+_RE_MULTIPACK_PREFIX = re.compile(r"\b(\d+)[ \t]*[x×][ \t]*\d+", re.IGNORECASE)
+_RE_PACK_OF = re.compile(r"\b(?:pack[ \t]+of|case[ \t]+of|box[ \t]+of)[ \t]+(\d+)\b", re.IGNORECASE)
 _RE_HYPHEN_PACK = re.compile(
-    r"\b(\d+)\s*(?:-|\s)?\s*(?:pack|pk|count|ct|cans|bottles|bars|pods|pouches)\b",
+    r"\b(\d+)[ \t]*(?:-[ \t]*)?(?:pack|pk|count|ct|cans|bottles|bars|pods|pouches)\b",
     re.IGNORECASE,
 )
 _RE_UNIT_MEASURE = re.compile(
-    r"(?:\b\d+\s*[x×]\s*)?(\d+(?:\.\d+)?)\s*(ml|milliliters?|l|liters?|litres?|cl|g|grams?|kg|kilograms?|fl\s*oz|oz)\b",
+    r"(?:\b\d+[ \t]*[x×][ \t]*)?(\d+(?:\.\d+)?)[ \t]*(ml|milliliters?|l|liters?|litres?|cl|g|grams?|kg|kilograms?|fl[ \t]*oz|oz)\b",
     re.IGNORECASE,
 )
 
@@ -294,11 +287,9 @@ def _solve_component_partition(
             pos_i = sum(max(0.0, pair_weights.get((u, i), 0.0)) for u in range(i))
             upper_rem[i] = upper_rem[i + 1] + pos_i
 
-        # Initialize with greedy agglomerative clustering for a strong initial lower bound
-        init_assign = list(range(m))
-        init_score = 0.0
-        best_assign = list(init_assign)
-        best_score = init_score
+        # Initialize with the singleton partition lower bound (score 0.0) before exact branch-and-bound DFS
+        best_assign = list(range(m))
+        best_score = 0.0
 
         cur_assign = [0] * m
 
@@ -842,7 +833,8 @@ def covariance_discounted_logit_pool(
                 f"expected keys {sorted(expected_option_set)!r}"
             )
         normalized_agents[aid] = norm_dist
-    assert expected_option_set is not None
+    if expected_option_set is None:
+        raise SchemaContractViolationError("agent_probs must contain at least one valid distribution")
     option_keys = sorted(expected_option_set)
 
     if calibration is None:

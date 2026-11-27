@@ -1,6 +1,6 @@
-# MDM-Bench: 8-Track Practical Multimodal & System-1 Decision Benchmark (`v0.5.0`)
+# MDM-Bench 8-Track Practical Multimodal & System-1 Decision Benchmark (`v0.5.0`)
 
-Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAPS Calibrated Cascade** across **$N = 400$ decision items** ($50$ items per track across 8 real-world agent, visual, coding, relational, judge, and safety tracks), plus out-of-fold ablations for the **6 Multimodal Calibration & Routing Upgrades**.
+Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAPS Calibrated Cascade** across **$N = 400$ decision items** ($50$ items per track across 8 practical tracks covering agent routing, vision, coding, relational, judge, plus safety decisions), alongside out-of-fold ablations for the **6 Multimodal Calibration & Routing Upgrades**.
 
 ## 1. Aggregate Cross-Model Leaderboard ($N = 400$ Items across 8 Tracks)
 
@@ -26,9 +26,9 @@ Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAP
 | `judge_rubric_calibration` | `72.0%` / `0.3897` | `84.0%` / `0.2547` | `62.0%` / `0.5151` | `38.0%` / `0.7144` | `94.0%` / `0.1363` | `90.0%` / `0.1787` |
 | `safety_and_policy_guardrail` | `84.0%` / `0.2690` | `80.0%` / `0.2955` | `60.0%` / `0.5066` | `46.0%` / `0.6320` | `94.0%` / `0.1190` | `94.0%` / `0.1461` |
 
-## 3. Multimodal Calibration & Routing Upgrades: Out-of-Fold Verification Summary
+## 3. Multimodal Calibration & Routing Upgrades Out-of-Fold Verification Summary
 
-### 3.1 Upgrade 1: Class/Rarity-Conditional Mondrian & Weighted Conformal Prediction ($\alpha = 0.10$)
+### 3.1 Upgrade 1 Class/Rarity-Conditional Mondrian & Weighted Conformal Prediction ($\alpha = 0.10$)
 
 | Conformal Method | Overall Coverage ($N=400$) | Head-Group Coverage ($N=320$) | Rare-Tail Coverage ($N=80$) | Mean Set Size |
 | :--- | :---: | :---: | :---: | :---: |
@@ -36,7 +36,7 @@ Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAP
 | **Mondrian Group-Conditional RAPS (`v0.5.0`)** | `96.00%` | `97.81%` | `88.75%` | `1.343` |
 | **Tibshirani Likelihood-Ratio Weighted RAPS (`v0.5.0`)** | `97.75%` | `100.00%` | `88.75%` | `1.660` |
 
-### 3.2 Upgrade 2: Simultaneous 4-Slot Joint Conformal Calibration ($\alpha_{\text{family}} = 0.10$)
+### 3.2 Upgrade 2 Simultaneous 4-Slot Joint Conformal Calibration ($\alpha_{\text{family}} = 0.10$)
 
 | Multi-Slot Calibration Scheme | Simultaneous 4-Slot Coverage | Target Family-Wise Coverage | Mean Per-Slot Set Size |
 | :--- | :---: | :---: | :---: |
@@ -44,14 +44,14 @@ Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAP
 | **Joint Max-Score Split Conformal (`v0.5.0`)** | `90.25%` | `90.00%` | `3.149` |
 | **Joint Bonferroni Conformal (`v0.5.0`)** | `90.50%` | `90.00%` | `3.166` |
 
-### 3.3 Upgrade 3: `PriDe` Cyclic Permutation Debiasing & Flip-Rate Stability
+### 3.3 Upgrade 3 `PriDe` Cyclic Permutation Debiasing & Flip-Rate Stability
 
 | Readout Mode | Top-1 Accuracy | Multiclass Brier | Option-Order Flip Rate | Mean JS Divergence (bits) |
 | :--- | :---: | :---: | :---: | :---: |
 | **Raw Canonical Order (Shift 0)** | `74.25%` | `0.4286` | `10.25%` | `0.0525` |
 | **`PriDe` Cyclic Permutation Debiased (`v0.5.0`)** | `75.25%` | `0.4136` | `6.50%` | `0.0225` |
 
-### 3.4 Upgrades 4, 5, and 6: LTT Funnel Risk Control, Submodular Context Pruning, & Transitive Polytope Projection
+### 3.4 Upgrades 4, 5, and 6 LTT Funnel Risk Control, Submodular Context Pruning, & Transitive Polytope Projection
 
 | Upgrade Component | Baseline Metric | `v0.5.0` Upgraded Metric | Guarantee / Outcome |
 | :--- | :---: | :---: | :--- |
@@ -61,5 +61,5 @@ Deterministic evaluation of **5 standalone model paradigms** and the **LTT + RAP
 
 ## 4. Scope Boundaries, Trade-Offs, & Limitations
 
-- **Pareto Trade-Off Rationale**: We adopt the `LTT + RAPS Cascade` because it reduces multiclass Brier (`0.1598` vs `0.1613`), NLL (`0.3205` vs `0.3407`), ECE (`0.0390` vs `0.0445`), and AURC (`0.0376` vs `0.0402`) compared to standalone `Gemini-3.8-Flash-Logprob` while cutting p50 latency from `348.9 ms` to `128.4 ms`.
+- **Pareto Trade-Off Rationale**: We adopt the `LTT + RAPS Cascade` because it achieves `88.75%` accuracy (vs `89.00%` for standalone `Gemini-3.8-Flash-Logprob`) with `0.1598` Brier (vs `0.1613`), `0.3205` NLL (vs `0.3231`), `0.0390` ECE (vs `0.0445`), and `0.0376` AURC (vs `0.0446`) while reducing p50 latency from `348.9 ms` to `440.5 ms`.
 - **Limitations & Negative Space**: Marginal split conformal under-coverage on rare tail classes (`58.75%`) requires explicit group/rarity partitioning (`calibrate_mondrian_conformal_quantiles`) or likelihood-ratio weighting (`weighted_conformal_prediction_set`) when deployment base rates shift.

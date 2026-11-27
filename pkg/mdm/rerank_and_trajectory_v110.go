@@ -264,7 +264,7 @@ func ConformalRAGContextFilter(
 	}
 
 	seenDocIDs := make(map[string]bool, len(candidates))
-	quarantined := make([]string, 0)
+	var quarantined []string
 	safeIDs := make([]string, 0, len(candidates))
 	for _, cand := range candidates {
 		if strings.TrimSpace(cand.DocID) == "" {
@@ -297,11 +297,9 @@ func ConformalRAGContextFilter(
 	}
 	if probSum <= 0.0 {
 		return RAGContextFilterResult{
-			RetainedDocIDs:         []string{},
 			QuarantinedDocIDs:      quarantined,
 			AbstainedNoRelevantDoc: true,
 			NormalizedRelevance:    map[string]float64{},
-			ConformalSetIDs:        []string{},
 			ShouldEscalate:         true,
 		}, nil
 	}
@@ -312,7 +310,6 @@ func ConformalRAGContextFilter(
 	}
 	if norm[abstainDocID] >= abstainThreshold {
 		return RAGContextFilterResult{
-			RetainedDocIDs:         []string{},
 			QuarantinedDocIDs:      quarantined,
 			AbstainedNoRelevantDoc: true,
 			NormalizedRelevance:    norm,

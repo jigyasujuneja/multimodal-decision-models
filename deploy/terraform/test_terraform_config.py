@@ -121,8 +121,12 @@ class TerraformModuleValidationTest(unittest.TestCase):
         self.assertIn("allAuthenticatedUsers", variables_text)
 
         bucket_text = (TERRAFORM_DIR / "storage_and_registry.tf").read_text(encoding="utf-8")
-        self.assertIn('public_access_prevention    = "enforced"', bucket_text)
-        self.assertIn("uniform_bucket_level_access = true", bucket_text)
+        self.assertIsNotNone(
+            re.search(r'public_access_prevention\s*=\s*"enforced"', bucket_text)
+        )
+        self.assertIsNotNone(
+            re.search(r"uniform_bucket_level_access\s*=\s*true", bucket_text)
+        )
 
         monitoring_text = (TERRAFORM_DIR / "monitoring.tf").read_text(encoding="utf-8")
         logging_metrics = re.findall(
@@ -151,13 +155,21 @@ class TerraformModuleValidationTest(unittest.TestCase):
 
         # Service accounts must bind project = var.project_id explicitly, and Vertex endpoint name must be numeric.
         iam_text = (TERRAFORM_DIR / "iam.tf").read_text(encoding="utf-8")
-        self.assertEqual(iam_text.count('resource "google_service_account"'), 2)
-        self.assertGreaterEqual(iam_text.count("project      = var.project_id"), 2)
+        self.assertEqual(len(re.findall(r'resource\s+"google_service_account"', iam_text)), 2)
+        self.assertGreaterEqual(len(re.findall(r"\bproject\s*=\s*var\.project_id\b", iam_text)), 2)
         vertex_text = (TERRAFORM_DIR / "vertex_endpoint.tf").read_text(encoding="utf-8")
-        self.assertIn("name         = var.vertex_endpoint_id", vertex_text)
+        self.assertIsNotNone(re.search(r"\bname\s*=\s*var\.vertex_endpoint_id\b", vertex_text))
         self.assertIn("^[1-9][0-9]{0,18}$", variables_text)
         self.assertIn("var.hesitation_threshold > 0 && var.hesitation_threshold < 1", variables_text)
         self.assertIn("var.conformal_alpha > 0 && var.conformal_alpha < 1", variables_text)
+        self.assertIn("lower(trimspace(member))", variables_text)
+
+        cloudrun_text = (TERRAFORM_DIR / "cloudrun_orchestrator.tf").read_text(encoding="utf-8")
+        self.assertIn(
+            "depends_on = [google_secret_manager_secret_iam_member.orchestrator_secret_accessor]",
+            cloudrun_text,
+        )
+        self.assertIn("var.cloudrun_max_instances >= var.cloudrun_min_instances", cloudrun_text)
 
 
 if __name__ == "__main__":

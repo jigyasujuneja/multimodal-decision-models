@@ -1,4 +1,4 @@
-# `v1.2.0` Research Science Benchmark Report: `PriDe + SLD`, Conformal Risk Control (`CRC`), Bayesian `VoI`, and Epistemic Abstention
+# `v1.2.0` Research Science Benchmark Report (`PriDe + SLD`, Conformal Risk Control `CRC`, Bayesian `VoI`, and Epistemic Abstention)
 
 This report documents the measured evaluation of the `multimodal-decision-models` `v1.2.0` mathematical primitives across **17 distinct models** on locked real-receipt datasets (`N = 500` `DecisionBench`, `N = 50` multi-task calibration, and `N = 360` `XSTest` safe-homonym vs. unsafe prompt guardrails).
 
@@ -15,7 +15,7 @@ This report documents the measured evaluation of the `multimodal-decision-models
    - Escalates from Stage 1 to Stage 2 strictly when expected Bayes risk reduction exceeds normalized Stage-2 marginal latency/token cost: $\text{VoI}(x) > c_{\text{S2}}$.
    - Under $+R$ reward for exact correctness, $0$ for abstention, and $-C$ penalty for wrong answers, abstains whenever $\max_k \hat{p}_k(x) < p^* = \frac{C}{R + C}$ (`0.50` for symmetric $+1 / 0 / -1$ scoring).
 
-## 2. `DecisionBench` (`N = 500`): `OOF` Calibration and `CRC` Selective Abstention
+## 2. `DecisionBench` (`N = 500`) `OOF` Calibration and `CRC` Selective Abstention
 
 | Model | Raw Accuracy | Raw `ECE` / Brier | `OOF` `ECE` / Brier | `CRC` $\alpha = 0.05$ Empirical Risk | `CRC` $\alpha = 0.05$ Selective Acc (Coverage) | `CRC` $\alpha = 0.10$ Empirical Risk | `CRC` $\alpha = 0.10$ Selective Acc (Coverage) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -31,8 +31,8 @@ Unlike static entropy thresholds that ignore downstream error stakes, `compute_b
 
 | Stage-1 → Stage-2 Pair | Stage-1 Standalone Acc | $C_{\text{err}} = 0.05$ Acc (Esc Rate) | $C_{\text{err}} = 0.25$ Acc (Esc Rate) | $C_{\text{err}} = 1.00$ Acc (Esc Rate) | $C_{\text{err}} = 5.00$ Acc (Esc Rate) | Mean Total Cost vs. Stage-1 Only ($C_{\text{err}} = 5.00$) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `wahler-4b -> deem-4b` | `77.80%` | `77.80%` (`0.6%`) | `79.60%` (`34.6%`) | `79.60%` (`45.2%`) | `79.60%` (`47.2%`) | `\$1.029` vs. `\$1.110` (`-7.3%`) |
-| `julia-onnx -> deem-4b` | `71.00%` | `72.60%` (`7.4%`) | `77.80%` (`48.6%`) | `78.60%` (`56.6%`) | `78.80%` (`58.6%`) | `\$1.072` vs. `\$1.450` (`-26.1%`) |
+| `wahler-4b -> deem-4b` | `77.80%` | `77.80%` (`0.6%`) | `79.60%` (`34.6%`) | `79.60%` (`45.2%`) | `79.60%` (`47.2%`) | `$1.029` vs. `$1.110` (`-7.3%`) |
+| `julia-onnx -> deem-4b` | `71.00%` | `72.60%` (`7.4%`) | `77.80%` (`48.6%`) | `78.60%` (`56.6%`) | `78.80%` (`58.6%`) | `$1.072` vs. `$1.450` (`-26.1%`) |
 
 ## 4. Asymmetric Safety `CRC` (`alpha = 0.02`) and Unlabeled `SLD` Shift on `XSTest` (`N = 360`)
 
@@ -47,7 +47,7 @@ Pairing `Strands Decider 2B v19 (OOF Vector-Scaled)` with `dgem v0.3.1 (OOF Vect
 
 ## 5. Operational Interpretation, Trade-Offs, and Limitations
 
-- **Operational interpretation**: In practice, `PriDe` + `SLD` fixes prior drift before thresholding, `CRC` bounds worst-case selective error risk on finite calibration splits, and `Bayes VoI` + `DomainCompetenceProfile` escalates only when Stage 2 reduces expected dollar-weighted loss rather than degrading Stage-1 decisions.
+- **Operational interpretation**: In practice, `PriDe` + `SLD` fixes prior drift before thresholding, `CRC` bounds worst-case selective error risk on finite calibration splits, and `Bayes VoI` + `DomainCompetenceProfile` escalates only when Stage 2 reduces expected dollar-weighted loss instead of degrading Stage-1 decisions.
 - **Rejected alternative and trade-off**: Fixed entropy cutoffs and unconditional Stage-2 overrides were rejected because they ignore asymmetric error stakes and cause negative transfer when Stage 2 trails Stage 1 on typed schemas; accepting a 5-fold calibration step requires `N >= 40` labeled examples per domain.
-- **Limitations and non-goals**: `SLD` unlabeled shift adaptation assumes class-conditional likelihood invariance $p(x \mid y)$ (label shift rather than covariate drift), and `CRC` finite-sample guarantees require exchangeable calibration and test requests within each stratum.
+- **Limitations and non-goals**: `SLD` unlabeled shift adaptation assumes class-conditional likelihood invariance $p(x \mid y)$ (label shift instead of covariate drift), and `CRC` finite-sample guarantees require exchangeable calibration and test requests within each stratum.
 

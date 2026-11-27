@@ -1,4 +1,4 @@
-# Production deployment, Terraform, and MCP operations
+# Production deployment with Terraform and MCP
 
 Moving calibrated decision models into production requires three operational guarantees beyond offline accuracy: transient upstream timeouts must never silently become false-negative denials, repeated identical payloads should resolve deterministically from cache without redundant GPU calls, and infrastructure must enforce digest-pinned images with zero public unauthenticated endpoints.
 
@@ -19,7 +19,7 @@ When `total_contract_mode=True` (the default on `CascadeDecisionOrchestrator`), 
 
 ## Content-addressed SHA-256 decision caching
 
-`ContentAddressedDecisionCache` canonicalizes arbitrary nested states, image byte SHA-256 digests, question schemas, temperature, and conformal parameters into an injective SHA-256 key (`compute_decision_cache_key`) backed by an append-only JSONL ledger:
+`ContentAddressedDecisionCache` canonicalizes arbitrary nested states, image byte SHA-256 digests, question schemas with temperature settings, plus conformal parameters into an injective SHA-256 key (`compute_decision_cache_key`) backed by an append-only JSONL ledger:
 
 - Caches resolved decisions (`STAGE2A_FAST_EXIT`, `STAGE1_RESOLVED`, `STAGE2_VERIFIED`, `ABSTAIN_OOS`) including `conformal_set` and `epistemic_variance`.
 - Never caches `RETRY_PENDING` or `REJECTED_CONTRACT_VIOLATION` states, so transient upstream outages recover automatically on retry.

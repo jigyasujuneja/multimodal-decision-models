@@ -5,7 +5,7 @@ Contributions that improve probability calibration, set-valued uncertainty quant
 ## Design Principles
 
 1. **Zero External Runtime Dependencies**: Both the Python library (`src/multimodal_decision_models/`) and the Go reference package (`pkg/mdm/`) run strictly on the standard library (`python >= 3.10`, `go >= 1.22`). Do not add third-party runtime packages to `pyproject.toml` or `go.mod`.
-2. **Total Contracts and Zero Silent Fallbacks**: Every public function validates its inputs and raises `ContractViolationError` (or returns a typed error in Go) on NaN/Inf logits, unnormalized probability vectors, empty candidate sets, or schema mismatches. Never return uniform dummy probabilities or fabricated fallback completions when an upstream backend fails.
+2. **Total Contracts and Zero Silent Fallbacks**: Every public function validates its inputs and raises `DecisionContractError` / `SchemaContractViolationError` (or returns a typed error in Go) on NaN/Inf logits, unnormalized probability vectors, empty candidate sets, or schema mismatches. Never return uniform dummy probabilities or fabricated fallback completions when an upstream backend fails.
 3. **100% AST Type Annotations**: Every function and method in `src/multimodal_decision_models/*.py` must declare explicit parameter and return type annotations. The automated gate in `tests/test_tier0_to_tier5_production_gates.py` parses the Python AST on every test run and fails on any unannotated signature.
 4. **Python and Go Mathematical Parity**: Core calibration, conformal prediction, context-pruning, shortlist, taxonomy-trie, Set-of-Marks, and consistency routines must agree within $10^{-9}$ across Python (`src/multimodal_decision_models/`) and Go (`pkg/mdm/`).
 

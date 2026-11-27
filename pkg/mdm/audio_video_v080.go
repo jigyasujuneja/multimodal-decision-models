@@ -74,7 +74,7 @@ type TurnTakingDecisionResult struct {
 	EscalateToDeliberative  bool
 }
 
-func normalizeDistGo(probs map[string]float64) (map[string]float64, error) {
+func normalizeDist(probs map[string]float64) (map[string]float64, error) {
 	if len(probs) == 0 {
 		return nil, fmt.Errorf("mdm: probability map must be non-empty")
 	}
@@ -96,7 +96,7 @@ func normalizeDistGo(probs map[string]float64) (map[string]float64, error) {
 	return out, nil
 }
 
-func normalizedEntropyGo(probs map[string]float64) float64 {
+func normalizedEntropy(probs map[string]float64) float64 {
 	if len(probs) <= 1 {
 		return 0.0
 	}
@@ -201,7 +201,7 @@ func EvaluateDuplexTurnTakingDecision(
 	userOverlapActive bool,
 	cfg VoiceActivityProjectionConfig,
 ) (TurnTakingDecisionResult, error) {
-	normRaw, err := normalizeDistGo(stage1Probs)
+	normRaw, err := normalizeDist(stage1Probs)
 	if err != nil {
 		return TurnTakingDecisionResult{}, err
 	}
@@ -217,7 +217,7 @@ func EvaluateDuplexTurnTakingDecision(
 			rawArgmax = act
 		}
 	}
-	hRaw := normalizedEntropyGo(normRaw)
+	hRaw := normalizedEntropy(normRaw)
 
 	priorLogits, err := ComputeVAPProsodicPriorLogits(pauseMs, rmsSlopeDB, f0DeltaHz, semanticCompleteProb, userOverlapActive, cfg)
 	if err != nil {
@@ -234,7 +234,7 @@ func EvaluateDuplexTurnTakingDecision(
 	if err != nil {
 		return TurnTakingDecisionResult{}, err
 	}
-	hCal := normalizedEntropyGo(fusedProbs)
+	hCal := normalizedEntropy(fusedProbs)
 
 	lossMatrix := make(map[string]map[string]float64, 5)
 	for _, a := range TurnTakingActions {
@@ -469,11 +469,17 @@ func EvaluateStreamingEarlyExit(
 	if minChunksBeforeExit < 1 || stabilityStreakRequired < 1 {
 		return StreamingEarlyExitResult{}, fmt.Errorf("mdm: minChunksBeforeExit and stabilityStreakRequired must be >= 1")
 	}
-	if math.IsNaN(temporalDecay) || temporalDecay <= 0.0 || temporalDecay > 1.0 {
+	if math.IsNaN(conformalQHat) || conformalQHat < 0.0 {
+		return StreamingEarlyExitResult{}, fmt.Errorf("mdm: conformalQHat must be non-NaN and >= 0, got %v", conformalQHat)
+	}
+	if math.IsNaN(hesitationExitThreshold) || math.IsInf(hesitationExitThreshold, 0) || hesitationExitThreshold < 0.0 || hesitationExitThreshold > 1.0 {
+		return StreamingEarlyExitResult{}, fmt.Errorf("mdm: hesitationExitThreshold must lie in [0, 1], got %v", hesitationExitThreshold)
+	}
+	if math.IsNaN(temporalDecay) || math.IsInf(temporalDecay, 0) || temporalDecay <= 0.0 || temporalDecay > 1.0 {
 		return StreamingEarlyExitResult{}, fmt.Errorf("mdm: temporalDecay must lie in (0, 1]")
 	}
 
-	firstNorm, err := normalizeDistGo(chunkProbStream[0])
+	firstNorm, err := normalizeDist(chunkProbStream[0])
 	if err != nil {
 		return StreamingEarlyExitResult{}, err
 	}
@@ -509,7 +515,7 @@ func EvaluateStreamingEarlyExit(
 
 	for idx, rawChunk := range chunkProbStream {
 		stepNum := idx + 1
-		normChunk, err := normalizeDistGo(rawChunk)
+		normChunk, err := normalizeDist(rawChunk)
 		if err != nil {
 			return StreamingEarlyExitResult{}, err
 		}
@@ -526,7 +532,7 @@ func EvaluateStreamingEarlyExit(
 				maxP = v
 			}
 		}
-		hChunk := normalizedEntropyGo(normChunk)
+		hChunk := normalizedEntropy(normChunk)
 		streamNonconf := math.Min(1.0, (1.0-maxP)+0.35*hChunk)
 		mStep, err := tracker.Step(streamNonconf, 0.5)
 		if err != nil {
@@ -554,7 +560,7 @@ func EvaluateStreamingEarlyExit(
 		for _, c := range classes {
 			posterior[c] /= denom
 		}
-		hPost := normalizedEntropyGo(posterior)
+		hPost := normalizedEntropy(posterior)
 		hesitationTraj = append(hesitationTraj, hPost)
 
 		confRes, err := ConformalPredictionSet(posterior, conformalQHat, confCfg)
@@ -622,7 +628,7 @@ type AudioVisualAgreementResult struct {
 	EscalateToStage2        bool
 }
 
-func isSilentBackgroundKeyGo(k string) bool {
+func isSilentBackgroundKey(k string) bool {
 	switch strings.ToLower(strings.TrimSpace(k)) {
 	case "background", "none", "silent", "silence", "ambient", "no_event", "off":
 		return true
@@ -633,11 +639,11 @@ func isSilentBackgroundKeyGo(k string) bool {
 
 // JensenShannonDivergenceBits computes normalized Jensen-Shannon divergence in [0, 1] (log2 basis).
 func JensenShannonDivergenceBits(audioProbs, visualProbs map[string]float64) (float64, error) {
-	pa, err := normalizeDistGo(audioProbs)
+	pa, err := normalizeDist(audioProbs)
 	if err != nil {
 		return 0, err
 	}
-	pv, err := normalizeDistGo(visualProbs)
+	pv, err := normalizeDist(visualProbs)
 	if err != nil {
 		return 0, err
 	}
@@ -667,11 +673,11 @@ func ScoreAudioVisualTriangleConsistency(
 	visualProbs map[string]float64,
 	syncSameSourceProb float64,
 ) (float64, error) {
-	pa, err := normalizeDistGo(audioProbs)
+	pa, err := normalizeDist(audioProbs)
 	if err != nil {
 		return 0, err
 	}
-	pv, err := normalizeDistGo(visualProbs)
+	pv, err := normalizeDist(visualProbs)
 	if err != nil {
 		return 0, err
 	}
@@ -687,7 +693,7 @@ func ScoreAudioVisualTriangleConsistency(
 		if _, ok := pv[k]; !ok {
 			return 0, fmt.Errorf("mdm: missing key %q in visualProbs", k)
 		}
-		if !isSilentBackgroundKeyGo(k) {
+		if !isSilentBackgroundKey(k) {
 			activeKeys = append(activeKeys, k)
 		}
 	}
@@ -728,11 +734,11 @@ func EvaluateAudioVisualEventAgreement(
 	confidentHesitationCeiling float64,
 	uncertainHesitationFloor float64,
 ) (AudioVisualAgreementResult, error) {
-	pa, err := normalizeDistGo(audioProbs)
+	pa, err := normalizeDist(audioProbs)
 	if err != nil {
 		return AudioVisualAgreementResult{}, err
 	}
-	pv, err := normalizeDistGo(visualProbs)
+	pv, err := normalizeDist(visualProbs)
 	if err != nil {
 		return AudioVisualAgreementResult{}, err
 	}
@@ -751,8 +757,8 @@ func EvaluateAudioVisualEventAgreement(
 	}
 	sort.Strings(keys)
 
-	hAud := normalizedEntropyGo(pa)
-	hVis := normalizedEntropyGo(pv)
+	hAud := normalizedEntropy(pa)
+	hVis := normalizedEntropy(pv)
 
 	topAud := keys[0]
 	topVis := keys[0]
@@ -764,8 +770,8 @@ func EvaluateAudioVisualEventAgreement(
 			topVis = k
 		}
 	}
-	audIsBg := isSilentBackgroundKeyGo(topAud)
-	visIsBg := isSilentBackgroundKeyGo(topVis)
+	audIsBg := isSilentBackgroundKey(topAud)
+	visIsBg := isSilentBackgroundKey(topVis)
 
 	if !audIsBg && hAud <= confidentHesitationCeiling && (visIsBg || hVis >= uncertainHesitationFloor) {
 		return AudioVisualAgreementResult{
@@ -851,7 +857,7 @@ func EvaluateAudioVisualEventAgreement(
 			selected = k
 		}
 	}
-	hFused := normalizedEntropyGo(fused)
+	hFused := normalizedEntropy(fused)
 	return AudioVisualAgreementResult{
 		Regime:                  "synchronous_av_event",
 		SelectedEvent:           selected,
@@ -882,7 +888,7 @@ type SpatioTemporalSelectionResult struct {
 	TemporalCoverageRatio float64
 }
 
-func cosineSimSliceGo(a, b []float64) float64 {
+func cosineSimSlice(a, b []float64) float64 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0.0
 	}
@@ -911,6 +917,25 @@ func SelectSubmodularSpatioTemporalFrames(
 	}
 	if budgetB < 1 {
 		return SpatioTemporalSelectionResult{}, fmt.Errorf("mdm: budgetB must be >= 1, got %d", budgetB)
+	}
+	if math.IsNaN(facilityWeight) || math.IsInf(facilityWeight, 0) || facilityWeight < 0.0 {
+		return SpatioTemporalSelectionResult{}, fmt.Errorf("mdm: facilityWeight must be finite and >= 0, got %v", facilityWeight)
+	}
+	if math.IsNaN(redundancyPenalty) || math.IsInf(redundancyPenalty, 0) || redundancyPenalty < 0.0 {
+		return SpatioTemporalSelectionResult{}, fmt.Errorf("mdm: redundancyPenalty must be finite and >= 0, got %v", redundancyPenalty)
+	}
+	if math.IsNaN(temporalKernelDecay) || math.IsInf(temporalKernelDecay, 0) || temporalKernelDecay < 0.0 {
+		return SpatioTemporalSelectionResult{}, fmt.Errorf("mdm: temporalKernelDecay must be finite and >= 0, got %v", temporalKernelDecay)
+	}
+	for i, c := range candidates {
+		if !allFinite(c.TimestampSec, c.HesitationScore, c.AcousticTransientScore, c.VisualMotionScore) {
+			return SpatioTemporalSelectionResult{}, fmt.Errorf("mdm: candidate %d has non-finite scalar metric", i)
+		}
+		for j, fv := range c.FeatureVector {
+			if math.IsNaN(fv) || math.IsInf(fv, 0) {
+				return SpatioTemporalSelectionResult{}, fmt.Errorf("mdm: candidate %d FeatureVector[%d] must be finite, got %v", i, j, fv)
+			}
+		}
 	}
 	n := len(candidates)
 	targetK := budgetB
@@ -945,7 +970,7 @@ func SelectSubmodularSpatioTemporalFrames(
 	}
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			fSim := cosineSimSliceGo(candidates[i].FeatureVector, candidates[j].FeatureVector)
+			fSim := cosineSimSlice(candidates[i].FeatureVector, candidates[j].FeatureVector)
 			dtNorm := math.Abs(candidates[i].TimestampSec-candidates[j].TimestampSec) / timeSpan
 			timeK := math.Exp(-temporalKernelDecay * dtNorm * float64(n))
 			val := fSim * timeK

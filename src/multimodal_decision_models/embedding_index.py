@@ -27,24 +27,20 @@ Implements:
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 import json
 import math
 import os
-import statistics
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+import statistics
+from typing import Any
 
-from .backends import _post_json_with_retry, _validate_http_url, _validate_resource_segment
+from .backends import _post_json_with_retry, _reject_nonfinite_json_constant, _validate_http_url, _validate_resource_segment
 from .calibration import stage2a_fast_exit_gate
 from .contracts import SchemaContractViolationError
 from .shortlist import cosine_similarity, csls_hubness_scores, split_identifier_tokens
-from .visual_compiler import (
-    ImageBuffer,
-    apply_residual_mlp_adapter,
-    mean_inner_crop_cie_lab,
-    shades_of_gray_white_balance,
-)
+from .visual_compiler import ImageBuffer, apply_residual_mlp_adapter, mean_inner_crop_cie_lab, shades_of_gray_white_balance
 
 
 @dataclass(frozen=True)
@@ -262,7 +258,7 @@ class VertexMultimodalEmbeddingAdapter:
         )
         if env_tok:
             return env_tok
-        raise RuntimeError(
+        raise SchemaContractViolationError(
             "VertexMultimodalEmbeddingAdapter requires access_token_fn or VERTEX_ACCESS_TOKEN / GOOGLE_OAUTH_ACCESS_TOKEN"
         )
 
@@ -285,7 +281,7 @@ class VertexMultimodalEmbeddingAdapter:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
         }
-        resp = _post_json_with_retry(
+        response = _post_json_with_retry(
             url,
             payload,
             headers,
@@ -293,7 +289,7 @@ class VertexMultimodalEmbeddingAdapter:
             max_retries=self.max_retries,
             base_backoff_sec=self.base_backoff_sec,
         )
-        return self.parse_predict_response(resp)
+        return self.parse_predict_response(response)
 
 
 class MultimodalEmbeddingIndex:
@@ -721,7 +717,7 @@ class MultimodalEmbeddingIndex:
             if not stripped:
                 continue
             try:
-                row = json.loads(stripped)
+                row = json.loads(stripped, parse_constant=_reject_nonfinite_json_constant)
             except json.JSONDecodeError as exc:
                 raise SchemaContractViolationError(
                     f"invalid JSON in MultimodalEmbeddingIndex JSONL at line {line_no}: {exc}"

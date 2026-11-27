@@ -1,12 +1,12 @@
-# Distillation, tuning, and post-tuning recalibration
+# Model distillation and post-tuning recalibration
 
-Training or distilling a compact `2B`–`4B` System-1 decision model from a larger System-2 reasoning teacher introduces three subtle failure modes that standard cross-entropy SFT misses: `<think>` token probability collapse, hard-label posterior erasure, and `must_ask` safety target corruption.
+Training or distilling a compact `2B` to `4B` System-1 decision model from a larger System-2 reasoning teacher introduces three subtle failure modes that standard cross-entropy SFT misses: `<think>` token probability collapse, hard-label posterior erasure, and `must_ask` safety target corruption.
 
 ## Prevent `<think>` token leakage on reasoning models
 
-Modern hybrid reasoning checkpoints (`Qwen3`, `DeepSeek-R1`, `Gemma` thinking variants) emit `<think>` or `<|thought|>` tokens at position 0 when default chat templates remain active. Extracting option-letter logprobs at position 0 without disabling thinking collapses accuracy from `68.00%` to `34.67%` (and inflates Brier score to `0.9854`).
+Modern hybrid reasoning checkpoints (`Qwen3`, `DeepSeek-R1`, `Gemma` thinking variants) emit `<think>` or `<|thought|>` tokens at position 0 when default chat templates remain active. Extracting option-letter logprobs at position 0 without disabling thinking collapses accuracy from `68.00%` to `31.33%` (and inflates Brier score to `0.9745`).
 
-`OpenAILogprobBackend` enforces an explicit `<think>` token leakage detector in its first-token distribution parser: if thinking tags appear in `top_logprobs`, it raises `LogprobAlignmentError` fail-closed rather than fabricating a uniform distribution, prompting you to disable thinking templates (`enable_thinking=False`) or strip completed reasoning traces prior to readout.
+`OpenAILogprobBackend` enforces an explicit `<think>` token leakage detector in its first-token distribution parser: if thinking tags appear in `top_logprobs`, it raises `LogprobAlignmentError` fail-closed instead of fabricating a uniform distribution, prompting you to disable thinking templates (`enable_thinking=False`) or strip completed reasoning traces prior to readout.
 
 ## Distill System-2 reasoning into System-1 posteriors (Equation 12)
 
@@ -14,7 +14,7 @@ When humans or frontier verifiers genuinely disagree on borderline cases, traini
 
 1. Sample or marginalize teacher posteriors $p_{\text{teacher}}(y \mid x, r)$ conditioned on completed reasoning traces $r$.
 2. Optionally debias positional letter preferences across cyclic option shifts (`debiased_cyclic_permutation_probs`).
-3. Minimize temperature-scaled KL divergence combined with proper Brier regularization so the student matches the full categorical distribution in a single `15 ms`–`60 ms` forward pass.
+3. Minimize temperature-scaled KL divergence combined with proper Brier regularization so the student matches the full categorical distribution in a single `15 ms` to `60 ms` forward pass.
 
 On `Hanno-Labs/decision-bench` (`N = 300`), Equation 12 posterior distillation reaches `70.00%` slice accuracy (`71.01%` full) while cutting KL divergence to human annotator consensus by `-57.1%` (`0.5822` down to `0.2499`).
 

@@ -14,7 +14,7 @@ A scalar confidence threshold treats `get_order_status` and `delete_production_t
 2. **Verify explicit user provenance**: Blocks any tool call whose `intent_origin` slot predicts `ambiguous_intent` or `injected_or_unrequested`.
 3. **Check 2-slot joint conformal sets**: Escalates whenever `disposition` or `intent_origin` produces a non-singleton conformal set or includes a block/confirmation label.
 4. **Enforce asymmetric stakes thresholds**: Requires `min(P(allow), P(explicit_user_intent)) >= irreversible_min_confidence` (default `0.90`) for tools in `irreversible_tools`, versus `reversible_min_confidence` (default `0.65`) for read-only calls.
-5. **Fail closed on upstream faults**: Quarantines `RETRY_PENDING` timeouts and transport exceptions into a blocked payload—never returning `None` (which would permit execution in Google ADK).
+5. **Fail closed on upstream faults**: Quarantines `RETRY_PENDING` timeouts and transport exceptions into a blocked payload, never returning `None` (which would permit execution in Google ADK).
 
 ### Google ADK `before_tool_callback` example (Python)
 

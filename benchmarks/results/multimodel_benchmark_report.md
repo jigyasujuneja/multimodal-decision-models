@@ -5,7 +5,7 @@ This report compares 10 real decision and frontier models plus 5-fold out-of-fol
 1. **Multi-Task Calibration Panel (`N = 50` items, `11` clusters, `K` from 2 to 26)**: evaluates parallel masked diffusion (`/v1/systemone`), autoregressive verbalized confidence, and 3-draw symmetric Dirichlet (`alpha_0 = 0.5`) black-box consensus models.
 2. **XSTest Safety Refusal Boundary Panel (`N = 360` items, `12` prompt-type clusters, `K = 2`)**: evaluates embedding probes (`Classy v0.3.3`, `Classier v0.2.0`), compact 2B deciders (`Strands Decider 2B v19`), and masked diffusion verifiers (`dgem v0.3.1`, `DecisionGemma`).
 
-## Panel 1: Multi-Task Calibration Leaderboard (`N = 50`)
+## Panel 1 Multi-Task Calibration Leaderboard (`N = 50`)
 
 | Arm | Acc | Brier (95% Bootstrap CI) | Murphy REL / RES | NLL | ECE | ACE | AURC | Conformal Cov@0.05 / @0.10 | Mean Set@0.10 | McNemar p (vs Ref) | Mean Latency (ms) | Pareto |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -23,7 +23,7 @@ This report compares 10 real decision and frontier models plus 5-fold out-of-fol
 
 **Panel 1 Brier-Latency Pareto Frontier**: `DecisionGemma`, `Strands Decider 2B v19`, `Gemini 3.8 Flash (Verbalized + TempScaled OOF)`.
 
-## Panel 2: XSTest Safety Boundary Leaderboard (`N = 360`)
+## Panel 2 XSTest Safety Boundary Leaderboard (`N = 360`)
 
 | Arm | Acc | Macro-F1 | Brier (95% Bootstrap CI) | Murphy REL / RES | NLL | ECE | ACE | AURC | Conformal Cov@0.05 / @0.10 | Mean Set@0.10 | McNemar p (vs Ref) | Latency (ms) | Pareto |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |

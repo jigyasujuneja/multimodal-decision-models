@@ -664,14 +664,14 @@ def extract_inter_candidate_saliency_band(
             row_var_sum = 0.0
             for byte_x in range(row_stride):
                 idx = off + byte_x
-                s1 = 0.0
-                s2 = 0.0
+                pixel_sum = 0.0
+                pixel_sq_sum = 0.0
                 for buf in aligned:
                     val = float(buf.rgb[idx])
-                    s1 += val
-                    s2 += val * val
-                mean_v = s1 * inv_k
-                row_var_sum += max(0.0, (s2 * inv_k) - (mean_v * mean_v))
+                    pixel_sum += val
+                    pixel_sq_sum += val * val
+                mean_v = pixel_sum * inv_k
+                row_var_sum += max(0.0, (pixel_sq_sum * inv_k) - (mean_v * mean_v))
             variances.append(row_var_sum * inv_3w)
 
     if band_height_fraction is not None:

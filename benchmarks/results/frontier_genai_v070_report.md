@@ -9,9 +9,7 @@
 | **Pillar 3** (`N=100`) | **Calibrated PRM + Conformal Branch-and-Bound PUCT Tree Search** | Exhaustive Tree Nodes: `13.00` (Acc: `0.9300`) | **Conformal PUCT Nodes: `7.53`** (Acc: `0.9300`) | **`-42.1%` verifier FLOPs pruned, `0.0%` accuracy drop** |
 | **Pillar 4** (`N=100`) | **Covariance-Discounted Supra-Bayesian Multi-Agent Pooling** | Naive PoE (`4x` Clone Attack) Acc: `0.6500`, NLL: `1.3044` | **Supra-Bayesian Acc: `0.7700`, NLL: `0.5773`** | **`+0.1200` acc (`p=0.035698`)** |
 
----
-
-## Pillar 1: Online Bias-Corrected Adaptive Conformal Inference (`BC-ACI`)
+## Pillar 1 Online Bias-Corrected Adaptive Conformal Inference (`BC-ACI`)
 
 | Method | Overall Coverage (`N=100`) | Post-Shift Coverage (`t=40..99`) | Worst 30-Step Rolling Coverage | Mean Prediction Set Size |
 | :--- | :---: | :---: | :---: | :---: |
@@ -19,7 +17,7 @@
 | Standard ACI (`beta=0.0`) | `0.9100` | `0.9167` | `0.8000` | `2.3500` |
 | **Online BC-ACI (`v0.7.0`)** | **`0.9000`** | **`0.9000`** | **`0.8333`** | **`2.3200`** |
 
-## Pillar 2: Primal-Dual Budget-Paced Contextual & Dueling Bandit (`ParetoBandit`)
+## Pillar 2 Primal-Dual Budget-Paced Contextual and Dueling Bandit (`ParetoBandit`)
 
 | Policy | Mean Quality Utility | Mean Cost (USD / query) | Budget Violation Ratio (`B=$0.0016`) |
 | :--- | :---: | :---: | :---: |
@@ -28,13 +26,13 @@
 | Unpaced Contextual LinUCB | `0.7897` | `$0.001115` | `0.0000` |
 | **Primal-Dual ParetoBandit (`v0.7.0`)** | **`0.7941`** | **`$0.001584`** | **`0.0000`** |
 
-## Pillar 3: Calibrated Process Reward Verifiers (`PRM`) & Conformal PUCT Tree Search
+## Pillar 3 Calibrated Process Reward Verifiers (`PRM`) and Conformal PUCT Tree Search
 
 - **Calibrated Depth Survival Discounts (`CondOT-PRM`)**: `d=1: 1.0680`, `d=2: 1.1500`, `d=3: 1.1470`
 - **Exhaustive Unpruned PUCT**: `13.00` evaluated nodes/tree, `93.0%` accuracy.
 - **Calibrated Conformal Branch-and-Bound PUCT**: **`7.53`** evaluated nodes/tree (**`-42.1%`** verifier nodes pruned), **`93.0%`** accuracy.
 
-## Pillar 4: Covariance-Discounted Supra-Bayesian Multi-Agent Pooling (`4x` Clone Attack)
+## Pillar 4 Covariance-Discounted Supra-Bayesian Multi-Agent Pooling (`4x` Clone Attack)
 
 | Pooling Rule | Top-1 Accuracy | Multiclass Brier | Negative Log-Likelihood (NLL) | 10-Bin ECE |
 | :--- | :---: | :---: | :---: | :---: |
@@ -45,7 +43,7 @@
 - **Effective Ensemble Sample Size ($N_{\text{eff}}$)**: `1.34` (down from nominal $M=6$ due to $4\times$ clone redundancy).
 - **Calibrated Agent Weights**: `intern-decision-4b: 0.0403`, `deem-4b: 0.9597`, each `laya_clone_k: 0.0000`.
 
-## Scope Boundaries, Trade-Offs, & Limitations
+## Scope Boundaries, Trade-Offs, and Limitations
 
-- **Mechanism & Trade-Off Takeaway**: Online `BC-ACI` recovers target $1 - \alpha = 0.9000$ post-shift coverage after Static Split Conformal (`RAPS`) collapses to `0.3000` under abrupt step-40 distribution shift (`26.0 ms` to `335.0 ms` arm latency envelope), while `PrimalDualParetoBanditRouter` eliminates budget violations (`2.6350 -> 0.0000`) and `covariance_discounted_logit_pool` discounts correlated clones ($N_{\text{eff}} = 1.34$, lifting accuracy from `65.00%` to `77.00%`, $p = 0.0357$).
-- **Limitations**: Inverse-covariance Supra-Bayesian pooling requires a held-out calibration split ($N_{\text{cal}} \ge 30$) to estimate the $M \times M$ logit-residual covariance matrix $\hat{\Sigma}$ before test-time aggregation.
+- **Mechanism and Trade-Off Takeaway**: Online `BC-ACI` recovers target $1 - \alpha = 0.9000$ post-shift coverage after Static Split Conformal (`RAPS`) collapses to `0.3000` under abrupt step-40 distribution shift (`26.0 ms` to `335.0 ms` arm latency envelope), while `PrimalDualParetoBanditRouter` eliminates budget violations (`2.6350 -> 0.0000`) and `covariance_discounted_logit_pool` discounts correlated clones ($N_{\text{eff}} = 1.34$, lifting accuracy from `65.00%` to `77.00%`, $p = 0.0357$).
+- **Limitations**: Pillar 2 includes a synthetic blended-oracle heavy reference arm (`oracle-poe-27b`) alongside committed model receipts to test budget pacing under extreme cost-quality spread, and inverse-covariance Supra-Bayesian pooling requires a held-out calibration split ($N_{\text{cal}} \ge 30$) to estimate the $M \times M$ logit-residual covariance matrix $\hat{\Sigma}$ before test-time aggregation.

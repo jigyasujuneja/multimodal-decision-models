@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runnable 'How I AI' Practical Decision Workflows Cookbook (8 End-to-End Recipes).
+"""Runnable 'How I AI' Practical Decision Workflows Cookbook (10 End-to-End Recipes).
 
-Demonstrates all 8 practical MDM-Bench workflows end-to-end using zero-dependency
-deterministic local backends over 100% real benchmark items, real model probability
-receipts, and real decoded PNG images (`benchmarks/data/fixtures/`):
+Demonstrates 10 practical MDM workflows end-to-end (8 core MDM-Bench recipes by default,
+plus 2 streaming audio/video recipes when ``include_audio_video=True``) using zero-dependency
+deterministic local backends over committed benchmark items, probability receipts,
+decoded PNG images (`benchmarks/data/fixtures/`), and synthetic unit-level decision probes:
   1. 1,500-Tool MCP/API Routing & Out-of-Scope Rejection (Prefix Taxonomy Trie + Mondrian Conformal)
   2. Multi-Hop RAG Reranking & Indirect Prompt Injection (IPI) Firewall (Sanitizer + Pre-Gated PoE)
   3. GUI Set-of-Marks (SoM) 4x4 Grid & Visual Grounding (Real PNG + Bimodal Safe Expected Mark Center)

@@ -234,16 +234,14 @@ def _compute_all_nonconformity_scores(
 
     if hmac_seed_key is not None:
         u_draw = hmac_uniform_float64(hmac_seed_key, hmac_item_key, "u")
+
+        def _hmac_tie_sort_key(label_key: str) -> tuple[int, str]:
+            return (hmac_uint64(hmac_seed_key, hmac_item_key, f"tie:{label_key}"), label_key)
+
         ordered_rand: list[str] = []
         for grp in groups:
             if len(grp) > 1:
-                shuffled_group = sorted(
-                    grp,
-                    key=lambda label_key: (
-                        hmac_uint64(hmac_seed_key, hmac_item_key, f"tie:{label_key}"),
-                        label_key,
-                    ),
-                )
+                shuffled_group = sorted(grp, key=_hmac_tie_sort_key)
                 ordered_rand.extend(shuffled_group)
             else:
                 ordered_rand.append(grp[0])
@@ -340,7 +338,7 @@ def nonconformity_score(
     )
     active_rng = (
         (rng if rng is not None else random.Random(int(seed)))
-        if (randomized and not use_hmac and seed is not None or rng is not None)
+        if (randomized and not use_hmac and (seed is not None or rng is not None))
         else None
     )
     scores = _compute_all_nonconformity_scores(
@@ -810,6 +808,7 @@ def label_shift_weighted_conformal_prediction_set(
 
     pred_set: list[str] = []
     max_q_used = 0.0
+    seen_finite_q = False
     for cand_k in test_ranked:
         w_test_y = float(test_covariate_weight) * rho_map.get(cand_k, 1.0)
         tot_w = cal_w_sum + w_test_y
@@ -821,9 +820,12 @@ def label_shift_weighted_conformal_prediction_set(
                 q_y = score_i
                 break
         if not math.isinf(q_y):
-            max_q_used = max(max_q_used, q_y)
+            max_q_used = q_y if not seen_finite_q else max(max_q_used, q_y)
+            seen_finite_q = True
         if math.isinf(q_y) or test_scores[cand_k] <= q_y + 1e-12:
             pred_set.append(cand_k)
+    if not seen_finite_q:
+        max_q_used = float("inf")
 
     effective_abstain = DEFAULT_CONFORMAL_ABSTAIN_KEYS if abstain_keys is None else abstain_keys
     abstain_lookup = {str(k).strip().lower() for k in effective_abstain if str(k).strip()}
@@ -1023,6 +1025,26 @@ class OnlineBCACITracker:
         self.method: str = clean_method
         self.lam_reg: float = float(lam_reg)
         self.k_reg: int = int(k_reg)
+        if (
+            isinstance(alpha_min, bool)
+            or not isinstance(alpha_min, (int, float))
+            or not math.isfinite(float(alpha_min))
+            or float(alpha_min) < 0.0
+            or float(alpha_min) >= 1.0
+        ):
+            raise ValueError(f"alpha_min must be finite and in [0, 1), got {alpha_min!r}")
+        if (
+            isinstance(alpha_max, bool)
+            or not isinstance(alpha_max, (int, float))
+            or not math.isfinite(float(alpha_max))
+            or float(alpha_max) <= 0.0
+            or float(alpha_max) > 1.0
+        ):
+            raise ValueError(f"alpha_max must be finite and in (0, 1], got {alpha_max!r}")
+        if float(alpha_min) >= float(alpha_max):
+            raise ValueError(
+                f"alpha_min ({alpha_min!r}) must be strictly less than alpha_max ({alpha_max!r})"
+            )
         self.alpha_min: float = float(alpha_min)
         self.alpha_max: float = float(alpha_max)
 
@@ -2009,7 +2031,8 @@ def compute_bayes_value_of_information(
         risk_stage2 = (1.0 - acc2_float) * weighted_cost
 
     else:
-        assert scalar_error_cost is not None
+        if scalar_error_cost is None:
+            raise ValueError("error_cost must be provided as a non-negative float or per-class mapping")
         stage1_best_action = ranked_keys[0]
         risk_stage1 = (1.0 - stage1_max_prob) * scalar_error_cost
         risk_stage2 = (1.0 - acc2_float) * scalar_error_cost

@@ -63,7 +63,7 @@ On the 10-model calibration benchmark (`benchmarks/results/multimodel_benchmark_
 
 ### Thread-safe cross-language tie-breaking
 
-Stateful PRNG streams change prediction sets when worker threads reorder requests. Pass `seed_key` and `item_key` to switch `aps` and `raps` to stateless `HMAC-SHA256` randomization (`hmac_uint64` and `hmac_uniform_float64`). Python, Go, and TypeScript then produce identical sets regardless of batch order:
+Stateful PRNG streams change prediction sets when worker threads reorder requests. Pass `seed_key` and `item_key` to switch `aps` and `raps` to stateless `HMAC-SHA256` randomization (`hmac_uint64` and `hmac_uniform_float64`). All three SDKs (Python / Go / TypeScript) then produce identical sets regardless of batch order:
 
 ```python
 from multimodal_decision_models import (
@@ -86,7 +86,7 @@ should_escalate = result.should_escalate
 
 To prevent false singleton escalations on datasets where labels such as `"oos"` (`CLINC150`) or `"0"` are valid target classes, conformal abstain escalation is empty by default (`DEFAULT_CONFORMAL_ABSTAIN_KEYS = frozenset()`, Go `DefaultConformalConfig().AbstainKeys == nil`, and TypeScript `DEFAULT_ABSTAIN_LABELS = []`). Pass `STANDARD_CONFORMAL_ABSTAIN_KEYS` (Go `StandardConformalAbstainKeys()`, TypeScript `STANDARD_ABSTAIN_LABELS`) or custom catch-all keys when your schema includes open-world abstention options.
 
-Logprob extractors (`OpenAILogprobBackend`, `VertexGeminiBackend`, and TypeScript `decideChatLogprobs`) aggregate whitespace-equivalent SentencePiece and BPE subword tokens (`"A"` and `" A"`) by using log-space `logaddexp` rather than taking a single-token maximum so calibration receives the full option probability mass.
+Logprob extractors (`OpenAILogprobBackend`, `VertexGeminiBackend`, and TypeScript `decideChatLogprobs`) aggregate whitespace-equivalent SentencePiece and BPE subword tokens (`"A"` and `" A"`) by using log-space `logaddexp` instead of taking a single-token maximum so calibration receives the full option probability mass.
 
 ## Bound multi-slot workflows with Joint Conformal
 
@@ -113,7 +113,7 @@ On the 5-slot `TypedDecisions` benchmark, `calibrate_multislot_joint_conformal` 
 
 - **Rare-class protection (`Mondrian` conformal)**: `calibrate_mondrian_conformal_quantiles` fits per-class or per-group thresholds, raising rare-tail coverage on `MDM-Bench` from `58.75%` to `88.75%`.
 - **Null-prior debiasing and unlabeled `SLD` label-shift adaptation (`v1.2.0`)**: `debias_null_prior_probabilities` divides out empty-context option bias $p_k^{\text{debiased}} \propto p_k / (p_k^{\text{null}})^\gamma$. For prevalence shift without target labels, `adapt_sld_label_shift_posteriors` and `label_shift_weighted_conformal_prediction_set` reweight posteriors and conformal scores through Saerens-Latinne-Decaestecker (`SLD`) EM.
-- **Held-out competence circuit breaker and Dawid-Skene `PoE` weights (`v1.3.1`)**: `DomainCompetenceProfile.is_negative_transfer` blocks Stage-2 overrides because negative paired escalation, accuracy drops beyond `margin`, or multiclass Brier error spikes (`stage2_brier` vs `stage1_brier`) degrade end-to-end risk. `compute_dawid_skene_poe_weights` derives Stage-1 and Stage-2 fusion weights from multi-class log-odds above `1/K` chance, matching across Python, Go, and TypeScript within `1e-12`.
+- **Held-out competence circuit breaker and Dawid-Skene `PoE` weights (`v1.3.1`)**: `DomainCompetenceProfile.is_negative_transfer` blocks Stage-2 overrides because negative paired escalation, accuracy drops beyond `margin`, or multiclass Brier error spikes (`stage2_brier` vs `stage1_brier`) degrade end-to-end risk. `compute_dawid_skene_poe_weights` derives Stage-1 and Stage-2 fusion weights from multi-class log-odds above `1/K` chance, matching across all three SDKs (Python / Go / TypeScript) within `1e-12`.
 - **Finite-sample Conformal Risk Control (`CRC`), Bayesian `VoI`, and epistemic abstention (`v1.2.0`)**: `calibrate_conformal_risk_control` selects $\hat{\lambda} = \inf\{\lambda : \frac{n}{n+1}\hat{R}_n(\lambda) + \frac{B}{n+1} \le \alpha\}$ so $\mathbb{E}[L_{n+1}(\hat{\lambda})] \le \alpha$. `compute_bayes_value_of_information` escalates only when expected risk reduction exceeds Stage-2 cost ($\text{VoI}(x) > c_{\text{S2}}$), and `select_omniscience_action` abstains below $p^* = C / (R + C)$.
 - **Non-stationary streams (`BC-ACI`)**: `OnlineBCACITracker` updates $\alpha_t$ online with bias-corrected momentum. On the modeled abrupt-shift stream benchmark, it restores `90.00%` post-shift coverage where static RAPS drops to `30.00%`.
 - **Learn-then-Test (`LTT`) funnel gates**: `calibrate_ltt_funnel_gates` uses finite-sample Hoeffding-Bentkus upper confidence bounds with family-wise testing to select `(stage2a_margin, hesitation_threshold)` tuples guaranteed to hold end-to-end funnel risk below your target $\alpha$.

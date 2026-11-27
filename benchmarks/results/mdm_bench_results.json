@@ -367,14 +367,7 @@
       }
     }
   },
-  "cascade_vs_fast_mcnemar": {
-    "chi2_cc": 11.7551,
-    "n01_cascade_wins": 37,
-    "n10_fast_wins": 12,
-    "n_pairs": 400,
-    "p_two_sided": 0.0004697573
-  },
-  "gdm_upgrades": {
+  "cascade_upgrades": {
     "upgrade1_mondrian_and_weighted_conformal": {
       "alpha": 0.1,
       "marginal_raps": {
@@ -454,6 +447,13 @@
       "violated_triangles_after": 0,
       "violated_triangles_before": 50
     }
+  },
+  "cascade_vs_fast_mcnemar": {
+    "chi2_cc": 11.7551,
+    "n01_cascade_wins": 37,
+    "n10_fast_wins": 12,
+    "n_pairs": 400,
+    "p_two_sided": 0.0004697573
   },
   "n_total_items": 400,
   "n_tracks": 8,

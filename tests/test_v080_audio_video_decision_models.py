@@ -21,6 +21,7 @@ import math
 from pathlib import Path
 import unittest
 
+from examples import how_i_ai_workflows
 from multimodal_decision_models import (
     AV_REGIME_LABELS,
     TURN_TAKING_ACTIONS,
@@ -249,8 +250,6 @@ class TestV080AudioVideoDecisionModels(unittest.TestCase):
         self.assertEqual(data["pillar_3_audiovisual_event_agreement"]["jsd_triangle_avel_accuracy"], 0.95)
         self.assertEqual(data["pillar_4_submodular_spatiotemporal_sheet"]["submodular_stsom_facet_recall"], 0.975)
 
-        from examples import how_i_ai_workflows
-
         all_10 = how_i_ai_workflows.run_all_workflows(include_audio_video=True)
         self.assertEqual(len(all_10), 10)
         self.assertEqual(all_10[8]["raw_argmax_action"], "barge_in_interrupt")
@@ -261,14 +260,14 @@ class TestV080AudioVideoDecisionModels(unittest.TestCase):
 
     def test_zero_fallback_and_strict_type_contracts(self) -> None:
         # Zero-sum distributions must fail closed instead of fabricating a uniform 1/K fallback
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"probability sum must be > 0; uniform 1/K fallbacks"):
             jensen_shannon_divergence_bits({"a": 0.0, "b": 0.0}, {"a": 0.5, "b": 0.5})
 
         # Boolean probabilities must be rejected even though bool subclasses int in Python
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"invalid probability True for key 'a'"):
             jensen_shannon_divergence_bits({"a": True, "b": False}, {"a": 0.5, "b": 0.5})  # type: ignore[dict-item]
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"invalid calibration nonconformity score True"):
             ConformalMartingaleTracker(calibration_scores=[True, False])  # type: ignore[list-item]
 
         # Digital silence WAV must report 0.0 normalized band energies, not uniform 0.25

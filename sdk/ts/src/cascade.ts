@@ -24,6 +24,12 @@ import {
   normalizedEntropy,
 } from "./calibration.js";
 import {
+  getQuestionOptionKeys,
+  isPlainRecord,
+  nullProtoRecord,
+  throwIfSignalAborted,
+} from "./internal.js";
+import {
   type DecisionQuestion,
   type DecisionResponse,
   type DomainCompetenceProfile,
@@ -34,8 +40,10 @@ import {
   type SystemOneDecideRequest,
 } from "./types.js";
 
+/** Default normalized Shannon entropy threshold triggering Stage-2 escalation. */
 export const DEFAULT_CASCADE_HESITATION_THRESHOLD = 0.16;
 
+/** Configures gating, speculative execution, pruning, and fusion for `CascadeOrchestrator`. */
 export interface CascadeConfig {
   readonly hesitationThreshold?: number;
   readonly temperature?: number;
@@ -52,11 +60,13 @@ export interface CascadeConfig {
   readonly voiLatencyCostUsd?: number;
 }
 
+/** Extends `SlotReadout` with per-slot cascade escalation and pass-count metadata. */
 export interface CascadeSlotReadout extends SlotReadout {
   readonly escalated: boolean;
   readonly passesUsed: number;
 }
 
+/** Summarizes the multi-slot outcome, escalation trace, and speculative telemetry of a cascade call. */
 export interface CascadeDecisionResponse {
   readonly slots: Record<string, CascadeSlotReadout>;
   readonly escalated: boolean;
@@ -67,6 +77,7 @@ export interface CascadeDecisionResponse {
   readonly backendName: string;
 }
 
+/** Backend interface accepted for Stage 1 and Stage 2 of `CascadeOrchestrator`. */
 export type CascadeStageBackend =
   | {
       readonly name?: string;
@@ -78,41 +89,11 @@ export type CascadeStageBackend =
     }
   | ((request: SystemOneDecideRequest) => Promise<DecisionResponse>);
 
-function nullProtoRecord<T>(): Record<string, T> {
-  return Object.create(null) as Record<string, T>;
-}
-
-function getChoiceOptionKeys(question: DecisionQuestion): string[] {
-  if (question.type === "score") {
-    return question.levels ? [...question.levels] : [];
-  }
-  const criteria = question.criteria;
-  const descriptions = question.optionDescriptions;
-  if (question.order && question.order.length > 0) {
-    return question.order.filter(
-      (key) =>
-        (criteria !== undefined && Object.hasOwn(criteria, key)) ||
-        (descriptions !== undefined && Object.hasOwn(descriptions, key)),
-    );
-  }
-  if (criteria !== undefined && Object.keys(criteria).length > 0) {
-    return Object.keys(criteria);
-  }
-  return descriptions ? Object.keys(descriptions) : [];
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (!signal || !signal.aborted) {
-    return;
-  }
-  throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
-}
-
 function raceWithAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) {
     return promise;
   }
-  throwIfAborted(signal);
+  throwIfSignalAborted(signal);
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
@@ -139,7 +120,7 @@ async function invokeCascadeBackend(
   backend: CascadeStageBackend,
   request: SystemOneDecideRequest,
 ): Promise<DecisionResponse> {
-  throwIfAborted(request.signal);
+  throwIfSignalAborted(request.signal);
   let callPromise: Promise<DecisionResponse>;
   if (typeof backend === "function") {
     callPromise = backend(request);
@@ -153,48 +134,49 @@ async function invokeCascadeBackend(
     );
   }
   const response = await raceWithAbortSignal(callPromise, request.signal);
-  throwIfAborted(request.signal);
+  throwIfSignalAborted(request.signal);
   return response;
 }
 
+/** Prunes a choice `DecisionQuestion` to its top-K Stage-1 options while retaining aligned descriptions and priors. */
 export function pruneChoiceTopK(
   question: DecisionQuestion,
-  stage1Probs: Record<string, number>,
+  stage1Probs: Readonly<Record<string, number>>,
   topK: number,
 ): DecisionQuestion {
-  if (!question || typeof question !== "object" || question.type !== "choice") {
+  if (!isPlainRecord(question) || question.type !== "choice") {
     throw new MDMValidationError("pruneChoiceTopK requires a choice DecisionQuestion");
   }
-  const optionKeys = getChoiceOptionKeys(question);
+  const optionKeys = getQuestionOptionKeys(question);
   if (optionKeys.length < 2) {
     throw new MDMValidationError("choice DecisionQuestion requires >= 2 options");
   }
   if (typeof topK !== "number" || !Number.isInteger(topK) || topK < 2) {
     throw new MDMValidationError("topK must be an integer >= 2");
   }
-  if (!stage1Probs || typeof stage1Probs !== "object" || Array.isArray(stage1Probs)) {
+  if (!isPlainRecord(stage1Probs)) {
     throw new MDMValidationError("stage1Probs must be a non-empty probability object");
   }
 
-  const indexByKey = nullProtoRecord<number>();
-  const validatedScores = nullProtoRecord<number>();
+  const indexByKey = new Map<string, number>();
+  const validatedScores = new Map<string, number>();
   let totalMass = 0.0;
   for (let idx = 0; idx < optionKeys.length; idx += 1) {
     const key = optionKeys[idx] ?? "";
     if (key.trim() === "") {
       throw new MDMValidationError("choice option keys must be non-empty strings");
     }
-    if (Object.hasOwn(indexByKey, key)) {
+    if (indexByKey.has(key)) {
       throw new MDMValidationError(`duplicate choice option key ${JSON.stringify(key)}`);
     }
-    indexByKey[key] = idx;
+    indexByKey.set(key, idx);
     const rawVal = Object.hasOwn(stage1Probs, key) ? stage1Probs[key] : 0.0;
     if (typeof rawVal !== "number" || !Number.isFinite(rawVal) || rawVal < 0.0) {
       throw new MDMValidationError(
         `stage1Probs[${JSON.stringify(key)}] must be a finite number >= 0`,
       );
     }
-    validatedScores[key] = rawVal;
+    validatedScores.set(key, rawVal);
     totalMass += rawVal;
   }
   if (!Number.isFinite(totalMass) || totalMass <= 0.0) {
@@ -202,43 +184,55 @@ export function pruneChoiceTopK(
   }
 
   const rankedKeys = [...optionKeys].sort((left, right) => {
-    const leftScore = validatedScores[left] ?? 0.0;
-    const rightScore = validatedScores[right] ?? 0.0;
+    const leftScore = validatedScores.get(left) ?? 0.0;
+    const rightScore = validatedScores.get(right) ?? 0.0;
     if (leftScore !== rightScore) {
       return rightScore - leftScore;
     }
-    return (indexByKey[left] ?? 0) - (indexByKey[right] ?? 0);
+    return (indexByKey.get(left) ?? 0) - (indexByKey.get(right) ?? 0);
   });
   const keptKeys = rankedKeys.slice(0, Math.min(topK, rankedKeys.length));
 
   let keptCriteria: Record<string, string> | undefined;
   if (question.criteria) {
-    keptCriteria = nullProtoRecord<string>();
+    const map = nullProtoRecord<string>();
     for (const key of keptKeys) {
       if (Object.hasOwn(question.criteria, key)) {
-        keptCriteria[key] = question.criteria[key] as string;
+        const criterion = question.criteria[key];
+        if (criterion !== undefined) {
+          map[key] = criterion;
+        }
       }
     }
+    keptCriteria = { ...map };
   }
 
   let keptDescriptions: Record<string, string> | undefined;
   if (question.optionDescriptions) {
-    keptDescriptions = nullProtoRecord<string>();
+    const map = nullProtoRecord<string>();
     for (const key of keptKeys) {
       if (Object.hasOwn(question.optionDescriptions, key)) {
-        keptDescriptions[key] = question.optionDescriptions[key] as string;
+        const desc = question.optionDescriptions[key];
+        if (desc !== undefined) {
+          map[key] = desc;
+        }
       }
     }
+    keptDescriptions = { ...map };
   }
 
   let keptPriors: Record<string, number> | undefined;
   if (question.priorLogits) {
-    keptPriors = nullProtoRecord<number>();
+    const map = nullProtoRecord<number>();
     for (const key of keptKeys) {
       if (Object.hasOwn(question.priorLogits, key)) {
-        keptPriors[key] = question.priorLogits[key] as number;
+        const prior = question.priorLogits[key];
+        if (prior !== undefined) {
+          map[key] = prior;
+        }
       }
     }
+    keptPriors = { ...map };
   }
 
   return {
@@ -319,7 +313,6 @@ function validateCascadeConfig(config: CascadeConfig): Required<
     throw new MDMValidationError("useDawidSkenePoeWeights must be a boolean");
   }
   if (config.domainCompetence !== undefined) {
-    // Validate domainCompetence and negativeTransferOptions upfront.
     isNegativeTransfer(config.domainCompetence, config.negativeTransferOptions ?? {});
   } else if (config.negativeTransferOptions !== undefined) {
     isNegativeTransfer(
@@ -379,14 +372,14 @@ function validateCascadeConfig(config: CascadeConfig): Required<
 }
 
 function validateAndNormalizeSlotDist(
-  rawDist: Record<string, number> | undefined,
+  rawDist: unknown,
   optionKeys: readonly string[],
   slotId: string,
 ): Record<string, number> {
-  if (!rawDist || typeof rawDist !== "object") {
+  if (!isPlainRecord(rawDist)) {
     throw new MDMValidationError(`missing probabilities for slot ${JSON.stringify(slotId)}`);
   }
-  const normalized = nullProtoRecord<number>();
+  const rawValues = new Map<string, number>();
   let total = 0.0;
   for (const key of optionKeys) {
     const val = Object.hasOwn(rawDist, key) ? rawDist[key] : undefined;
@@ -395,23 +388,28 @@ function validateAndNormalizeSlotDist(
         `slot ${JSON.stringify(slotId)} missing valid probability for ${JSON.stringify(key)}`,
       );
     }
-    normalized[key] = val;
+    rawValues.set(key, val);
     total += val;
   }
   if (!Number.isFinite(total) || total <= 0.0) {
     throw new MDMValidationError(`slot ${JSON.stringify(slotId)} probabilities sum to zero`);
   }
+  const normalized = nullProtoRecord<number>();
   for (const key of optionKeys) {
-    normalized[key] = (normalized[key] as number) / total;
+    const val = rawValues.get(key) ?? 0.0;
+    normalized[key] = val / total;
   }
-  return normalized;
+  return { ...normalized };
 }
 
-function argmaxOption(probs: Record<string, number>, optionKeys: readonly string[]): string {
+function argmaxOption(
+  probs: Readonly<Record<string, number>>,
+  optionKeys: readonly string[],
+): string {
   let bestKey = optionKeys[0] ?? "";
   let bestProb = -1.0;
   for (const key of optionKeys) {
-    const prob = probs[key] ?? 0.0;
+    const prob = Object.hasOwn(probs, key) ? (probs[key] ?? 0.0) : 0.0;
     if (prob > bestProb) {
       bestProb = prob;
       bestKey = key;
@@ -420,6 +418,41 @@ function argmaxOption(probs: Record<string, number>, optionKeys: readonly string
   return bestKey;
 }
 
+function filterStage2PriorLogits(
+  priorLogits: Readonly<Record<string, Readonly<Record<string, number>>>> | undefined,
+  targetQuestions: Readonly<Record<string, DecisionQuestion>>,
+): Record<string, Record<string, number>> | undefined {
+  if (!priorLogits) {
+    return undefined;
+  }
+  const filtered = nullProtoRecord<Record<string, number>>();
+  let hasSlot = false;
+  for (const [slotId, question] of Object.entries(targetQuestions)) {
+    if (!Object.hasOwn(priorLogits, slotId)) {
+      continue;
+    }
+    const slotPriors = priorLogits[slotId];
+    if (!slotPriors) {
+      continue;
+    }
+    const keptKeys = new Set(getQuestionOptionKeys(question));
+    const filteredSlot = nullProtoRecord<number>();
+    let hasKey = false;
+    for (const [optKey, value] of Object.entries(slotPriors)) {
+      if (keptKeys.has(optKey)) {
+        filteredSlot[optKey] = value;
+        hasKey = true;
+      }
+    }
+    if (hasKey) {
+      filtered[slotId] = { ...filteredSlot };
+      hasSlot = true;
+    }
+  }
+  return hasSlot ? { ...filtered } : undefined;
+}
+
+/** Orchestrates hesitation-gated Stage-1 to Stage-2 cascades with speculative execution and negative-transfer guards. */
 export class CascadeOrchestrator {
   private readonly stage1Backend: CascadeStageBackend;
   private readonly stage2Backend?: CascadeStageBackend;
@@ -434,11 +467,6 @@ export class CascadeOrchestrator {
       throw new MDMValidationError("stage1Backend is required");
     }
     const validated = validateCascadeConfig(config);
-    if (validated.useDawidSkenePoeWeights && validated.domainCompetence === undefined) {
-      throw new MDMValidationError(
-        "useDawidSkenePoeWeights=true requires domainCompetence to be set",
-      );
-    }
     this.stage1Backend = stage1Backend;
     this.stage2Backend = stage2Backend;
     this.config = validated;
@@ -455,9 +483,10 @@ export class CascadeOrchestrator {
     return isNegativeTransfer(profile, this.config.negativeTransferOptions ?? {});
   }
 
+  /** Evaluates `request` on Stage 1 and selectively escalates uncertain or uniform slots to Stage 2. */
   async decide(request: SystemOneDecideRequest): Promise<CascadeDecisionResponse> {
     const startedAt = performance.now();
-    throwIfAborted(request.signal);
+    throwIfSignalAborted(request.signal);
 
     const effTemp = request.temperature ?? this.config.temperature;
     if (
@@ -474,14 +503,24 @@ export class CascadeOrchestrator {
     if (questionEntries.length === 0) {
       throw new MDMValidationError("questions must contain at least one slot");
     }
+    const questionMap = new Map<string, DecisionQuestion>();
     for (const [slotId, question] of questionEntries) {
-      const optionKeys = getChoiceOptionKeys(question);
+      const optionKeys = getQuestionOptionKeys(question);
       if (optionKeys.length < 2) {
         throw new MDMValidationError(`slot ${JSON.stringify(slotId)} requires >= 2 options`);
       }
       if (question.domainCompetence !== undefined) {
         isNegativeTransfer(question.domainCompetence, this.config.negativeTransferOptions ?? {});
       }
+      if (
+        this.config.useDawidSkenePoeWeights &&
+        this.resolveSlotCompetence(question) === undefined
+      ) {
+        throw new MDMValidationError(
+          `useDawidSkenePoeWeights=true requires domainCompetence on config or slot ${JSON.stringify(slotId)}`,
+        );
+      }
+      questionMap.set(slotId, question);
     }
 
     const stage2AbortController = new AbortController();
@@ -512,31 +551,32 @@ export class CascadeOrchestrator {
           speculativeSkippedByCircuitBreaker = true;
         } else if (speculativeCovered.size > 0) {
           speculativeLaunched = true;
+          const specPriorLogits = filterStage2PriorLogits(request.priorLogits, specQuestions);
           speculativePromise = invokeCascadeBackend(this.stage2Backend, {
             state: request.state,
-            questions: specQuestions,
+            questions: { ...specQuestions },
             images: request.images,
-            priorLogits: request.priorLogits,
-            temperature: request.temperature ?? this.config.temperature,
+            ...(specPriorLogits !== undefined ? { priorLogits: specPriorLogits } : {}),
+            temperature: effTemp,
             signal: stage2AbortController.signal,
           });
           // Suppress unhandled rejection when fast-exit cancels speculative Stage 2.
-          speculativePromise.catch(() => undefined);
+          void speculativePromise.catch(() => undefined);
         }
       }
 
       const stage1Response = await invokeCascadeBackend(this.stage1Backend, {
         ...request,
-        temperature: request.temperature ?? this.config.temperature,
+        temperature: effTemp,
       });
 
-      const slotsOut = nullProtoRecord<CascadeSlotReadout>();
+      const slotsOut = new Map<string, CascadeSlotReadout>();
       const candidateEscalated: string[] = [];
       const escalationReasons: string[] = [];
-      const stage1UniformBySlot = nullProtoRecord<boolean>();
+      const stage1UniformBySlot = new Map<string, boolean>();
 
       for (const [slotId, question] of questionEntries) {
-        const optionKeys = getChoiceOptionKeys(question);
+        const optionKeys = getQuestionOptionKeys(question);
         const s1Entry = Object.hasOwn(stage1Response.slots, slotId)
           ? stage1Response.slots[slotId]
           : undefined;
@@ -549,7 +589,7 @@ export class CascadeOrchestrator {
           slotId,
         );
         const s1Uniform = isUniformDistribution(rawNorm);
-        stage1UniformBySlot[slotId] = s1Uniform;
+        stage1UniformBySlot.set(slotId, s1Uniform);
 
         const slotPrior =
           (request.priorLogits && Object.hasOwn(request.priorLogits, slotId)
@@ -602,7 +642,7 @@ export class CascadeOrchestrator {
           }
         }
 
-        slotsOut[slotId] = {
+        slotsOut.set(slotId, {
           slotId,
           predicted,
           probabilities: fusedProbs,
@@ -611,7 +651,7 @@ export class CascadeOrchestrator {
           confidence: 1.0 - hRaw,
           escalated: false,
           passesUsed: 1,
-        };
+        });
       }
 
       let didEscalate = false;
@@ -621,11 +661,14 @@ export class CascadeOrchestrator {
         const executableSlots: string[] = [];
         let hadNegTransferBlock = false;
         for (const slotId of candidateEscalated) {
-          const question = request.questions[slotId] as DecisionQuestion;
+          const question = questionMap.get(slotId);
+          if (!question) {
+            continue;
+          }
           const blocked =
             question.type === "choice" &&
             this.isSlotNegativeTransfer(this.resolveSlotCompetence(question));
-          const s1Uniform = Boolean(stage1UniformBySlot[slotId]);
+          const s1Uniform = stage1UniformBySlot.get(slotId) === true;
           if (blocked && !s1Uniform) {
             hadNegTransferBlock = true;
           } else {
@@ -642,10 +685,10 @@ export class CascadeOrchestrator {
         if (executableSlots.length === 0) {
           stage2AbortController.abort();
         } else {
-          throwIfAborted(request.signal);
+          throwIfSignalAborted(request.signal);
           didEscalate = true;
-          const stage2RawBySlot = nullProtoRecord<Record<string, number>>();
-          const evaluatedOptsBySlot = nullProtoRecord<readonly string[]>();
+          const stage2RawBySlot = new Map<string, Record<string, number>>();
+          const evaluatedOptsBySlot = new Map<string, readonly string[]>();
 
           const needSpec = executableSlots.some((slotId) => speculativeCovered.has(slotId));
           if (speculativePromise !== undefined && needSpec) {
@@ -653,11 +696,12 @@ export class CascadeOrchestrator {
             resolvedBackendName = specResp.backendName;
             for (const slotId of executableSlots) {
               if (speculativeCovered.has(slotId) && Object.hasOwn(specResp.slots, slotId)) {
-                const slotObj = specResp.slots[slotId] as SlotReadout;
-                stage2RawBySlot[slotId] = slotObj.rawProbabilities ?? slotObj.probabilities;
-                evaluatedOptsBySlot[slotId] = getChoiceOptionKeys(
-                  request.questions[slotId] as DecisionQuestion,
-                );
+                const slotObj = specResp.slots[slotId];
+                const question = questionMap.get(slotId);
+                if (slotObj && question) {
+                  stage2RawBySlot.set(slotId, slotObj.rawProbabilities ?? slotObj.probabilities);
+                  evaluatedOptsBySlot.set(slotId, getQuestionOptionKeys(question));
+                }
               }
             }
           } else {
@@ -667,38 +711,46 @@ export class CascadeOrchestrator {
           const twoPhaseQuestions = nullProtoRecord<DecisionQuestion>();
           let hasTwoPhase = false;
           for (const slotId of executableSlots) {
-            if (Object.hasOwn(stage2RawBySlot, slotId)) {
+            if (stage2RawBySlot.has(slotId)) {
               continue;
             }
-            const baseQuestion = request.questions[slotId] as DecisionQuestion;
-            const baseKeys = getChoiceOptionKeys(baseQuestion);
+            const baseQuestion = questionMap.get(slotId);
+            if (!baseQuestion) {
+              continue;
+            }
+            const baseKeys = getQuestionOptionKeys(baseQuestion);
+            const s1Slot = slotsOut.get(slotId);
             if (
+              s1Slot &&
               this.config.stage2TopK >= 2 &&
               baseQuestion.type === "choice" &&
               baseKeys.length > this.config.stage2TopK
             ) {
-              const s1Slot = slotsOut[slotId] as CascadeSlotReadout;
               const prunedQ = pruneChoiceTopK(
                 baseQuestion,
                 s1Slot.probabilities,
                 this.config.stage2TopK,
               );
               twoPhaseQuestions[slotId] = prunedQ;
-              evaluatedOptsBySlot[slotId] = getChoiceOptionKeys(prunedQ);
+              evaluatedOptsBySlot.set(slotId, getQuestionOptionKeys(prunedQ));
             } else {
               twoPhaseQuestions[slotId] = baseQuestion;
-              evaluatedOptsBySlot[slotId] = baseKeys;
+              evaluatedOptsBySlot.set(slotId, baseKeys);
             }
             hasTwoPhase = true;
           }
 
           if (hasTwoPhase) {
+            const twoPhasePriorLogits = filterStage2PriorLogits(
+              request.priorLogits,
+              twoPhaseQuestions,
+            );
             const twoPhaseResp = await invokeCascadeBackend(this.stage2Backend, {
               state: request.state,
-              questions: twoPhaseQuestions,
+              questions: { ...twoPhaseQuestions },
               images: request.images,
-              priorLogits: request.priorLogits,
-              temperature: request.temperature ?? this.config.temperature,
+              ...(twoPhasePriorLogits !== undefined ? { priorLogits: twoPhasePriorLogits } : {}),
+              temperature: effTemp,
               signal: request.signal,
             });
             resolvedBackendName = twoPhaseResp.backendName;
@@ -711,37 +763,40 @@ export class CascadeOrchestrator {
                   `Stage-2 response missing slot ${JSON.stringify(slotId)}`,
                 );
               }
-              stage2RawBySlot[slotId] = slotObj.rawProbabilities ?? slotObj.probabilities;
+              stage2RawBySlot.set(slotId, slotObj.rawProbabilities ?? slotObj.probabilities);
             }
           }
 
           for (const slotId of executableSlots) {
-            const question = request.questions[slotId] as DecisionQuestion;
-            const fullKeys = getChoiceOptionKeys(question);
-            const evalKeys = evaluatedOptsBySlot[slotId] ?? fullKeys;
+            const question = questionMap.get(slotId);
+            const s1Slot = slotsOut.get(slotId);
+            if (!question || !s1Slot) {
+              continue;
+            }
+            const fullKeys = getQuestionOptionKeys(question);
+            const evalKeys = evaluatedOptsBySlot.get(slotId) ?? fullKeys;
             const normSubS2 = validateAndNormalizeSlotDist(
-              stage2RawBySlot[slotId],
+              stage2RawBySlot.get(slotId),
               evalKeys,
               slotId,
             );
             const s2Uniform = isUniformDistribution(normSubS2);
-            const expandedS2 = nullProtoRecord<number>();
+            const expandedS2Map = nullProtoRecord<number>();
             for (const key of fullKeys) {
-              expandedS2[key] = Object.hasOwn(normSubS2, key) ? (normSubS2[key] as number) : 0.0;
+              const subProb = Object.hasOwn(normSubS2, key) ? normSubS2[key] : undefined;
+              expandedS2Map[key] = subProb ?? 0.0;
             }
+            const expandedS2 = { ...expandedS2Map };
 
-            const s1Slot = slotsOut[slotId] as CascadeSlotReadout;
-            const s1Uniform = Boolean(stage1UniformBySlot[slotId]);
+            const s1Uniform = stage1UniformBySlot.get(slotId) === true;
             const profile = this.resolveSlotCompetence(question);
             let finalProbs: Record<string, number>;
 
-            if (s1Uniform && !s2Uniform) {
+            if (s1Uniform) {
               finalProbs = expandedS2;
-            } else if (!s1Uniform && s2Uniform) {
+            } else if (s2Uniform) {
               finalProbs = { ...s1Slot.probabilities };
               escalationReasons.push(`${slotId}:stage2_uniform_fallback_preserved_stage1`);
-            } else if (s1Uniform && s2Uniform) {
-              finalProbs = expandedS2;
             } else if (this.config.useDawidSkenePoeWeights && profile !== undefined) {
               const numOpts = Math.max(profile.numOptions ?? 2, fullKeys.length);
               const [dsW1, dsW2] = computeDawidSkenePoeWeights(
@@ -753,34 +808,37 @@ export class CascadeOrchestrator {
               const alpha1 = dsW1 / dsSum;
               const alpha2 = dsW2 / dsSum;
               const epsPoe = 1e-12;
-              const logits = nullProtoRecord<number>();
+              const logits = new Map<string, number>();
               let maxLogit = -Infinity;
               for (const key of fullKeys) {
                 const p1 = Math.max(epsPoe, s1Slot.probabilities[key] ?? epsPoe);
                 const p2 = Math.max(epsPoe, expandedS2[key] ?? epsPoe);
                 const lv = alpha1 * Math.log(p1) + alpha2 * Math.log(p2);
-                logits[key] = lv;
+                logits.set(key, lv);
                 if (lv > maxLogit) {
                   maxLogit = lv;
                 }
               }
-              finalProbs = nullProtoRecord<number>();
+              const expMass = new Map<string, number>();
               let denom = 0.0;
               for (const key of fullKeys) {
-                const ev = Math.exp((logits[key] as number) - maxLogit);
-                finalProbs[key] = ev;
+                const lv = logits.get(key) ?? -Infinity;
+                const ev = Math.exp(lv - maxLogit);
+                expMass.set(key, ev);
                 denom += ev;
               }
+              const pooledMap = nullProtoRecord<number>();
               for (const key of fullKeys) {
-                finalProbs[key] = (finalProbs[key] as number) / denom;
+                pooledMap[key] = (expMass.get(key) ?? 0.0) / denom;
               }
+              finalProbs = { ...pooledMap };
             } else {
               finalProbs = expandedS2;
             }
 
             const finalPred = argmaxOption(finalProbs, fullKeys);
             const finalHRaw = normalizedEntropy(finalProbs);
-            slotsOut[slotId] = {
+            slotsOut.set(slotId, {
               slotId,
               predicted: finalPred,
               probabilities: finalProbs,
@@ -789,15 +847,20 @@ export class CascadeOrchestrator {
               confidence: 1.0 - finalHRaw,
               escalated: true,
               passesUsed: 2,
-            };
+            });
           }
         }
       } else {
         stage2AbortController.abort();
       }
 
+      const slotsRecord = nullProtoRecord<CascadeSlotReadout>();
+      for (const [slotId, readout] of slotsOut.entries()) {
+        slotsRecord[slotId] = readout;
+      }
+
       return {
-        slots: slotsOut,
+        slots: { ...slotsRecord },
         escalated: didEscalate,
         escalationReasons,
         speculativeLaunched,
@@ -812,6 +875,7 @@ export class CascadeOrchestrator {
   }
 }
 
+/** Runs a one-shot cascade evaluation without constructing a persistent `CascadeOrchestrator`. */
 export async function evaluateCascade(
   stage1Backend: CascadeStageBackend,
   stage2Backend: CascadeStageBackend | undefined,

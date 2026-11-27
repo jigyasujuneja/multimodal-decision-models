@@ -16,22 +16,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import hmac
 import math
 import re
-from typing import Mapping, Sequence
 
 from .conformal import DEFAULT_CONFORMAL_SEED_KEY, nonconformity_score
-from .contracts import InvisibleSmugglingAudit, SchemaContractViolationError, audit_and_normalize_untrusted_text
+from .contracts import InvisibleSmugglingAudit, SchemaContractViolationError, _TAG_BREAKOUT_RE, audit_and_normalize_untrusted_text
 
-_CANARY_TAG_FAMILY_RE = re.compile(
-    r"<[ \t\r\n]*(?:/[ \t\r\n]*)?untrusted_[^<>]*>",
-    re.IGNORECASE,
-)
+_CANARY_TAG_FAMILY_RE = _TAG_BREAKOUT_RE
 _INJECTION_DIRECTIVE_ANYWHERE_RE = re.compile(
-    r"(?im)(?:^\s*(?:system|developer|assistant)\s*:\s*"
+    r"(?im)(?:^[ \t]*(?:system|developer|assistant)[ \t]*:[ \t]*"
     r"(?:approve|allow|grant|accept|deny|reject|block|select|choose|pick|output|return"
     r"|ignore|disregard|forget|override|bypass|assign|rank|you\s+are|do\s+not)\b"
     r"|\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?(?:previous|prior|above|preceding|system)\s+"
@@ -58,14 +55,14 @@ _CUA_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "option_letter_hijack",
         re.compile(
             r"(?im)(?:\b(?:select|choose|pick|output|return|rank\s+first)\s+option\s+[A-Z]\b"
-            r"|^\s*(?:final\s+)?answer\s*:\s*[A-Z]\s*$)"
+            r"|^[ \t]*(?:final[ \t]+)?answer[ \t]*:[ \t]*[A-Z][ \t]*$)"
         ),
     ),
     (
         "forced_probability_spoof",
         re.compile(
             r"(?i)\b(?:assign|give|set|output)\s+(?:a\s+)?(?:probability|posterior|score|logprob)"
-            r"\s*(?:(?:of|=|:)\s*)?(?:1\.0+|100%)\b"
+            r"\s*(?:(?:of|=|:)\s*)?(?:1\.0+\b|100%)"
         ),
     ),
     (
@@ -91,7 +88,7 @@ _CUA_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?im)(?:\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+)?"
             r"(?:previous|prior|above|preceding|system)\s+"
             r"(?:instructions?|prompts?|rules?|rubrics?|criteria|directives?)\b"
-            r"|^\s*(?:system|developer|assistant)\s*:\s*"
+            r"|^[ \t]*(?:system|developer|assistant)[ \t]*:[ \t]*"
             r"(?:approve|allow|grant|accept|deny|reject|block|select|choose|pick|output"
             r"|return|ignore|disregard|forget|override|bypass|assign|rank|you\s+are|do\s+not)\b)"
         ),
@@ -282,8 +279,7 @@ def detect_comparative_undermining_attack(
         if audit.fullwidth_homoglyphs >= 2 and (
             _SUSPICIOUS_XML_TAG_RE.search(normalized) is not None or len(reasons) > 0
         ):
-            if "fullwidth_homoglyph_evasion" not in reasons:
-                reasons.append("fullwidth_homoglyph_evasion")
+            reasons.append("fullwidth_homoglyph_evasion")
 
         if reasons:
             quarantined.append(raw_id)
@@ -376,7 +372,7 @@ def calibrate_trimmed_robust_conformal_quantile(
     ]
     sorted_scores = sorted(scores)
 
-    k_standard = math.ceil((n_calib + 1) * (1.0 - alpha))
+    k_standard = max(1, math.ceil((n_calib + 1) * (1.0 - alpha) - 1e-12))
     standard_q_hat = sorted_scores[k_standard - 1] if k_standard <= n_calib else float("inf")
 
     # Apply optional upper-tail Winsorization before computing corruption-guarded quantile.

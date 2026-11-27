@@ -57,7 +57,7 @@ class TestV110SecurityHardening(unittest.TestCase):
         self.assertIn("IGNORE", normalized)
         self.assertEqual(normalize_and_strip_invisible_smuggling(payload), normalized)
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"text must be a string"):
             audit_and_normalize_untrusted_text(123)  # type: ignore[arg-type]
 
     def test_wrap_canary_untrusted_envelope_neutralizes_breakouts(self) -> None:
@@ -82,13 +82,13 @@ class TestV110SecurityHardening(unittest.TestCase):
         self.assertIn("[escaped_untrusted_tag]", defended.sanitized_body)
         self.assertIn("[neutralized_directive]", defended.sanitized_body)
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"request_id must be a non-empty string"):
             wrap_canary_untrusted_envelope("valid", request_id="   ")
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"seed_key must be a non-empty string"):
             wrap_canary_untrusted_envelope("valid", request_id="req-1", seed_key="")
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"max_chars must be > 0"):
             wrap_canary_untrusted_envelope("valid", request_id="req-1", max_chars=True)  # type: ignore[arg-type]
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"max_chars must be > 0"):
             wrap_canary_untrusted_envelope("valid", request_id="req-1", max_chars=0)
 
     def test_detect_comparative_undermining_attack_precision_and_recall(self) -> None:
@@ -123,9 +123,9 @@ class TestV110SecurityHardening(unittest.TestCase):
         self.assertIn("unicode_tag_smuggling", audit.reasons_by_id["atk_utag"])
         self.assertIn("zero_width_smuggling", audit.reasons_by_id["atk_zw"])
 
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"candidate_texts must be a non-empty mapping"):
             detect_comparative_undermining_attack({})
-        with self.assertRaises(SchemaContractViolationError):
+        with self.assertRaisesRegex(SchemaContractViolationError, r"candidate_texts keys must be non-empty strings"):
             detect_comparative_undermining_attack({"": "text"})
 
         # Exact documented snippet + role-prefix / mathematical-bold / space-broken tags vs benign i18n text.
@@ -366,7 +366,7 @@ class TestV110SecurityHardening(unittest.TestCase):
             lg_out = lg_node({"decision_input": {"order_id": 99}})
             self.assertEqual(lg_out["mdm_decision"]["slots"]["action"]["predicted"], "allow")
 
-            with self.assertRaises(SchemaContractViolationError):
+            with self.assertRaisesRegex(SchemaContractViolationError, r"tenant_id must not contain control characters"):
                 compute_decision_cache_key(
                     "mock-s1", {"x": 1}, questions, tenant_id="bad\x00tenant"
                 )
@@ -729,11 +729,11 @@ class TestV110EvalSuiteAndBenchmarkIntegrity(unittest.TestCase):
         )
         self.assertLessEqual(clipped_ci.ci_low, clipped_ci.estimate)
         self.assertLessEqual(clipped_ci.estimate, clipped_ci.ci_high)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"clip_bounds must satisfy finite low < high"):
             power_tuned_ppi_mean_ci(gold_y, gold_f, unlab_f, clip_bounds=(1.0, 0.0))
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"gold_binary_labels must contain binary values in"):
             compare_rogan_gladen_vs_ppi([float("nan"), 1, 0, 1], [0.5] * 4, [0.5] * 10)  # type: ignore[list-item]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"shift_tolerance must be finite and >= 0"):
             compare_rogan_gladen_vs_ppi([1, 0, 1, 0], [0.8, 0.2, 0.8, 0.2], [0.5] * 10, shift_tolerance=float("nan"))
 
     def test_paraphrase_stability_bilateral_swap_and_4stage_trajectory_judge(self) -> None:
@@ -790,9 +790,9 @@ class TestV110EvalSuiteAndBenchmarkIntegrity(unittest.TestCase):
         self.assertEqual(tie_swap.debiased_win_rate_a, 0.0)
         self.assertEqual(tie_swap.debiased_win_rate_b, 0.0)
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"stage_order must not contain duplicate stage names"):
             evaluate_4stage_trajectory_judge(traces, stage_order=("s1", "s1", "s3"))
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"duplicate trajectory_id 't_fault'"):
             evaluate_4stage_trajectory_judge([traces[0], traces[0]], stage_order=("s1", "s2", "s3"))
 
     def test_v110_benchmark_zero_rng_and_committed_gate_artifact(self) -> None:

@@ -1,6 +1,6 @@
-# Quickstart and four-paradigm backends
+# Quickstart and five-paradigm backends
 
-To run calibrated structured decisions without locking your application to a single model family, `multimodal-decision-models` (`mdm`) provides a unified `DecisionQuestion` and `CascadeDecisionOrchestrator` contract across Python, Go, and TypeScript.
+To run calibrated structured decisions without locking your application to a single model family, `multimodal-decision-models` (`mdm`) provides a unified `DecisionQuestion` and `CascadeDecisionOrchestrator` contract across Python, Go, or TypeScript SDKs.
 
 ## Understand where `mdm` fits
 
